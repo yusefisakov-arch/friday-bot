@@ -73,7 +73,7 @@ async def notion_get_tasks():
             r = await client.post(
                 f"https://api.notion.com/v1/databases/{NOTION_DBS['tasks']}/query",
                 headers=NOTION_HEADERS,
-                json={"filter": {"property": "Стату", "status": {"does_not_equal": "Готово"}}}
+                json={"page_size": 20}
             )
             data = r.json()
             tasks = []
