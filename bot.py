@@ -1,7 +1,6 @@
 import os
 import logging
-import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 from anthropic import Anthropic
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
@@ -17,10 +16,10 @@ ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 
 NOTION_DBS = {
-    "tasks": "377f8d3fa9dd80bbbc5dcb517b428339",
-    "diary": "377f8d3fa9dd800b90facd4534bf7242",
-    "finance": "377f8d3fa9dd80078babc5294417b3d4",
-    "decisions": "377f8d3fa9dd807a9ff7f91cc2c10bba"
+    "tasks": "377f8d3f-a9dd-80bb-bc5d-cb517b428339",
+    "diary": "377f8d3f-a9dd-800b-90fa-cd4534bf7242",
+    "finance": "377f8d3f-a9dd-8007-8bab-c5294417b3d4",
+    "decisions": "377f8d3f-a9dd-807a-9ff7-f91cc2c10bba"
 }
 
 NOTION_HEADERS = {
@@ -73,14 +72,18 @@ async def notion_get_tasks():
             r = await client.post(
                 f"https://api.notion.com/v1/databases/{NOTION_DBS['tasks']}/query",
                 headers=NOTION_HEADERS,
-                json={"page_size": 20}
+                json={"page_size": 20},
+                timeout=10
             )
+            if r.status_code != 200:
+                logger.error(f"Notion tasks error: {r.status_code} {r.text}")
+                return "Не удалось загрузить задачи"
             data = r.json()
             tasks = []
             for page in data.get("results", []):
                 props = page.get("properties", {})
                 name = ""
-                for key in ["Задачи", "Name", "Название"]:
+                for key in ["Задачи", "Name", "Название", "title"]:
                     if key in props and props[key].get("title"):
                         name = props[key]["title"][0]["plain_text"] if props[key]["title"] else ""
                         break
@@ -98,7 +101,7 @@ async def notion_get_tasks():
                     tasks.append(f"- {name}" + (f" (дедлайн: {deadline})" if deadline else "") + (f" [{priority}]" if priority else ""))
             return "\n".join(tasks) if tasks else "Открытых задач нет"
         except Exception as e:
-            logger.error(f"Notion tasks error: {e}")
+            logger.error(f"Notion tasks exception: {e}")
             return "Не удалось загрузить задачи"
 
 
@@ -115,8 +118,10 @@ async def notion_create_task(name, deadline=None, priority=None):
             r = await client.post(
                 "https://api.notion.com/v1/pages",
                 headers=NOTION_HEADERS,
-                json={"parent": {"database_id": NOTION_DBS["tasks"]}, "properties": props}
+                json={"parent": {"database_id": NOTION_DBS["tasks"]}, "properties": props},
+                timeout=10
             )
+            logger.info(f"Create task response: {r.status_code} {r.text[:200]}")
             return r.status_code == 200
         except Exception as e:
             logger.error(f"Notion create task error: {e}")
@@ -134,7 +139,8 @@ async def notion_create_decision(with_whom, what_decided, deadline=None, next_st
             r = await client.post(
                 "https://api.notion.com/v1/pages",
                 headers=NOTION_HEADERS,
-                json={"parent": {"database_id": NOTION_DBS["decisions"]}, "properties": props}
+                json={"parent": {"database_id": NOTION_DBS["decisions"]}, "properties": props},
+                timeout=10
             )
             return r.status_code == 200
         except Exception as e:
@@ -152,7 +158,8 @@ async def notion_create_finance(amount, category, comment=None):
             r = await client.post(
                 "https://api.notion.com/v1/pages",
                 headers=NOTION_HEADERS,
-                json={"parent": {"database_id": NOTION_DBS["finance"]}, "properties": props}
+                json={"parent": {"database_id": NOTION_DBS["finance"]}, "properties": props},
+                timeout=10
             )
             return r.status_code == 200
         except Exception as e:
@@ -169,51 +176,48 @@ async def process_message_with_tools(user_message, system):
     tools = [
         {
             "name": "create_task",
-            "description": "Создать задачу в Notion когда пользователь просит добавить задачу, напомнить или сделать что-то",
+            "description": "Создать задачу в Notion",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Название задачи"},
-                    "deadline": {"type": "string", "description": "Дедлайн в формате YYYY-MM-DD"},
-                    "priority": {"type": "string", "description": "Приоритет: Высокий, Средний, Низкий"}
+                    "name": {"type": "string"},
+                    "deadline": {"type": "string", "description": "YYYY-MM-DD"},
+                    "priority": {"type": "string", "description": "Высокий, Средний, Низкий"}
                 },
                 "required": ["name"]
             }
         },
         {
             "name": "create_decision",
-            "description": "Записать договорённость или решение когда пользователь говорит договорились, решили, обещал",
+            "description": "Записать договорённость или решение",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "with_whom": {"type": "string", "description": "С кем договорились"},
-                    "what_decided": {"type": "string", "description": "Что решили"},
-                    "deadline": {"type": "string", "description": "Дедлайн в формате YYYY-MM-DD"},
-                    "next_step": {"type": "string", "description": "Следующий шаг"}
+                    "with_whom": {"type": "string"},
+                    "what_decided": {"type": "string"},
+                    "deadline": {"type": "string", "description": "YYYY-MM-DD"},
+                    "next_step": {"type": "string"}
                 },
                 "required": ["with_whom", "what_decided"]
             }
         },
         {
             "name": "create_finance",
-            "description": "Записать финансовую операцию когда пользователь говорит потратил, заплатил, расход",
+            "description": "Записать финансовую операцию",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "amount": {"type": "string", "description": "Сумма"},
-                    "category": {"type": "string", "description": "Категория расхода"},
-                    "comment": {"type": "string", "description": "Комментарий"}
+                    "amount": {"type": "string"},
+                    "category": {"type": "string"},
+                    "comment": {"type": "string"}
                 },
                 "required": ["amount", "category"]
             }
         },
         {
             "name": "get_tasks",
-            "description": "Получить список открытых задач из Notion",
-            "input_schema": {
-                "type": "object",
-                "properties": {}
-            }
+            "description": "Получить список открытых задач",
+            "input_schema": {"type": "object", "properties": {}}
         }
     ]
 
@@ -233,38 +237,18 @@ async def process_message_with_tools(user_message, system):
             result = ""
 
             if tool_name == "create_task":
-                success = await notion_create_task(
-                    tool_input["name"],
-                    tool_input.get("deadline"),
-                    tool_input.get("priority")
-                )
-                result = "Задача создана" if success else "Ошибка создания задачи"
-
+                success = await notion_create_task(tool_input["name"], tool_input.get("deadline"), tool_input.get("priority"))
+                result = "Задача создана в Notion" if success else "Ошибка создания задачи"
             elif tool_name == "create_decision":
-                success = await notion_create_decision(
-                    tool_input["with_whom"],
-                    tool_input["what_decided"],
-                    tool_input.get("deadline"),
-                    tool_input.get("next_step")
-                )
-                result = "Решение записано" if success else "Ошибка записи решения"
-
+                success = await notion_create_decision(tool_input["with_whom"], tool_input["what_decided"], tool_input.get("deadline"), tool_input.get("next_step"))
+                result = "Решение записано в Notion" if success else "Ошибка записи решения"
             elif tool_name == "create_finance":
-                success = await notion_create_finance(
-                    tool_input["amount"],
-                    tool_input["category"],
-                    tool_input.get("comment")
-                )
+                success = await notion_create_finance(tool_input["amount"], tool_input["category"], tool_input.get("comment"))
                 result = "Финансовая запись создана" if success else "Ошибка записи финансов"
-
             elif tool_name == "get_tasks":
                 result = await notion_get_tasks()
 
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": result
-            })
+            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
 
     if tool_results:
         messages_with_tools = conversation_history + [
@@ -312,7 +296,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global conversation_history
 
     conversation_history.append({"role": "user", "content": user_message})
-
     if len(conversation_history) > 20:
         conversation_history = conversation_history[-20:]
 
