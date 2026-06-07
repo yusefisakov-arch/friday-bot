@@ -14,7 +14,6 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
 
 DB_PATH = "/app/friday.db"
-
 conversation_history = []
 
 
@@ -55,19 +54,18 @@ def db_create_task(name, deadline=None, priority=None):
     c.execute("INSERT INTO tasks (name, deadline, priority) VALUES (?, ?, ?)", (name, deadline, priority))
     conn.commit()
     conn.close()
-    return True
 
 
 def db_get_tasks():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT name, deadline, priority, status FROM tasks WHERE status != 'Готово' ORDER BY created_at DESC")
+    c.execute("SELECT name, deadline, priority FROM tasks WHERE status != 'Готово' ORDER BY created_at DESC")
     rows = c.fetchall()
     conn.close()
     if not rows:
         return "Открытых задач нет."
     result = []
-    for name, deadline, priority, status in rows:
+    for name, deadline, priority in rows:
         line = f"- {name}"
         if deadline:
             line += f" (дедлайн: {deadline})"
@@ -94,22 +92,21 @@ def db_create_decision(with_whom, what_decided, deadline=None, next_step=None):
               (with_whom, what_decided, deadline, next_step))
     conn.commit()
     conn.close()
-    return True
 
 
 def db_get_decisions():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT with_whom, what_decided, deadline, next_step FROM decisions WHERE status='Открыта' ORDER BY created_at DESC LIMIT 10")
+    c.execute("SELECT with_whom, what_decided, deadline FROM decisions WHERE status='Открыта' ORDER BY created_at DESC LIMIT 10")
     rows = c.fetchall()
     conn.close()
     if not rows:
         return "Открытых договорённостей нет."
     result = []
-    for with_whom, what_decided, deadline, next_step in rows:
+    for with_whom, what_decided, deadline in rows:
         line = f"- {with_whom}: {what_decided}"
         if deadline:
-            line += f" (дедлайн: {deadline})"
+            line += f" (до {deadline})"
         result.append(line)
     return "\n".join(result)
 
@@ -120,10 +117,9 @@ def db_create_finance(amount, category, comment=None):
     c.execute("INSERT INTO finance (amount, category, comment) VALUES (?, ?, ?)", (amount, category, comment))
     conn.commit()
     conn.close()
-    return True
 
 
-def db_get_finance_summary():
+def db_get_finance():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT amount, category, date FROM finance ORDER BY date DESC LIMIT 10")
@@ -131,90 +127,71 @@ def db_get_finance_summary():
     conn.close()
     if not rows:
         return "Финансовых записей нет."
-    result = []
-    for amount, category, date in rows:
-        result.append(f"- {category}: {amount} ({date})")
-    return "\n".join(result)
+    return "\n".join(f"- {cat}: {amt} ({date})" for amt, cat, date in rows)
+
+
+def needs_context(message):
+    keywords = ["задач", "список", "что у нас", "покажи", "напомни", "дедлайн",
+                "договор", "решени", "финанс", "потратил", "расход", "брифинг", "план"]
+    msg = message.lower()
+    return any(k in msg for k in keywords)
 
 
 def get_db_context():
     tasks = db_get_tasks()
     decisions = db_get_decisions()
-    return f"Открытые задачи:\n{tasks}\n\nОткрытые договорённости:\n{decisions}"
+    return f"Задачи:\n{tasks}\n\nДоговорённости:\n{decisions}"
 
 
-SYSTEM_PROMPT = """Ты FRIDAY — персональный исполнительный ассистент генерального директора Юсефа.
-Твоя единственная цель — помочь ему вернуть контроль над компанией, деньгами и временем и держать этот контроль.
+SYSTEM_PROMPT = """Ты FRIDAY — исполнительный ассистент Юсефа, предпринимателя (отели, апартаменты, общепит, крипто).
 
-О Юсефе:
-- Предприниматель, управляет несколькими бизнесами: отели, апартаменты, апарт-отели, общепит, крипто
-- Планирует расширение в новые сферы
-- Нуждается в помощи как по операционке так и по стратегии
-- Учится стратегическому мышлению
+Обращайся к нему "сэр". Говори как доверенный советник — прямо, коротко, без воды. Не хвали за обычные вещи. Всегда подтверждай что зафиксировал.
 
-ХАРАКТЕР:
-Прямой, жёсткий, без воды. Говоришь как доверенный советник а не как робот. Не хвалишь за обычные вещи. Не даёшь расслабиться если есть открытые проблемы. Никогда не говоришь "окей понял" и не исчезаешь — всегда подтверждаешь что зафиксировал.
+Приоритеты: финансовые риски → просроченные договорённости → зависшие задачи → хаос в планах.
 
-ПРИОРИТЕТЫ:
-1. Финансовые риски — перерасход, неоплаченные счета, сорванные сделки. Сигналишь немедленно.
-2. Забытые договорённости с клиентами — если есть обещание и дедлайн, это топ.
-3. Задачи которые зависли больше 3 дней без движения.
-4. Хаос в приоритетах — помогаешь выбрать топ-3 на завтра.
+Стиль: простой текст, без символов # ** ---, максимум 3-4 предложения. Язык — тот на котором пишет Юсеф.
 
-ИНСТРУМЕНТЫ:
-У тебя есть инструменты для управления задачами, договорённостями и финансами. Используй их когда нужно.
-
-СТИЛЬ ОТВЕТОВ:
-Коротко. Без заголовков и markdown символов. Простой текст. На русском если Юсеф пишет по-русски. Максимум 3-4 предложения если не просят подробнее.
-
-ЧЕГО НЕ ДЕЛАЕШЬ:
-Не даёшь советов вне своей зоны. Не объясняешь зачем что-то нужно. Не добавляешь воду. Не используешь символы # ** --- в тексте.
-
-Текущая дата и время: {datetime}
-
-{db_context}"""
+Дата: {datetime}{context}"""
 
 
-def process_message_with_tools(user_message, system):
+def process_message(user_message, system):
     tools = [
         {
             "name": "create_task",
-            "description": "Создать задачу когда пользователь просит добавить задачу или напомнить",
+            "description": "Создать задачу",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Название задачи"},
-                    "deadline": {"type": "string", "description": "Дедлайн в формате YYYY-MM-DD"},
-                    "priority": {"type": "string", "description": "Высокий, Средний или Низкий"}
+                    "name": {"type": "string"},
+                    "deadline": {"type": "string", "description": "YYYY-MM-DD"},
+                    "priority": {"type": "string", "description": "Высокий, Средний, Низкий"}
                 },
                 "required": ["name"]
             }
         },
         {
             "name": "get_tasks",
-            "description": "Получить список открытых задач",
+            "description": "Получить список задач",
             "input_schema": {"type": "object", "properties": {}}
         },
         {
             "name": "close_task",
-            "description": "Закрыть задачу как выполненную",
+            "description": "Закрыть задачу",
             "input_schema": {
                 "type": "object",
-                "properties": {
-                    "name_part": {"type": "string", "description": "Часть названия задачи"}
-                },
+                "properties": {"name_part": {"type": "string"}},
                 "required": ["name_part"]
             }
         },
         {
             "name": "create_decision",
-            "description": "Записать договорённость или решение",
+            "description": "Записать договорённость",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "with_whom": {"type": "string"},
                     "what_decided": {"type": "string"},
-                    "deadline": {"type": "string", "description": "YYYY-MM-DD"},
+                    "deadline": {"type": "string"},
                     "next_step": {"type": "string"}
                 },
                 "required": ["with_whom", "what_decided"]
@@ -222,7 +199,7 @@ def process_message_with_tools(user_message, system):
         },
         {
             "name": "create_finance",
-            "description": "Записать финансовую операцию",
+            "description": "Записать расход или доход",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -242,7 +219,7 @@ def process_message_with_tools(user_message, system):
 
     response = anthropic.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=2048,
+        max_tokens=1024,
         system=system,
         messages=conversation_history,
         tools=tools
@@ -251,42 +228,39 @@ def process_message_with_tools(user_message, system):
     tool_results = []
     for block in response.content:
         if block.type == "tool_use":
-            tool_name = block.name
             inp = block.input
             result = ""
-
-            if tool_name == "create_task":
+            if block.name == "create_task":
                 db_create_task(inp["name"], inp.get("deadline"), inp.get("priority"))
                 result = f"Задача создана: {inp['name']}"
-            elif tool_name == "get_tasks":
+            elif block.name == "get_tasks":
                 result = db_get_tasks()
-            elif tool_name == "close_task":
+            elif block.name == "close_task":
                 success = db_close_task(inp["name_part"])
                 result = "Задача закрыта" if success else "Задача не найдена"
-            elif tool_name == "create_decision":
+            elif block.name == "create_decision":
                 db_create_decision(inp["with_whom"], inp["what_decided"], inp.get("deadline"), inp.get("next_step"))
-                result = f"Решение записано: {inp['with_whom']} — {inp['what_decided']}"
-            elif tool_name == "create_finance":
+                result = f"Записано: {inp['with_whom']} — {inp['what_decided']}"
+            elif block.name == "create_finance":
                 db_create_finance(inp["amount"], inp["category"], inp.get("comment"))
                 result = f"Записано: {inp['category']} {inp['amount']}"
-            elif tool_name == "get_finance":
-                result = db_get_finance_summary()
-
+            elif block.name == "get_finance":
+                result = db_get_finance()
             tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
 
     if tool_results:
-        messages_with_tools = conversation_history + [
+        msgs = conversation_history + [
             {"role": "assistant", "content": response.content},
             {"role": "user", "content": tool_results}
         ]
-        final_response = anthropic.messages.create(
+        final = anthropic.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=2048,
+            max_tokens=1024,
             system=system,
-            messages=messages_with_tools,
+            messages=msgs,
             tools=tools
         )
-        return "".join(b.text for b in final_response.content if hasattr(b, "text"))
+        return "".join(b.text for b in final.content if hasattr(b, "text"))
 
     return "".join(b.text for b in response.content if hasattr(b, "text"))
 
@@ -294,7 +268,7 @@ def process_message_with_tools(user_message, system):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
         return
-    await update.message.reply_text("FRIDAY на связи. Готов к работе.")
+    await update.message.reply_text("FRIDAY на связи, сэр. Готов к работе.")
 
 
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -302,7 +276,7 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global conversation_history
     conversation_history = []
-    await update.message.reply_text("История очищена.")
+    await update.message.reply_text("История очищена, сэр.")
 
 
 async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -319,21 +293,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global conversation_history
 
     conversation_history.append({"role": "user", "content": user_message})
-    if len(conversation_history) > 20:
-        conversation_history = conversation_history[-20:]
+    if len(conversation_history) > 10:
+        conversation_history = conversation_history[-10:]
 
-    current_datetime = datetime.now().strftime("%A, %d %B %Y, %H:%M")
-    db_context = get_db_context()
-    system = SYSTEM_PROMPT.format(datetime=current_datetime, db_context=db_context)
+    current_datetime = datetime.now().strftime("%d.%m.%Y %H:%M")
+    
+    if needs_context(user_message):
+        context_str = f"\n\n{get_db_context()}"
+    else:
+        context_str = ""
+    
+    system = SYSTEM_PROMPT.format(datetime=current_datetime, context=context_str)
 
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        assistant_message = process_message_with_tools(user_message, system)
+        assistant_message = process_message(user_message, system)
         conversation_history.append({"role": "assistant", "content": assistant_message})
         await update.message.reply_text(assistant_message)
     except Exception as e:
         logger.error(f"Error: {e}")
-        await update.message.reply_text("Произошла ошибка. Попробуй ещё раз.")
+        await update.message.reply_text("Произошла ошибка, сэр. Попробуйте ещё раз.")
 
 
 def main():
