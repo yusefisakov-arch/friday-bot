@@ -1,9 +1,10 @@
 import os
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
+import asyncio
 from anthropic import Anthropic
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
 logging.basicConfig(level=logging.INFO)
@@ -50,6 +51,12 @@ def init_db():
         value TEXT NOT NULL,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS reminders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        text TEXT NOT NULL,
+        remind_at TEXT NOT NULL,
+        sent INTEGER DEFAULT 0
+    )''')
     conn.commit()
     conn.close()
 
@@ -78,6 +85,24 @@ def db_get_tasks():
         if priority:
             line += f" [{priority}]"
         result.append(line)
+    return "\n".join(result)
+
+
+def db_get_urgent_tasks():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
+    c.execute("""SELECT name, deadline, priority FROM tasks 
+                 WHERE status != 'Готово' AND deadline IS NOT NULL 
+                 AND deadline <= ? ORDER BY deadline ASC LIMIT 5""", (tomorrow,))
+    rows = c.fetchall()
+    conn.close()
+    if not rows:
+        return ""
+    result = []
+    for name, deadline, priority in rows:
+        result.append(f"- {name} (дедлайн: {deadline})")
     return "\n".join(result)
 
 
@@ -155,14 +180,30 @@ def db_get_preferences():
     return "\n".join(f"- {key}: {value}" for key, value in rows)
 
 
-def db_clear_preference(key_part):
+def db_create_reminder(text, remind_at):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("DELETE FROM preferences WHERE key LIKE ? OR value LIKE ?", (f"%{key_part}%", f"%{key_part}%"))
-    affected = c.rowcount
+    c.execute("INSERT INTO reminders (text, remind_at) VALUES (?, ?)", (text, remind_at))
     conn.commit()
     conn.close()
-    return affected > 0
+
+
+def db_get_pending_reminders():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    c.execute("SELECT id, text FROM reminders WHERE sent=0 AND remind_at <= ?", (now,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def db_mark_reminder_sent(reminder_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE reminders SET sent=1 WHERE id=?", (reminder_id,))
+    conn.commit()
+    conn.close()
 
 
 def needs_context(message):
@@ -182,10 +223,12 @@ def build_system(context_str=""):
     prefs_block = f"\n\nЗапомненные предпочтения сэра:\n{prefs}" if prefs else ""
     current_datetime = datetime.now().strftime("%d.%m.%Y %H:%M")
     return f"""Ты FRIDAY — исполнительный ассистент Юсефа, предпринимателя (отели, апартаменты, общепит, крипто).
+Сотрудники: Жанель (финансы, администрация), Эдик (исполнитель, руками), Филадельфия (всё остальное).
+При делегировании — создавай задачу с пометкой исполнителя и задачу контроля для Юсефа.
 
 Обращайся к нему "сэр". Говори как доверенный советник — прямо, коротко, без воды. Всегда подтверждай что зафиксировал.
-
 Приоритеты: финансовые риски → просроченные договорённости → зависшие задачи → хаос в планах.
+Когда создаёшь задачу с дедлайном — всегда спрашивай: "Напомнить вам за день до дедлайна, сэр?" Если говорит да — ставь напоминание автоматически на 08:00 за день до дедлайна.
 
 Стиль: простой текст, без символов # ** ---, максимум 3-4 предложения. Язык — тот на котором пишет Юсеф.
 
@@ -223,7 +266,7 @@ def process_message(user_message, system):
         },
         {
             "name": "create_decision",
-            "description": "Записать договорённость или решение",
+            "description": "Записать договорённость",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -255,14 +298,26 @@ def process_message(user_message, system):
         },
         {
             "name": "save_preference",
-            "description": "Запомнить предпочтение или важную информацию о пользователе",
+            "description": "Запомнить предпочтение или важную информацию",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "key": {"type": "string", "description": "Краткое название предпочтения"},
-                    "value": {"type": "string", "description": "Значение или описание"}
+                    "key": {"type": "string"},
+                    "value": {"type": "string"}
                 },
                 "required": ["key", "value"]
+            }
+        },
+        {
+            "name": "create_reminder",
+            "description": "Создать напоминание на конкретное время. Используй когда говорят 'напомни через X' или 'напомни в X'",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Текст напоминания"},
+                    "remind_at": {"type": "string", "description": "Время в формате YYYY-MM-DD HH:MM"}
+                },
+                "required": ["text", "remind_at"]
             }
         }
     ]
@@ -299,6 +354,9 @@ def process_message(user_message, system):
             elif block.name == "save_preference":
                 db_save_preference(inp["key"], inp["value"])
                 result = f"Запомнено: {inp['key']}"
+            elif block.name == "create_reminder":
+                db_create_reminder(inp["text"], inp["remind_at"])
+                result = f"Напоминание установлено на {inp['remind_at']}"
             tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
 
     if tool_results:
@@ -316,6 +374,47 @@ def process_message(user_message, system):
         return "".join(b.text for b in final.content if hasattr(b, "text"))
 
     return "".join(b.text for b in response.content if hasattr(b, "text"))
+
+
+async def send_morning_briefing(bot: Bot):
+    tasks = db_get_tasks()
+    urgent = db_get_urgent_tasks()
+    urgent_block = f"\nСрочные (дедлайн сегодня/завтра):\n{urgent}" if urgent else ""
+    text = f"Доброе утро, сэр. Вот что на сегодня:\n\n{tasks}{urgent_block}\n\nГотов к работе."
+    await bot.send_message(chat_id=ALLOWED_USER_ID, text=text)
+
+
+async def send_evening_briefing(bot: Bot):
+    tasks = db_get_tasks()
+    text = f"Сэр, вечерний разбор. Открытые задачи:\n\n{tasks}\n\nЧто закрыли сегодня? Что переносим?"
+    await bot.send_message(chat_id=ALLOWED_USER_ID, text=text)
+
+
+async def scheduler(bot: Bot):
+    while True:
+        now = datetime.now()
+
+        if now.hour == 8 and now.minute == 0:
+            try:
+                await send_morning_briefing(bot)
+            except Exception as e:
+                logger.error(f"Morning briefing error: {e}")
+
+        if now.hour == 21 and now.minute == 0:
+            try:
+                await send_evening_briefing(bot)
+            except Exception as e:
+                logger.error(f"Evening briefing error: {e}")
+
+        reminders = db_get_pending_reminders()
+        for reminder_id, text in reminders:
+            try:
+                await bot.send_message(chat_id=ALLOWED_USER_ID, text=f"Напоминание, сэр: {text}")
+                db_mark_reminder_sent(reminder_id)
+            except Exception as e:
+                logger.error(f"Reminder error: {e}")
+
+        await asyncio.sleep(60)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -372,9 +471,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Произошла ошибка, сэр. Попробуйте ещё раз.")
 
 
+async def post_init(application: Application):
+    asyncio.create_task(scheduler(application.bot))
+
+
 def main():
     init_db()
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("tasks", tasks))
