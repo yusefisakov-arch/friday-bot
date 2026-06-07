@@ -1,11 +1,10 @@
 import os
 import logging
+import sqlite3
 from datetime import datetime
 from anthropic import Anthropic
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
-import httpx
-import json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -13,22 +12,136 @@ logger = logging.getLogger(__name__)
 anthropic = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
-NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 
-NOTION_DBS = {
-    "tasks": "377f8d3f-a9dd-80bb-bc5d-cb517b428339",
-    "diary": "377f8d3f-a9dd-800b-90fa-cd4534bf7242",
-    "finance": "377f8d3f-a9dd-8007-8bab-c5294417b3d4",
-    "decisions": "377f8d3f-a9dd-807a-9ff7-f91cc2c10bba"
-}
-
-NOTION_HEADERS = {
-    "Authorization": f"Bearer {NOTION_TOKEN}",
-    "Content-Type": "application/json",
-    "Notion-Version": "2022-06-28"
-}
+DB_PATH = "/app/friday.db"
 
 conversation_history = []
+
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        deadline TEXT,
+        priority TEXT,
+        status TEXT DEFAULT 'Открыта',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        with_whom TEXT NOT NULL,
+        what_decided TEXT NOT NULL,
+        deadline TEXT,
+        next_step TEXT,
+        status TEXT DEFAULT 'Открыта',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS finance (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        amount TEXT NOT NULL,
+        category TEXT NOT NULL,
+        comment TEXT,
+        date TEXT DEFAULT CURRENT_DATE
+    )''')
+    conn.commit()
+    conn.close()
+
+
+def db_create_task(name, deadline=None, priority=None):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO tasks (name, deadline, priority) VALUES (?, ?, ?)", (name, deadline, priority))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def db_get_tasks():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT name, deadline, priority, status FROM tasks WHERE status != 'Готово' ORDER BY created_at DESC")
+    rows = c.fetchall()
+    conn.close()
+    if not rows:
+        return "Открытых задач нет."
+    result = []
+    for name, deadline, priority, status in rows:
+        line = f"- {name}"
+        if deadline:
+            line += f" (дедлайн: {deadline})"
+        if priority:
+            line += f" [{priority}]"
+        result.append(line)
+    return "\n".join(result)
+
+
+def db_close_task(name_part):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE tasks SET status='Готово' WHERE name LIKE ? AND status != 'Готово'", (f"%{name_part}%",))
+    affected = c.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
+
+
+def db_create_decision(with_whom, what_decided, deadline=None, next_step=None):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO decisions (with_whom, what_decided, deadline, next_step) VALUES (?, ?, ?, ?)",
+              (with_whom, what_decided, deadline, next_step))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def db_get_decisions():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT with_whom, what_decided, deadline, next_step FROM decisions WHERE status='Открыта' ORDER BY created_at DESC LIMIT 10")
+    rows = c.fetchall()
+    conn.close()
+    if not rows:
+        return "Открытых договорённостей нет."
+    result = []
+    for with_whom, what_decided, deadline, next_step in rows:
+        line = f"- {with_whom}: {what_decided}"
+        if deadline:
+            line += f" (дедлайн: {deadline})"
+        result.append(line)
+    return "\n".join(result)
+
+
+def db_create_finance(amount, category, comment=None):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO finance (amount, category, comment) VALUES (?, ?, ?)", (amount, category, comment))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def db_get_finance_summary():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT amount, category, date FROM finance ORDER BY date DESC LIMIT 10")
+    rows = c.fetchall()
+    conn.close()
+    if not rows:
+        return "Финансовых записей нет."
+    result = []
+    for amount, category, date in rows:
+        result.append(f"- {category}: {amount} ({date})")
+    return "\n".join(result)
+
+
+def get_db_context():
+    tasks = db_get_tasks()
+    decisions = db_get_decisions()
+    return f"Открытые задачи:\n{tasks}\n\nОткрытые договорённости:\n{decisions}"
+
 
 SYSTEM_PROMPT = """Ты FRIDAY — персональный исполнительный ассистент генерального директора Юсефа.
 Твоя единственная цель — помочь ему вернуть контроль над компанией, деньгами и временем и держать этот контроль.
@@ -48,12 +161,8 @@ SYSTEM_PROMPT = """Ты FRIDAY — персональный исполнител
 3. Задачи которые зависли больше 3 дней без движения.
 4. Хаос в приоритетах — помогаешь выбрать топ-3 на завтра.
 
-РАБОТА С NOTION:
-У тебя есть доступ к 4 базам данных в Notion. Используй инструменты для:
-- Создания задач когда Юсеф говорит "добавь задачу", "напомни", "нужно сделать"
-- Создания решений когда говорит "договорились", "решили", "обещал"
-- Записи финансов когда говорит "потратил", "заплатил", "расход"
-- Чтения задач для брифинга и планирования
+ИНСТРУМЕНТЫ:
+У тебя есть инструменты для управления задачами, договорённостями и финансами. Используй их когда нужно.
 
 СТИЛЬ ОТВЕТОВ:
 Коротко. Без заголовков и markdown символов. Простой текст. На русском если Юсеф пишет по-русски. Максимум 3-4 предложения если не просят подробнее.
@@ -63,128 +172,38 @@ SYSTEM_PROMPT = """Ты FRIDAY — персональный исполнител
 
 Текущая дата и время: {datetime}
 
-{notion_context}"""
+{db_context}"""
 
 
-async def notion_get_tasks():
-    async with httpx.AsyncClient() as client:
-        try:
-            r = await client.post(
-                f"https://api.notion.com/v1/databases/{NOTION_DBS['tasks']}/query",
-                headers=NOTION_HEADERS,
-                json={"page_size": 20},
-                timeout=10
-            )
-            if r.status_code != 200:
-                logger.error(f"Notion tasks error: {r.status_code} {r.text}")
-                return "Не удалось загрузить задачи"
-            data = r.json()
-            tasks = []
-            for page in data.get("results", []):
-                props = page.get("properties", {})
-                name = ""
-                for key in ["Задачи", "Name", "Название", "title"]:
-                    if key in props and props[key].get("title"):
-                        name = props[key]["title"][0]["plain_text"] if props[key]["title"] else ""
-                        break
-                deadline = ""
-                for key in ["Дедлайн", "Deadline", "Дата"]:
-                    if key in props and props[key].get("date"):
-                        deadline = props[key]["date"].get("start", "")
-                        break
-                priority = ""
-                for key in ["Приоритет", "Priority"]:
-                    if key in props and props[key].get("select"):
-                        priority = props[key]["select"].get("name", "")
-                        break
-                if name:
-                    tasks.append(f"- {name}" + (f" (дедлайн: {deadline})" if deadline else "") + (f" [{priority}]" if priority else ""))
-            return "\n".join(tasks) if tasks else "Открытых задач нет"
-        except Exception as e:
-            logger.error(f"Notion tasks exception: {e}")
-            return "Не удалось загрузить задачи"
-
-
-async def notion_create_task(name, deadline=None, priority=None):
-    props = {
-        "Задачи": {"title": [{"text": {"content": name}}]}
-    }
-    if deadline:
-        props["Дедлайн"] = {"date": {"start": deadline}}
-    if priority:
-        props["Приоритет"] = {"select": {"name": priority}}
-    async with httpx.AsyncClient() as client:
-        try:
-            r = await client.post(
-                "https://api.notion.com/v1/pages",
-                headers=NOTION_HEADERS,
-                json={"parent": {"database_id": NOTION_DBS["tasks"]}, "properties": props},
-                timeout=10
-            )
-            logger.info(f"Create task response: {r.status_code} {r.text[:200]}")
-            return r.status_code == 200
-        except Exception as e:
-            logger.error(f"Notion create task error: {e}")
-            return False
-
-
-async def notion_create_decision(with_whom, what_decided, deadline=None, next_step=None):
-    props = {
-        "Решения": {"title": [{"text": {"content": f"{with_whom}: {what_decided}"}}]}
-    }
-    if deadline:
-        props["Дедлайн"] = {"date": {"start": deadline}}
-    async with httpx.AsyncClient() as client:
-        try:
-            r = await client.post(
-                "https://api.notion.com/v1/pages",
-                headers=NOTION_HEADERS,
-                json={"parent": {"database_id": NOTION_DBS["decisions"]}, "properties": props},
-                timeout=10
-            )
-            return r.status_code == 200
-        except Exception as e:
-            logger.error(f"Notion create decision error: {e}")
-            return False
-
-
-async def notion_create_finance(amount, category, comment=None):
-    props = {
-        "Финансы": {"title": [{"text": {"content": f"{category}: {amount}"}}]},
-        "Дата": {"date": {"start": datetime.now().strftime("%Y-%m-%d")}}
-    }
-    async with httpx.AsyncClient() as client:
-        try:
-            r = await client.post(
-                "https://api.notion.com/v1/pages",
-                headers=NOTION_HEADERS,
-                json={"parent": {"database_id": NOTION_DBS["finance"]}, "properties": props},
-                timeout=10
-            )
-            return r.status_code == 200
-        except Exception as e:
-            logger.error(f"Notion create finance error: {e}")
-            return False
-
-
-async def get_notion_context():
-    tasks = await notion_get_tasks()
-    return f"Текущие открытые задачи в Notion:\n{tasks}"
-
-
-async def process_message_with_tools(user_message, system):
+def process_message_with_tools(user_message, system):
     tools = [
         {
             "name": "create_task",
-            "description": "Создать задачу в Notion",
+            "description": "Создать задачу когда пользователь просит добавить задачу или напомнить",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string"},
-                    "deadline": {"type": "string", "description": "YYYY-MM-DD"},
-                    "priority": {"type": "string", "description": "Высокий, Средний, Низкий"}
+                    "name": {"type": "string", "description": "Название задачи"},
+                    "deadline": {"type": "string", "description": "Дедлайн в формате YYYY-MM-DD"},
+                    "priority": {"type": "string", "description": "Высокий, Средний или Низкий"}
                 },
                 "required": ["name"]
+            }
+        },
+        {
+            "name": "get_tasks",
+            "description": "Получить список открытых задач",
+            "input_schema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "close_task",
+            "description": "Закрыть задачу как выполненную",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name_part": {"type": "string", "description": "Часть названия задачи"}
+                },
+                "required": ["name_part"]
             }
         },
         {
@@ -215,8 +234,8 @@ async def process_message_with_tools(user_message, system):
             }
         },
         {
-            "name": "get_tasks",
-            "description": "Получить список открытых задач",
+            "name": "get_finance",
+            "description": "Получить финансовые записи",
             "input_schema": {"type": "object", "properties": {}}
         }
     ]
@@ -233,20 +252,25 @@ async def process_message_with_tools(user_message, system):
     for block in response.content:
         if block.type == "tool_use":
             tool_name = block.name
-            tool_input = block.input
+            inp = block.input
             result = ""
 
             if tool_name == "create_task":
-                success = await notion_create_task(tool_input["name"], tool_input.get("deadline"), tool_input.get("priority"))
-                result = "Задача создана в Notion" if success else "Ошибка создания задачи"
-            elif tool_name == "create_decision":
-                success = await notion_create_decision(tool_input["with_whom"], tool_input["what_decided"], tool_input.get("deadline"), tool_input.get("next_step"))
-                result = "Решение записано в Notion" if success else "Ошибка записи решения"
-            elif tool_name == "create_finance":
-                success = await notion_create_finance(tool_input["amount"], tool_input["category"], tool_input.get("comment"))
-                result = "Финансовая запись создана" if success else "Ошибка записи финансов"
+                db_create_task(inp["name"], inp.get("deadline"), inp.get("priority"))
+                result = f"Задача создана: {inp['name']}"
             elif tool_name == "get_tasks":
-                result = await notion_get_tasks()
+                result = db_get_tasks()
+            elif tool_name == "close_task":
+                success = db_close_task(inp["name_part"])
+                result = "Задача закрыта" if success else "Задача не найдена"
+            elif tool_name == "create_decision":
+                db_create_decision(inp["with_whom"], inp["what_decided"], inp.get("deadline"), inp.get("next_step"))
+                result = f"Решение записано: {inp['with_whom']} — {inp['what_decided']}"
+            elif tool_name == "create_finance":
+                db_create_finance(inp["amount"], inp["category"], inp.get("comment"))
+                result = f"Записано: {inp['category']} {inp['amount']}"
+            elif tool_name == "get_finance":
+                result = db_get_finance_summary()
 
             tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
 
@@ -284,8 +308,7 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
         return
-    task_list = await notion_get_tasks()
-    await update.message.reply_text(task_list)
+    await update.message.reply_text(db_get_tasks())
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -300,12 +323,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conversation_history = conversation_history[-20:]
 
     current_datetime = datetime.now().strftime("%A, %d %B %Y, %H:%M")
-    notion_context = await get_notion_context()
-    system = SYSTEM_PROMPT.format(datetime=current_datetime, notion_context=notion_context)
+    db_context = get_db_context()
+    system = SYSTEM_PROMPT.format(datetime=current_datetime, db_context=db_context)
 
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        assistant_message = await process_message_with_tools(user_message, system)
+        assistant_message = process_message_with_tools(user_message, system)
         conversation_history.append({"role": "assistant", "content": assistant_message})
         await update.message.reply_text(assistant_message)
     except Exception as e:
@@ -314,12 +337,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    init_db()
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("tasks", tasks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("FRIDAY с Notion запущен!")
+    logger.info("FRIDAY запущен!")
     app.run_polling(drop_pending_updates=True)
 
 
