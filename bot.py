@@ -44,6 +44,12 @@ def init_db():
         comment TEXT,
         date TEXT DEFAULT CURRENT_DATE
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS preferences (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )''')
     conn.commit()
     conn.close()
 
@@ -130,11 +136,39 @@ def db_get_finance():
     return "\n".join(f"- {cat}: {amt} ({date})" for amt, cat, date in rows)
 
 
+def db_save_preference(key, value):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO preferences (key, value) VALUES (?, ?)", (key, value))
+    conn.commit()
+    conn.close()
+
+
+def db_get_preferences():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT key, value FROM preferences ORDER BY created_at DESC")
+    rows = c.fetchall()
+    conn.close()
+    if not rows:
+        return ""
+    return "\n".join(f"- {key}: {value}" for key, value in rows)
+
+
+def db_clear_preference(key_part):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM preferences WHERE key LIKE ? OR value LIKE ?", (f"%{key_part}%", f"%{key_part}%"))
+    affected = c.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
+
+
 def needs_context(message):
     keywords = ["задач", "список", "что у нас", "покажи", "напомни", "дедлайн",
                 "договор", "решени", "финанс", "потратил", "расход", "брифинг", "план"]
-    msg = message.lower()
-    return any(k in msg for k in keywords)
+    return any(k in message.lower() for k in keywords)
 
 
 def get_db_context():
@@ -143,15 +177,19 @@ def get_db_context():
     return f"Задачи:\n{tasks}\n\nДоговорённости:\n{decisions}"
 
 
-SYSTEM_PROMPT = """Ты FRIDAY — исполнительный ассистент Юсефа, предпринимателя (отели, апартаменты, общепит, крипто).
+def build_system(context_str=""):
+    prefs = db_get_preferences()
+    prefs_block = f"\n\nЗапомненные предпочтения сэра:\n{prefs}" if prefs else ""
+    current_datetime = datetime.now().strftime("%d.%m.%Y %H:%M")
+    return f"""Ты FRIDAY — исполнительный ассистент Юсефа, предпринимателя (отели, апартаменты, общепит, крипто).
 
-Обращайся к нему "сэр". Говори как доверенный советник — прямо, коротко, без воды. Не хвали за обычные вещи. Всегда подтверждай что зафиксировал.
+Обращайся к нему "сэр". Говори как доверенный советник — прямо, коротко, без воды. Всегда подтверждай что зафиксировал.
 
 Приоритеты: финансовые риски → просроченные договорённости → зависшие задачи → хаос в планах.
 
 Стиль: простой текст, без символов # ** ---, максимум 3-4 предложения. Язык — тот на котором пишет Юсеф.
 
-Дата: {datetime}{context}"""
+Дата: {current_datetime}{prefs_block}{context_str}"""
 
 
 def process_message(user_message, system):
@@ -176,7 +214,7 @@ def process_message(user_message, system):
         },
         {
             "name": "close_task",
-            "description": "Закрыть задачу",
+            "description": "Закрыть задачу как выполненную",
             "input_schema": {
                 "type": "object",
                 "properties": {"name_part": {"type": "string"}},
@@ -185,7 +223,7 @@ def process_message(user_message, system):
         },
         {
             "name": "create_decision",
-            "description": "Записать договорённость",
+            "description": "Записать договорённость или решение",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -214,6 +252,18 @@ def process_message(user_message, system):
             "name": "get_finance",
             "description": "Получить финансовые записи",
             "input_schema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "save_preference",
+            "description": "Запомнить предпочтение или важную информацию о пользователе",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Краткое название предпочтения"},
+                    "value": {"type": "string", "description": "Значение или описание"}
+                },
+                "required": ["key", "value"]
+            }
         }
     ]
 
@@ -246,6 +296,9 @@ def process_message(user_message, system):
                 result = f"Записано: {inp['category']} {inp['amount']}"
             elif block.name == "get_finance":
                 result = db_get_finance()
+            elif block.name == "save_preference":
+                db_save_preference(inp["key"], inp["value"])
+                result = f"Запомнено: {inp['key']}"
             tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
 
     if tool_results:
@@ -285,6 +338,16 @@ async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(db_get_tasks())
 
 
+async def memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        return
+    prefs = db_get_preferences()
+    if prefs:
+        await update.message.reply_text(f"Что я о вас знаю, сэр:\n{prefs}")
+    else:
+        await update.message.reply_text("Пока ничего не запомнено, сэр.")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
         return
@@ -296,14 +359,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(conversation_history) > 10:
         conversation_history = conversation_history[-10:]
 
-    current_datetime = datetime.now().strftime("%d.%m.%Y %H:%M")
-    
-    if needs_context(user_message):
-        context_str = f"\n\n{get_db_context()}"
-    else:
-        context_str = ""
-    
-    system = SYSTEM_PROMPT.format(datetime=current_datetime, context=context_str)
+    context_str = f"\n\n{get_db_context()}" if needs_context(user_message) else ""
+    system = build_system(context_str)
 
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -321,6 +378,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("tasks", tasks))
+    app.add_handler(CommandHandler("memory", memory))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("FRIDAY запущен!")
     app.run_polling(drop_pending_updates=True)
