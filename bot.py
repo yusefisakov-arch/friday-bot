@@ -269,7 +269,7 @@ def process_message(user_message, system):
 
     response = anthropic.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=1024,
+        max_tokens=2048,
         system=system,
         messages=conversation_history,
         tools=tools
@@ -308,7 +308,7 @@ def process_message(user_message, system):
         ]
         final = anthropic.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=1024,
+            max_tokens=2048,
             system=system,
             messages=msgs,
             tools=tools
