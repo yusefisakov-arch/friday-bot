@@ -2,6 +2,7 @@ import os
 import logging
 import psycopg2
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import asyncio
 from anthropic import Anthropic
 from telegram import Update, Bot
@@ -15,7 +16,12 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
 
 DATABASE_URL = os.environ["DATABASE_URL"]
+MSK = ZoneInfo("Europe/Moscow")
 conversation_history = []
+
+
+def now_msk():
+    return datetime.now(MSK)
 
 
 def init_db():
@@ -57,6 +63,12 @@ def init_db():
         remind_at TEXT NOT NULL,
         sent INTEGER DEFAULT 0
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS conversation_history (
+        id SERIAL PRIMARY KEY,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
     conn.commit()
     conn.close()
 
@@ -91,8 +103,8 @@ def db_get_tasks():
 def db_get_urgent_tasks():
     conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
-    tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-    today = datetime.now().strftime("%Y-%m-%d")
+    tomorrow = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
+    today = now_msk().strftime("%Y-%m-%d")
     c.execute("""SELECT name, deadline, priority FROM tasks
                  WHERE status != 'Готово' AND deadline IS NOT NULL
                  AND deadline <= %s ORDER BY deadline ASC LIMIT 5""", (tomorrow,))
@@ -114,6 +126,27 @@ def db_close_task(name_part):
     conn.commit()
     conn.close()
     return affected > 0
+
+
+def db_find_task(name_part):
+    conn = psycopg2.connect(DATABASE_URL)
+    c = conn.cursor()
+    c.execute("""SELECT name, deadline, priority, status, created_at FROM tasks
+                 WHERE name LIKE %s ORDER BY created_at DESC LIMIT 5""", (f"%{name_part}%",))
+    rows = c.fetchall()
+    conn.close()
+    if not rows:
+        return "Ничего не найдено."
+    result = []
+    for name, deadline, priority, status, created_at in rows:
+        line = f"- {name} [{status}]"
+        if deadline:
+            line += f" (дедлайн: {deadline})"
+        if priority:
+            line += f" [{priority}]"
+        line += f", создана {created_at.strftime('%d.%m.%Y')}"
+        result.append(line)
+    return "\n".join(result)
 
 
 def db_create_decision(with_whom, what_decided, deadline=None, next_step=None):
@@ -191,7 +224,7 @@ def db_create_reminder(text, remind_at):
 def db_get_pending_reminders():
     conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = now_msk().strftime("%Y-%m-%d %H:%M")
     c.execute("SELECT id, text FROM reminders WHERE sent=0 AND remind_at <= %s", (now,))
     rows = c.fetchall()
     conn.close()
@@ -202,6 +235,31 @@ def db_mark_reminder_sent(reminder_id):
     conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
     c.execute("UPDATE reminders SET sent=1 WHERE id=%s", (reminder_id,))
+    conn.commit()
+    conn.close()
+
+
+def db_save_message(role, content):
+    conn = psycopg2.connect(DATABASE_URL)
+    c = conn.cursor()
+    c.execute("INSERT INTO conversation_history (role, content) VALUES (%s, %s)", (role, content))
+    conn.commit()
+    conn.close()
+
+
+def db_get_recent_history(limit=10):
+    conn = psycopg2.connect(DATABASE_URL)
+    c = conn.cursor()
+    c.execute("SELECT role, content FROM conversation_history ORDER BY id DESC LIMIT %s", (limit,))
+    rows = c.fetchall()
+    conn.close()
+    return [{"role": role, "content": content} for role, content in reversed(rows)]
+
+
+def db_clear_history():
+    conn = psycopg2.connect(DATABASE_URL)
+    c = conn.cursor()
+    c.execute("DELETE FROM conversation_history")
     conn.commit()
     conn.close()
 
@@ -221,7 +279,7 @@ def get_db_context():
 def build_system(context_str=""):
     prefs = db_get_preferences()
     prefs_block = f"\n\nЗапомненные предпочтения сэра:\n{prefs}" if prefs else ""
-    current_datetime = datetime.now().strftime("%d.%m.%Y %H:%M")
+    current_datetime = now_msk().strftime("%d.%m.%Y %H:%M")
     return f"""Ты FRIDAY — исполнительный ассистент Юсефа, предпринимателя (отели, апартаменты, общепит, крипто).
 Сотрудники: Жанель (финансы, администрация), Эдик (исполнитель, руками), Филадельфия (всё остальное).
 При делегировании — создавай задачу с пометкой исполнителя и задачу контроля для Юсефа.
@@ -258,6 +316,15 @@ def process_message(user_message, system):
         {
             "name": "close_task",
             "description": "Закрыть задачу как выполненную",
+            "input_schema": {
+                "type": "object",
+                "properties": {"name_part": {"type": "string"}},
+                "required": ["name_part"]
+            }
+        },
+        {
+            "name": "find_task",
+            "description": "Найти задачу по части названия, включая уже закрытые. Используй чтобы проверить статус или историю задачи",
             "input_schema": {
                 "type": "object",
                 "properties": {"name_part": {"type": "string"}},
@@ -343,6 +410,8 @@ def process_message(user_message, system):
             elif block.name == "close_task":
                 success = db_close_task(inp["name_part"])
                 result = "Задача закрыта" if success else "Задача не найдена"
+            elif block.name == "find_task":
+                result = db_find_task(inp["name_part"])
             elif block.name == "create_decision":
                 db_create_decision(inp["with_whom"], inp["what_decided"], inp.get("deadline"), inp.get("next_step"))
                 result = f"Записано: {inp['with_whom']} — {inp['what_decided']}"
@@ -392,7 +461,7 @@ async def send_evening_briefing(bot: Bot):
 
 async def scheduler(bot: Bot):
     while True:
-        now = datetime.now()
+        now = now_msk()
 
         if now.hour == 8 and now.minute == 0:
             try:
@@ -428,6 +497,7 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global conversation_history
     conversation_history = []
+    db_clear_history()
     await update.message.reply_text("История очищена, сэр.")
 
 
@@ -455,6 +525,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global conversation_history
 
     conversation_history.append({"role": "user", "content": user_message})
+    db_save_message("user", user_message)
     if len(conversation_history) > 10:
         conversation_history = conversation_history[-10:]
 
@@ -465,6 +536,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         assistant_message = process_message(user_message, system)
         conversation_history.append({"role": "assistant", "content": assistant_message})
+        db_save_message("assistant", assistant_message)
         await update.message.reply_text(assistant_message)
     except Exception as e:
         logger.error(f"Error: {e}")
@@ -477,6 +549,8 @@ async def post_init(application: Application):
 
 def main():
     init_db()
+    global conversation_history
+    conversation_history = db_get_recent_history()
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clear", clear))
