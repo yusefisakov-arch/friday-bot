@@ -1,11 +1,13 @@
 import os
+import json
 import logging
 import psycopg2
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import asyncio
+from aiohttp import web
 from anthropic import Anthropic
-from telegram import Update, Bot, ReplyKeyboardMarkup
+from telegram import Update, Bot, ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
 logging.basicConfig(level=logging.INFO)
@@ -19,10 +21,22 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 MSK = ZoneInfo("Europe/Moscow")
 conversation_history = []
 
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "").rstrip("/")
+PORT = int(os.environ.get("PORT", "8080"))
+WEBAPP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp")
+
 QUICK_TASK_BUTTON = "📝 Задача"
-MAIN_KEYBOARD = ReplyKeyboardMarkup([[QUICK_TASK_BUTTON]], resize_keyboard=True)
-DEADLINE_KEYBOARD = ReplyKeyboardMarkup([["Сегодня", "Завтра"], ["Без срока"]], resize_keyboard=True)
-PRIORITY_KEYBOARD = ReplyKeyboardMarkup([["Высокий", "Средний", "Низкий"], ["Без приоритета"]], resize_keyboard=True)
+DEADLINE_KEYBOARD = ReplyKeyboardMarkup([["Сегодня", "Завтра"], ["Нет"]], resize_keyboard=True)
+PRIORITY_KEYBOARD = ReplyKeyboardMarkup([["Высокий", "Средний", "Низкий"], ["Нет"]], resize_keyboard=True)
+ASSIGNEE_KEYBOARD = ReplyKeyboardMarkup([["Жанель", "Эдик", "Филадельфия"], ["Нет"]], resize_keyboard=True)
+
+if WEBAPP_URL:
+    MAIN_KEYBOARD = ReplyKeyboardMarkup(
+        [[KeyboardButton(QUICK_TASK_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/form"))]],
+        resize_keyboard=True
+    )
+else:
+    MAIN_KEYBOARD = ReplyKeyboardMarkup([[QUICK_TASK_BUTTON]], resize_keyboard=True)
 
 
 def now_msk():
@@ -490,6 +504,17 @@ async def scheduler(bot: Bot):
         await asyncio.sleep(60)
 
 
+async def run_webapp_server():
+    app = web.Application()
+    app.router.add_get("/form", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "form.html")))
+    app.router.add_get("/", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "form.html")))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"Веб-сервер формы запущен на порту {PORT}")
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
         return
@@ -521,6 +546,48 @@ async def memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Пока ничего не запомнено, сэр.")
 
 
+def create_quick_task(name, deadline=None, priority=None, assignee=None):
+    if assignee:
+        name = f"{name} [{assignee}]"
+    db_create_task(name, deadline, priority)
+    summary = f"Записал, сэр: {name}"
+    if deadline:
+        summary += f" (дедлайн: {deadline})"
+    if priority:
+        summary += f" [{priority}]"
+    return summary
+
+
+async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
+        return
+
+    try:
+        data = json.loads(update.effective_message.web_app_data.data)
+    except (TypeError, ValueError, AttributeError):
+        await update.message.reply_text("Не понял форму, сэр. Попробуйте ещё раз.", reply_markup=MAIN_KEYBOARD)
+        return
+
+    name = (data.get("name") or "").strip()
+    if not name:
+        await update.message.reply_text("Пустое описание задачи, сэр.", reply_markup=MAIN_KEYBOARD)
+        return
+
+    deadline_raw = data.get("deadline") or ""
+    if deadline_raw == "today":
+        deadline = now_msk().strftime("%Y-%m-%d")
+    elif deadline_raw == "tomorrow":
+        deadline = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
+    else:
+        deadline = deadline_raw or None
+
+    priority = (data.get("priority") or "").strip() or None
+    assignee = (data.get("assignee") or "").strip() or None
+
+    summary = create_quick_task(name, deadline, priority, assignee)
+    await update.message.reply_text(summary, reply_markup=MAIN_KEYBOARD)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
         return
@@ -530,7 +597,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_message == QUICK_TASK_BUTTON:
         context.user_data["quick_task"] = {}
         context.user_data["quick_task_step"] = "name"
-        await update.message.reply_text("Что за задача, сэр? Напишите одной строкой.")
+        await update.message.reply_text("Описание задачи, сэр?")
         return
 
     quick_task_step = context.user_data.get("quick_task_step")
@@ -538,7 +605,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if quick_task_step == "name":
         context.user_data["quick_task"]["name"] = user_message
         context.user_data["quick_task_step"] = "deadline"
-        await update.message.reply_text("Дедлайн? (выберите или напишите дату)", reply_markup=DEADLINE_KEYBOARD)
+        await update.message.reply_text("Дедлайн? Выберите или напишите дату вручную.", reply_markup=DEADLINE_KEYBOARD)
         return
 
     if quick_task_step == "deadline":
@@ -546,26 +613,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             deadline = now_msk().strftime("%Y-%m-%d")
         elif user_message == "Завтра":
             deadline = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
-        elif user_message == "Без срока":
+        elif user_message == "Нет":
             deadline = None
         else:
             deadline = user_message
         context.user_data["quick_task"]["deadline"] = deadline
         context.user_data["quick_task_step"] = "priority"
-        await update.message.reply_text("Приоритет?", reply_markup=PRIORITY_KEYBOARD)
+        await update.message.reply_text("Приоритет? Выберите или напишите свой вариант.", reply_markup=PRIORITY_KEYBOARD)
         return
 
     if quick_task_step == "priority":
-        priority = None if user_message == "Без приоритета" else user_message
+        priority = None if user_message == "Нет" else user_message
+        context.user_data["quick_task"]["priority"] = priority
+        context.user_data["quick_task_step"] = "assignee"
+        await update.message.reply_text("Кто исполнитель? Выберите или напишите имя.", reply_markup=ASSIGNEE_KEYBOARD)
+        return
+
+    if quick_task_step == "assignee":
+        assignee = None if user_message == "Нет" else user_message
         task = context.user_data["quick_task"]
-        db_create_task(task["name"], task.get("deadline"), priority)
+        summary = create_quick_task(task["name"], task.get("deadline"), task.get("priority"), assignee)
         context.user_data["quick_task_step"] = None
         context.user_data["quick_task"] = {}
-        summary = f"Записал, сэр: {task['name']}"
-        if task.get("deadline"):
-            summary += f" (дедлайн: {task['deadline']})"
-        if priority:
-            summary += f" [{priority}]"
         await update.message.reply_text(summary, reply_markup=MAIN_KEYBOARD)
         return
 
@@ -592,6 +661,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application):
     asyncio.create_task(scheduler(application.bot))
+    asyncio.create_task(run_webapp_server())
 
 
 def main():
@@ -603,6 +673,7 @@ def main():
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("tasks", tasks))
     app.add_handler(CommandHandler("memory", memory))
+    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("FRIDAY запущен!")
     app.run_polling(drop_pending_updates=True)

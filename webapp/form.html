@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Новая задача</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--tg-theme-bg-color, #ffffff);
+    color: var(--tg-theme-text-color, #000000);
+  }
+  h2 { margin: 0 0 16px; font-size: 18px; }
+  .field { margin-bottom: 20px; }
+  label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--tg-theme-hint-color, #999999);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  textarea, input[type="text"], input[type="date"] {
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--tg-theme-hint-color, #cccccc);
+    background: var(--tg-theme-secondary-bg-color, #f0f0f0);
+    color: var(--tg-theme-text-color, #000000);
+    font-size: 16px;
+    font-family: inherit;
+  }
+  textarea { resize: vertical; min-height: 70px; }
+  .options { display: flex; flex-wrap: wrap; gap: 8px; }
+  .options button {
+    padding: 8px 14px;
+    border-radius: 18px;
+    border: 1px solid var(--tg-theme-hint-color, #cccccc);
+    background: transparent;
+    color: var(--tg-theme-text-color, #000000);
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .options button.selected {
+    background: var(--tg-theme-button-color, #2481cc);
+    color: var(--tg-theme-button-text-color, #ffffff);
+    border-color: var(--tg-theme-button-color, #2481cc);
+  }
+  .hidden { display: none; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <h2>Новая задача</h2>
+
+  <div class="field">
+    <label>Описание</label>
+    <textarea id="name" placeholder="Что нужно сделать"></textarea>
+  </div>
+
+  <div class="field">
+    <label>Дедлайн</label>
+    <div class="options" data-field="deadline">
+      <button type="button" data-value="today">Сегодня</button>
+      <button type="button" data-value="tomorrow">Завтра</button>
+      <button type="button" data-value="custom">Своя дата</button>
+      <button type="button" data-value="" class="selected">Нет</button>
+    </div>
+    <input type="date" id="deadline-custom" class="hidden">
+  </div>
+
+  <div class="field">
+    <label>Приоритет</label>
+    <div class="options" data-field="priority">
+      <button type="button" data-value="Высокий">Высокий</button>
+      <button type="button" data-value="Средний">Средний</button>
+      <button type="button" data-value="Низкий">Низкий</button>
+      <button type="button" data-value="" class="selected">Нет</button>
+    </div>
+  </div>
+
+  <div class="field">
+    <label>Исполнитель</label>
+    <div class="options" data-field="assignee">
+      <button type="button" data-value="Жанель">Жанель</button>
+      <button type="button" data-value="Эдик">Эдик</button>
+      <button type="button" data-value="Филадельфия">Филадельфия</button>
+      <button type="button" data-value="custom">Свой вариант</button>
+      <button type="button" data-value="" class="selected">Нет</button>
+    </div>
+    <input type="text" id="assignee-custom" class="hidden" placeholder="Имя">
+  </div>
+
+  <script>
+    var tg = window.Telegram.WebApp;
+    tg.ready();
+    tg.expand();
+
+    var selected = { deadline: "", priority: "", assignee: "" };
+
+    document.querySelectorAll(".options").forEach(function (group) {
+      var field = group.dataset.field;
+      group.querySelectorAll("button").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          group.querySelectorAll("button").forEach(function (b) { b.classList.remove("selected"); });
+          btn.classList.add("selected");
+          selected[field] = btn.dataset.value;
+
+          var customInput = document.getElementById(field + "-custom");
+          if (customInput) {
+            customInput.classList.toggle("hidden", btn.dataset.value !== "custom");
+          }
+        });
+      });
+    });
+
+    tg.MainButton.setText("Создать задачу");
+    tg.MainButton.show();
+    tg.MainButton.onClick(function () {
+      var name = document.getElementById("name").value.trim();
+      if (!name) {
+        tg.showAlert("Опишите задачу, сэр.");
+        return;
+      }
+
+      var deadline = selected.deadline;
+      if (deadline === "custom") {
+        deadline = document.getElementById("deadline-custom").value;
+        if (!deadline) {
+          tg.showAlert("Укажите дату или выберите другой вариант.");
+          return;
+        }
+      }
+
+      var assignee = selected.assignee;
+      if (assignee === "custom") {
+        assignee = document.getElementById("assignee-custom").value.trim();
+      }
+
+      tg.sendData(JSON.stringify({
+        name: name,
+        deadline: deadline,
+        priority: selected.priority,
+        assignee: assignee
+      }));
+    });
+  </script>
+</body>
+</html>
