@@ -8,6 +8,7 @@
 | ANTHROPIC_API_KEY | ваш ключ от Anthropic |
 | TELEGRAM_TOKEN | токен бота от BotFather |
 | ALLOWED_USER_ID | ваш Telegram ID (для безопасности) |
+| DATABASE_URL | строка подключения к PostgreSQL (Railway добавляет автоматически при подключении плагина Postgres) |
 
 ## Команды бота
 - /start — приветствие

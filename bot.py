@@ -1,6 +1,6 @@
 import os
 import logging
-import sqlite3
+import psycopg2
 from datetime import datetime, timedelta
 import asyncio
 from anthropic import Anthropic
@@ -14,45 +14,45 @@ anthropic = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
 
-DB_PATH = "/app/friday.db"
+DATABASE_URL = os.environ["DATABASE_URL"]
 conversation_history = []
 
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS tasks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         name TEXT NOT NULL,
         deadline TEXT,
         priority TEXT,
         status TEXT DEFAULT 'Открыта',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS decisions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         with_whom TEXT NOT NULL,
         what_decided TEXT NOT NULL,
         deadline TEXT,
         next_step TEXT,
         status TEXT DEFAULT 'Открыта',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS finance (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         amount TEXT NOT NULL,
         category TEXT NOT NULL,
         comment TEXT,
-        date TEXT DEFAULT CURRENT_DATE
+        date DATE DEFAULT CURRENT_DATE
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS preferences (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         key TEXT NOT NULL,
         value TEXT NOT NULL,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS reminders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         text TEXT NOT NULL,
         remind_at TEXT NOT NULL,
         sent INTEGER DEFAULT 0
@@ -62,15 +62,15 @@ def init_db():
 
 
 def db_create_task(name, deadline=None, priority=None):
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
-    c.execute("INSERT INTO tasks (name, deadline, priority) VALUES (?, ?, ?)", (name, deadline, priority))
+    c.execute("INSERT INTO tasks (name, deadline, priority) VALUES (%s, %s, %s)", (name, deadline, priority))
     conn.commit()
     conn.close()
 
 
 def db_get_tasks():
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
     c.execute("SELECT name, deadline, priority FROM tasks WHERE status != 'Готово' ORDER BY created_at DESC")
     rows = c.fetchall()
@@ -89,13 +89,13 @@ def db_get_tasks():
 
 
 def db_get_urgent_tasks():
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
     tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
     today = datetime.now().strftime("%Y-%m-%d")
-    c.execute("""SELECT name, deadline, priority FROM tasks 
-                 WHERE status != 'Готово' AND deadline IS NOT NULL 
-                 AND deadline <= ? ORDER BY deadline ASC LIMIT 5""", (tomorrow,))
+    c.execute("""SELECT name, deadline, priority FROM tasks
+                 WHERE status != 'Готово' AND deadline IS NOT NULL
+                 AND deadline <= %s ORDER BY deadline ASC LIMIT 5""", (tomorrow,))
     rows = c.fetchall()
     conn.close()
     if not rows:
@@ -107,9 +107,9 @@ def db_get_urgent_tasks():
 
 
 def db_close_task(name_part):
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
-    c.execute("UPDATE tasks SET status='Готово' WHERE name LIKE ? AND status != 'Готово'", (f"%{name_part}%",))
+    c.execute("UPDATE tasks SET status='Готово' WHERE name LIKE %s AND status != 'Готово'", (f"%{name_part}%",))
     affected = c.rowcount
     conn.commit()
     conn.close()
@@ -117,16 +117,16 @@ def db_close_task(name_part):
 
 
 def db_create_decision(with_whom, what_decided, deadline=None, next_step=None):
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
-    c.execute("INSERT INTO decisions (with_whom, what_decided, deadline, next_step) VALUES (?, ?, ?, ?)",
+    c.execute("INSERT INTO decisions (with_whom, what_decided, deadline, next_step) VALUES (%s, %s, %s, %s)",
               (with_whom, what_decided, deadline, next_step))
     conn.commit()
     conn.close()
 
 
 def db_get_decisions():
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
     c.execute("SELECT with_whom, what_decided, deadline FROM decisions WHERE status='Открыта' ORDER BY created_at DESC LIMIT 10")
     rows = c.fetchall()
@@ -143,15 +143,15 @@ def db_get_decisions():
 
 
 def db_create_finance(amount, category, comment=None):
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
-    c.execute("INSERT INTO finance (amount, category, comment) VALUES (?, ?, ?)", (amount, category, comment))
+    c.execute("INSERT INTO finance (amount, category, comment) VALUES (%s, %s, %s)", (amount, category, comment))
     conn.commit()
     conn.close()
 
 
 def db_get_finance():
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
     c.execute("SELECT amount, category, date FROM finance ORDER BY date DESC LIMIT 10")
     rows = c.fetchall()
@@ -162,15 +162,15 @@ def db_get_finance():
 
 
 def db_save_preference(key, value):
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
-    c.execute("INSERT INTO preferences (key, value) VALUES (?, ?)", (key, value))
+    c.execute("INSERT INTO preferences (key, value) VALUES (%s, %s)", (key, value))
     conn.commit()
     conn.close()
 
 
 def db_get_preferences():
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
     c.execute("SELECT key, value FROM preferences ORDER BY created_at DESC")
     rows = c.fetchall()
@@ -181,27 +181,27 @@ def db_get_preferences():
 
 
 def db_create_reminder(text, remind_at):
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
-    c.execute("INSERT INTO reminders (text, remind_at) VALUES (?, ?)", (text, remind_at))
+    c.execute("INSERT INTO reminders (text, remind_at) VALUES (%s, %s)", (text, remind_at))
     conn.commit()
     conn.close()
 
 
 def db_get_pending_reminders():
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    c.execute("SELECT id, text FROM reminders WHERE sent=0 AND remind_at <= ?", (now,))
+    c.execute("SELECT id, text FROM reminders WHERE sent=0 AND remind_at <= %s", (now,))
     rows = c.fetchall()
     conn.close()
     return rows
 
 
 def db_mark_reminder_sent(reminder_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(DATABASE_URL)
     c = conn.cursor()
-    c.execute("UPDATE reminders SET sent=1 WHERE id=?", (reminder_id,))
+    c.execute("UPDATE reminders SET sent=1 WHERE id=%s", (reminder_id,))
     conn.commit()
     conn.close()
 
