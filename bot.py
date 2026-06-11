@@ -21,6 +21,8 @@ conversation_history = []
 
 QUICK_TASK_BUTTON = "📝 Задача"
 MAIN_KEYBOARD = ReplyKeyboardMarkup([[QUICK_TASK_BUTTON]], resize_keyboard=True)
+DEADLINE_KEYBOARD = ReplyKeyboardMarkup([["Сегодня", "Завтра"], ["Без срока"]], resize_keyboard=True)
+PRIORITY_KEYBOARD = ReplyKeyboardMarkup([["Высокий", "Средний", "Низкий"], ["Без приоритета"]], resize_keyboard=True)
 
 
 def now_msk():
@@ -526,14 +528,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
 
     if user_message == QUICK_TASK_BUTTON:
-        context.user_data["awaiting_quick_task"] = True
+        context.user_data["quick_task"] = {}
+        context.user_data["quick_task_step"] = "name"
         await update.message.reply_text("Что за задача, сэр? Напишите одной строкой.")
         return
 
-    if context.user_data.get("awaiting_quick_task"):
-        context.user_data["awaiting_quick_task"] = False
-        db_create_task(user_message)
-        await update.message.reply_text(f"Записал, сэр: {user_message}")
+    quick_task_step = context.user_data.get("quick_task_step")
+
+    if quick_task_step == "name":
+        context.user_data["quick_task"]["name"] = user_message
+        context.user_data["quick_task_step"] = "deadline"
+        await update.message.reply_text("Дедлайн? (выберите или напишите дату)", reply_markup=DEADLINE_KEYBOARD)
+        return
+
+    if quick_task_step == "deadline":
+        if user_message == "Сегодня":
+            deadline = now_msk().strftime("%Y-%m-%d")
+        elif user_message == "Завтра":
+            deadline = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
+        elif user_message == "Без срока":
+            deadline = None
+        else:
+            deadline = user_message
+        context.user_data["quick_task"]["deadline"] = deadline
+        context.user_data["quick_task_step"] = "priority"
+        await update.message.reply_text("Приоритет?", reply_markup=PRIORITY_KEYBOARD)
+        return
+
+    if quick_task_step == "priority":
+        priority = None if user_message == "Без приоритета" else user_message
+        task = context.user_data["quick_task"]
+        db_create_task(task["name"], task.get("deadline"), priority)
+        context.user_data["quick_task_step"] = None
+        context.user_data["quick_task"] = {}
+        summary = f"Записал, сэр: {task['name']}"
+        if task.get("deadline"):
+            summary += f" (дедлайн: {task['deadline']})"
+        if priority:
+            summary += f" [{priority}]"
+        await update.message.reply_text(summary, reply_markup=MAIN_KEYBOARD)
         return
 
     global conversation_history
