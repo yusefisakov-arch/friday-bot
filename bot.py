@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import asyncio
 from anthropic import Anthropic
-from telegram import Update, Bot
+from telegram import Update, Bot, ReplyKeyboardMarkup
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
 logging.basicConfig(level=logging.INFO)
@@ -18,6 +18,9 @@ ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
 DATABASE_URL = os.environ["DATABASE_URL"]
 MSK = ZoneInfo("Europe/Moscow")
 conversation_history = []
+
+QUICK_TASK_BUTTON = "📝 Задача"
+MAIN_KEYBOARD = ReplyKeyboardMarkup([[QUICK_TASK_BUTTON]], resize_keyboard=True)
 
 
 def now_msk():
@@ -389,17 +392,25 @@ def process_message(user_message, system):
         }
     ]
 
-    response = anthropic.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2048,
-        system=system,
-        messages=conversation_history,
-        tools=tools
-    )
+    messages = conversation_history
+    text = ""
+    for _ in range(5):
+        response = anthropic.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2048,
+            system=system,
+            messages=messages,
+            tools=tools
+        )
 
-    tool_results = []
-    for block in response.content:
-        if block.type == "tool_use":
+        text = "".join(b.text for b in response.content if hasattr(b, "text"))
+        tool_uses = [b for b in response.content if b.type == "tool_use"]
+
+        if not tool_uses:
+            break
+
+        tool_results = []
+        for block in tool_uses:
             inp = block.input
             result = ""
             if block.name == "create_task":
@@ -428,21 +439,12 @@ def process_message(user_message, system):
                 result = f"Напоминание установлено на {inp['remind_at']}"
             tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
 
-    if tool_results:
-        msgs = conversation_history + [
+        messages = messages + [
             {"role": "assistant", "content": response.content},
             {"role": "user", "content": tool_results}
         ]
-        final = anthropic.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=2048,
-            system=system,
-            messages=msgs,
-            tools=tools
-        )
-        return "".join(b.text for b in final.content if hasattr(b, "text"))
 
-    return "".join(b.text for b in response.content if hasattr(b, "text"))
+    return text or "Готово, сэр."
 
 
 async def send_morning_briefing(bot: Bot):
@@ -489,7 +491,7 @@ async def scheduler(bot: Bot):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID and update.effective_user.id != ALLOWED_USER_ID:
         return
-    await update.message.reply_text("FRIDAY на связи, сэр. Готов к работе.")
+    await update.message.reply_text("FRIDAY на связи, сэр. Готов к работе.", reply_markup=MAIN_KEYBOARD)
 
 
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -522,6 +524,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_message = update.message.text
+
+    if user_message == QUICK_TASK_BUTTON:
+        context.user_data["awaiting_quick_task"] = True
+        await update.message.reply_text("Что за задача, сэр? Напишите одной строкой.")
+        return
+
+    if context.user_data.get("awaiting_quick_task"):
+        context.user_data["awaiting_quick_task"] = False
+        db_create_task(user_message)
+        await update.message.reply_text(f"Записал, сэр: {user_message}")
+        return
+
     global conversation_history
 
     conversation_history.append({"role": "user", "content": user_message})
