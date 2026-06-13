@@ -15,6 +15,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from telegram import Update, Bot, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, WebAppInfo
+from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
 logging.basicConfig(level=logging.INFO)
@@ -364,7 +366,7 @@ def db_get_decisions():
         return "Открытых договорённостей нет."
     result = []
     for with_whom, what_decided, deadline in rows:
-        line = f"- {with_whom}: {what_decided}"
+        line = f"- *{with_whom}*: {what_decided}"
         if deadline:
             line += f" (до {deadline})"
         result.append(line)
@@ -410,7 +412,7 @@ def db_get_finance():
         result.append(f"- {category}: {sign}{amount} ({date.strftime('%d.%m')})")
     expense = totals.get("расход", 0)
     income = totals.get("доход", 0)
-    result.append(f"\nИтого в этом месяце: расходы {expense}, доходы {income}")
+    result.append(f"\n*Итого в этом месяце:* расходы {expense}, доходы {income}")
     return "\n".join(result)
 
 
@@ -444,23 +446,23 @@ def db_get_apartments():
         return "Квартир в справочнике нет."
     result = []
     for address, owner_name, tenant_rent, owner_rent, deposit, lease_start, lease_end, utilities_fixed in rows:
-        line = f"- {address}"
+        line = f"*{address}*"
         if owner_name:
-            line += f" (собственник: {owner_name})"
+            line += f"\n  собственник: {owner_name}"
         if tenant_rent is not None:
-            line += f", аренда с квартиранта: {tenant_rent}"
+            line += f"\n  аренда с квартиранта: {tenant_rent}"
         if owner_rent is not None:
-            line += f", собственнику: {owner_rent}"
+            line += f"\n  собственнику: {owner_rent}"
         if tenant_rent is not None and owner_rent is not None:
-            line += f", маржа: {tenant_rent - owner_rent}"
+            line += f"\n  маржа: {tenant_rent - owner_rent}"
         if deposit is not None:
-            line += f", депозит: {deposit}"
+            line += f"\n  депозит: {deposit}"
         if lease_start or lease_end:
-            line += f", срок: {lease_start.strftime('%d.%m.%Y') if lease_start else '?'} – {lease_end.strftime('%d.%m.%Y') if lease_end else '?'}"
+            line += f"\n  срок: {lease_start.strftime('%d.%m.%Y') if lease_start else '?'} – {lease_end.strftime('%d.%m.%Y') if lease_end else '?'}"
         if utilities_fixed is not None:
-            line += f", фикс. коммуналка: {utilities_fixed}"
+            line += f"\n  фикс. коммуналка: {utilities_fixed}"
         result.append(line)
-    return "\n".join(result)
+    return "\n\n".join(result)
 
 
 def db_find_apartment(name_part):
@@ -513,7 +515,7 @@ def db_get_apartment_balance():
     result = []
     for currency, d in balances.items():
         balance = d["приход"] - d["расход"]
-        line = f"Касса ({currency}): {balance} (приход {d['приход']}, расход {d['расход']})"
+        line = f"*Касса ({currency}): {balance}*\nприход {d['приход']}, расход {d['расход']}"
         if currency in checks_map:
             check_date, diff = checks_map[currency]
             if diff:
@@ -584,7 +586,7 @@ def db_get_apartment_report(apartment=None, category=None, direction=None, date_
         sums[key] = sums.get(key, 0) + amount
     result.append("")
     for (currency, op_dir), total in sums.items():
-        result.append(f"Итого {op_dir} ({currency}): {total}")
+        result.append(f"*Итого {op_dir} ({currency}): {total}*")
     return "\n".join(result)
 
 
@@ -827,9 +829,23 @@ def build_system(context_str=""):
 
 Расчёт коммуналки по счётчикам (calculate_utilities) — сэр называет новые показания (свет/газ/вода, иногда отопление/горячая вода — не у всех квартир), бот сам помнит прошлые показания, считает разницу × тариф и выводит разбивку с итогом. Тарифы (utility_tariffs) единые для всех квартир — если сэр говорит "тариф на газ теперь X" — вызови set_utility_tariff; текущие тарифы — get_utility_tariffs. Если для квартиры/услуги ещё нет сохранённого показания — текущее становится базовым, стоимость в этот раз 0. Фиксированная часть коммуналки (интернет и т.п., apartments.utilities_fixed) добавляется к итогу автоматически — задаётся/обновляется через add_apartment. Разовые статьи "по платёжке" (обслуживание дома, отопление в старых домах, уборка при выселении 500-1000 и т.п.) передавай через extra_items каждый раз отдельно, они не сохраняются. После расчёта, если сэр просит записать итог в кассу — отдельно вызови record_apartment_operation (приход, категория "Коммуналка").
 
-Стиль: простой текст, без символов # ** ---, максимум 3-4 предложения. Язык — тот на котором пишет Юсеф.
+Стиль: простой текст, язык — тот на котором пишет Юсеф. Для выделения важного (итоговые суммы, заголовки разделов в списках/отчётах) можно использовать *жирный* (одна звёздочка с каждой стороны) — Telegram отрендерит это жирным шрифтом. Не используй markdown-таблицы, заголовки с #, ---, двойные звёздочки ** , обратные кавычки и квадратные скобки. Обычные ответы — максимум 3-4 предложения; для списков/отчётов длина может быть больше.
 
 Дата: {current_datetime}{prefs_block}{context_str}"""
+
+
+async def reply_md(message, text, **kwargs):
+    try:
+        await message.reply_text(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
+    except BadRequest:
+        await message.reply_text(text, **kwargs)
+
+
+async def send_md(bot, chat_id, text, **kwargs):
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN, **kwargs)
+    except BadRequest:
+        await bot.send_message(chat_id=chat_id, text=text, **kwargs)
 
 
 def make_chart(title, chart_type, labels, values):
@@ -1281,22 +1297,28 @@ def process_message(user_message, system):
 async def send_morning_briefing(bot: Bot):
     tasks = db_get_tasks()
     urgent = db_get_urgent_tasks()
-    urgent_block = f"\nСрочные (дедлайн сегодня/завтра):\n{urgent}" if urgent else ""
-    text = f"Доброе утро, сэр. Вот что на сегодня:\n\n{tasks}{urgent_block}\n\nГотов к работе."
-    await bot.send_message(chat_id=ALLOWED_USER_ID, text=text)
+    text = f"*Доброе утро, сэр*\n\n*Задачи на сегодня:*\n{tasks}"
+    if urgent:
+        text += f"\n\n*Срочное (дедлайн сегодня/завтра):*\n{urgent}"
+    text += "\n\nГотов к работе."
+    await send_md(bot, ALLOWED_USER_ID, text)
 
 
 async def send_evening_briefing(bot: Bot):
     tasks = db_get_tasks()
-    text = f"Сэр, вечерний разбор. Открытые задачи:\n\n{tasks}\n\nЧто закрыли сегодня? Что переносим?"
-    await bot.send_message(chat_id=ALLOWED_USER_ID, text=text)
+    text = f"*Вечерний разбор, сэр*\n\n*Открытые задачи:*\n{tasks}\n\nЧто закрыли сегодня? Что переносим?"
+    await send_md(bot, ALLOWED_USER_ID, text)
 
 
 async def send_sop_reminders(bot: Bot):
     now = now_msk()
     current_month = now.strftime("%Y-%m")
-    for reminder_id, text in db_get_due_sop_reminders(now.day, current_month):
-        await bot.send_message(chat_id=ALLOWED_USER_ID, text=f"📋 Напоминание по SOP, сэр:\n{text}")
+    due = db_get_due_sop_reminders(now.day, current_month)
+    if not due:
+        return
+    lines = "\n".join(f"- {text}" for _, text in due)
+    await send_md(bot, ALLOWED_USER_ID, f"*Напоминания по SOP, сэр:*\n{lines}")
+    for reminder_id, _ in due:
         db_mark_sop_reminder_sent(reminder_id, current_month)
 
 
@@ -1307,16 +1329,16 @@ async def send_apartment_reminders(bot: Bot):
     current_month = now.strftime("%Y-%m")
     for apt_id, address, lease_start, lease_end, end_sent, last_month in db_get_apartments_for_reminders():
         if lease_start and lease_start.day == tomorrow.day and last_month != current_month:
-            await bot.send_message(
-                chat_id=ALLOWED_USER_ID,
-                text=f"Сэр, завтра аренда по {address}. Попросите у квартиранта фото счётчиков (свет, газ, вода), сделайте просчёт и договоритесь о встрече."
+            await send_md(
+                bot, ALLOWED_USER_ID,
+                text=f"Сэр, завтра аренда по *{address}*. Попросите у квартиранта фото счётчиков (свет, газ, вода), сделайте просчёт и договоритесь о встрече."
             )
             db_set_collection_reminder_sent(apt_id, current_month)
 
         if lease_end and not end_sent and today <= lease_end <= today + timedelta(days=10):
-            await bot.send_message(
-                chat_id=ALLOWED_USER_ID,
-                text=f"Сэр, по адресу {address} контракт заканчивается {lease_end.strftime('%d.%m.%Y')}. Узнайте у квартиранта про продление или выезд."
+            await send_md(
+                bot, ALLOWED_USER_ID,
+                text=f"Сэр, по адресу *{address}* контракт заканчивается *{lease_end.strftime('%d.%m.%Y')}*. Узнайте у квартиранта про продление или выезд."
             )
             db_set_lease_end_reminder_sent(apt_id)
 
@@ -1353,7 +1375,7 @@ async def scheduler(bot: Bot):
 
         for reminder_id, text in reminders:
             try:
-                await bot.send_message(chat_id=ALLOWED_USER_ID, text=f"Напоминание, сэр: {text}")
+                await send_md(bot, ALLOWED_USER_ID, f"Напоминание, сэр: {text}")
                 db_mark_reminder_sent(reminder_id)
             except Exception as e:
                 logger.error(f"Reminder error: {e}")
@@ -1412,19 +1434,19 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
-    await update.message.reply_text(db_get_tasks())
+    await reply_md(update.message, db_get_tasks())
 
 
 async def decisions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
-    await update.message.reply_text(db_get_decisions())
+    await reply_md(update.message, db_get_decisions())
 
 
 async def finance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
-    await update.message.reply_text(db_get_finance())
+    await reply_md(update.message, db_get_finance())
 
 
 async def memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1739,19 +1761,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- Кнопки мониторинга ---
     if user_message == VIEW_TASKS_BUTTON:
-        await update.message.reply_text(db_get_tasks())
+        await reply_md(update.message, db_get_tasks())
         return
 
     if user_message == VIEW_DECISIONS_BUTTON:
-        await update.message.reply_text(db_get_decisions())
+        await reply_md(update.message, db_get_decisions())
         return
 
     if user_message == VIEW_FINANCE_BUTTON:
-        await update.message.reply_text(db_get_finance())
+        await reply_md(update.message, db_get_finance())
         return
 
     if user_message == VIEW_APARTMENT_BALANCE_BUTTON:
-        await update.message.reply_text(db_get_apartment_balance())
+        await reply_md(update.message, db_get_apartment_balance())
         return
 
     global conversation_history
@@ -1769,7 +1791,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         assistant_message, chart_path = process_message(user_message, system)
         conversation_history.append({"role": "assistant", "content": assistant_message})
         db_save_message("assistant", assistant_message)
-        await update.message.reply_text(assistant_message)
+        await reply_md(update.message, assistant_message)
         if chart_path:
             try:
                 with open(chart_path, "rb") as f:
