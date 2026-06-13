@@ -156,6 +156,10 @@ def init_db():
             owner_rent NUMERIC,
             deposit NUMERIC,
             notes TEXT,
+            lease_start DATE,
+            lease_end DATE,
+            lease_end_reminder_sent BOOLEAN DEFAULT false,
+            last_collection_reminder_month TEXT,
             active BOOLEAN DEFAULT true,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
@@ -181,6 +185,30 @@ def init_db():
             comment TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS sop_reminders (
+            id SERIAL PRIMARY KEY,
+            day_of_month INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            active BOOLEAN DEFAULT true,
+            last_sent_month TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        c.execute("SELECT COUNT(*) FROM sop_reminders")
+        if c.fetchone()[0] == 0:
+            c.executemany(
+                "INSERT INTO sop_reminders (day_of_month, text) VALUES (%s, %s)",
+                [
+                    (10, "Проверить почту — отметить какие фактуры забрали: Старнет, ARAX, Газ, Газ (передача показаний), Свет"),
+                    (13, "Заполнить файл «Газ»: посмотреть суммы в банке, запросить у квартирантов фото газовых счётчиков, занести показания в таблицу и оплатить на почте"),
+                    (22, "Начать собирать фактуры за месяц"),
+                    (23, "Передать показания газа в Энергоком — звонок 1305 (номер договора + показания из файла «Газ»). Обязательно, иначе придут огромные счета!"),
+                    (24, "Отправить Михаилу фото фактур и счётчиков по квартирам: Валя Кручий, Дечебал 82/2, Florilor 1/1"),
+                    (25, "Оплатить обслуживание дома Трандафирилор 16 — срок до 25 числа включительно!"),
+                    (26, "Оплатить интернет: Старнет (почта или банк) и ARAX (только банк)"),
+                    (28, "Лев Толстой 27 — фото счётчиков у охранника, просчёт, договориться о встрече на завтра (оплата аренды+коммуналки 29 числа)"),
+                    (29, "Срок оплаты оставшихся фактур — до 29 числа (Тестемицану, Садовяну 15/1: счета за свет могут прийти 28-29 числа)"),
+                ]
+            )
         conn.commit()
     finally:
         conn.close()
@@ -201,6 +229,15 @@ def init_db():
         except Exception as e:
             conn.rollback()
             logger.warning(f"Миграция finance.amount пропущена: {e}")
+        try:
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS lease_start DATE")
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS lease_end DATE")
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS lease_end_reminder_sent BOOLEAN DEFAULT false")
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS last_collection_reminder_month TEXT")
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.warning(f"Миграция apartments lease-полей пропущена: {e}")
     finally:
         conn.close()
 
@@ -362,30 +399,35 @@ def db_get_finance():
     return "\n".join(result)
 
 
-def db_add_apartment(address, owner_name=None, tenant_rent=None, owner_rent=None, deposit=None, notes=None):
+def db_add_apartment(address, owner_name=None, tenant_rent=None, owner_rent=None, deposit=None, notes=None, lease_start=None, lease_end=None):
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("""INSERT INTO apartments (address, owner_name, tenant_rent, owner_rent, deposit, notes)
-                     VALUES (%s, %s, %s, %s, %s, %s)
+        c.execute("""INSERT INTO apartments (address, owner_name, tenant_rent, owner_rent, deposit, notes, lease_start, lease_end)
+                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                      ON CONFLICT (address) DO UPDATE SET
                          owner_name = COALESCE(EXCLUDED.owner_name, apartments.owner_name),
                          tenant_rent = COALESCE(EXCLUDED.tenant_rent, apartments.tenant_rent),
                          owner_rent = COALESCE(EXCLUDED.owner_rent, apartments.owner_rent),
                          deposit = COALESCE(EXCLUDED.deposit, apartments.deposit),
-                         notes = COALESCE(EXCLUDED.notes, apartments.notes)""",
-                  (address, owner_name, tenant_rent, owner_rent, deposit, notes))
+                         notes = COALESCE(EXCLUDED.notes, apartments.notes),
+                         lease_start = COALESCE(EXCLUDED.lease_start, apartments.lease_start),
+                         lease_end = COALESCE(EXCLUDED.lease_end, apartments.lease_end),
+                         lease_end_reminder_sent = CASE
+                             WHEN EXCLUDED.lease_end IS NOT NULL AND EXCLUDED.lease_end IS DISTINCT FROM apartments.lease_end
+                             THEN false ELSE apartments.lease_end_reminder_sent END""",
+                  (address, owner_name, tenant_rent, owner_rent, deposit, notes, lease_start, lease_end))
 
 
 def db_get_apartments():
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("""SELECT address, owner_name, tenant_rent, owner_rent, deposit
+        c.execute("""SELECT address, owner_name, tenant_rent, owner_rent, deposit, lease_start, lease_end
                      FROM apartments WHERE active ORDER BY address""")
         rows = c.fetchall()
     if not rows:
         return "Квартир в справочнике нет."
     result = []
-    for address, owner_name, tenant_rent, owner_rent, deposit in rows:
+    for address, owner_name, tenant_rent, owner_rent, deposit, lease_start, lease_end in rows:
         line = f"- {address}"
         if owner_name:
             line += f" (собственник: {owner_name})"
@@ -397,6 +439,8 @@ def db_get_apartments():
             line += f", маржа: {tenant_rent - owner_rent}"
         if deposit is not None:
             line += f", депозит: {deposit}"
+        if lease_start or lease_end:
+            line += f", срок: {lease_start.strftime('%d.%m.%Y') if lease_start else '?'} – {lease_end.strftime('%d.%m.%Y') if lease_end else '?'}"
         result.append(line)
     return "\n".join(result)
 
@@ -562,6 +606,71 @@ def db_mark_reminder_sent(reminder_id):
         c.execute("UPDATE reminders SET sent=1 WHERE id=%s", (reminder_id,))
 
 
+def db_get_sop_reminders():
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT day_of_month, text FROM sop_reminders WHERE active ORDER BY day_of_month")
+        rows = c.fetchall()
+    if not rows:
+        return "Напоминаний по SOP нет."
+    return "\n".join(f"- {day} числа: {text}" for day, text in rows)
+
+
+def db_add_sop_reminder(day_of_month, text):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("INSERT INTO sop_reminders (day_of_month, text) VALUES (%s, %s)", (day_of_month, text))
+
+
+def db_remove_sop_reminder(text_part):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT id, text FROM sop_reminders WHERE active AND text ILIKE %s", (f"%{text_part}%",))
+        rows = c.fetchall()
+        if not rows:
+            return "not_found", []
+        if len(rows) > 1:
+            return "ambiguous", [text for _, text in rows]
+        rem_id, text = rows[0]
+        c.execute("DELETE FROM sop_reminders WHERE id=%s", (rem_id,))
+        return "removed", [text]
+
+
+def db_get_due_sop_reminders(day_of_month, current_month):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""SELECT id, text FROM sop_reminders
+                     WHERE active AND day_of_month=%s
+                     AND (last_sent_month IS NULL OR last_sent_month != %s)""", (day_of_month, current_month))
+        return c.fetchall()
+
+
+def db_mark_sop_reminder_sent(reminder_id, current_month):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE sop_reminders SET last_sent_month=%s WHERE id=%s", (current_month, reminder_id))
+
+
+def db_get_apartments_for_reminders():
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""SELECT id, address, lease_start, lease_end, lease_end_reminder_sent, last_collection_reminder_month
+                     FROM apartments WHERE active""")
+        return c.fetchall()
+
+
+def db_set_collection_reminder_sent(apartment_id, current_month):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE apartments SET last_collection_reminder_month=%s WHERE id=%s", (current_month, apartment_id))
+
+
+def db_set_lease_end_reminder_sent(apartment_id):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE apartments SET lease_end_reminder_sent=true WHERE id=%s", (apartment_id,))
+
+
 def db_save_message(role, content):
     with db_conn() as conn:
         c = conn.cursor()
@@ -610,6 +719,8 @@ def build_system(context_str=""):
 При записи финансов уточняй тип (расход или доход), если это не очевидно из контекста.
 
 Учёт квартир (касса по сдаче квартир в субаренду) — отдельная система от личных финансов (finance), не путай их. Валюта операций по умолчанию MDL (лей); если сэр называет сумму в евро — указывай currency='EUR'. При записи операции по квартире уточняй направление (приход/расход) и категорию (Аренда/Коммуналка/Депозит/Прочее), если не очевидно из контекста. Если адрес квартиры не найден или найдено несколько подходящих — переспроси сэра, не выбирай сам, и предложи добавить квартиру через add_apartment, если её действительно нет в справочнике. Сверку кассы (reconcile_apartment_balance) делай только когда сэр явно называет фактическую сумму на руках.
+
+Срок аренды (lease_start/lease_end) у квартиры — это период текущего квартиранта. Когда сэр сообщает, что заехал новый квартирант "с такого-то по такое-то число", вызывай add_apartment с lease_start и lease_end (формат YYYY-MM-DD). Бот сам каждый день в 8:00 проверяет: за день до даты lease_start (по числу месяца) — напоминает собрать показания счётчиков и сделать просчёт перед встречей; а в последние 10 дней перед lease_end — напоминает спросить квартиранта про продление или выезд (один раз за контракт). Дополнительно есть регулярные ежемесячные напоминания по SOP (sop_reminders) — фиксированные задачи по числам месяца (фактуры, газ, интернет и т.д.), которые бот тоже сам присылает в 8:00. По просьбе сэра показывай список (get_sop_reminders), добавляй (add_sop_reminder) или убирай (remove_sop_reminder) такие напоминания.
 
 Стиль: простой текст, без символов # ** ---, максимум 3-4 предложения. Язык — тот на котором пишет Юсеф.
 
@@ -743,7 +854,9 @@ def process_message(user_message, system):
                     "tenant_rent": {"type": "number", "description": "Аренда, которую платит квартирант"},
                     "owner_rent": {"type": "number", "description": "Аренда, которую отдаём собственнику"},
                     "deposit": {"type": "number"},
-                    "notes": {"type": "string"}
+                    "notes": {"type": "string"},
+                    "lease_start": {"type": "string", "description": "Дата начала срока текущего квартиранта, YYYY-MM-DD"},
+                    "lease_end": {"type": "string", "description": "Дата окончания срока текущего квартиранта, YYYY-MM-DD"}
                 },
                 "required": ["address"]
             }
@@ -840,6 +953,32 @@ def process_message(user_message, system):
                 },
                 "required": ["text", "remind_at"]
             }
+        },
+        {
+            "name": "get_sop_reminders",
+            "description": "Получить список регулярных ежемесячных напоминаний по сопровождению квартир (SOP)",
+            "input_schema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "add_sop_reminder",
+            "description": "Добавить новое регулярное ежемесячное напоминание по сопровождению квартир (SOP)",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "day_of_month": {"type": "integer", "description": "День месяца, 1-31"},
+                    "text": {"type": "string"}
+                },
+                "required": ["day_of_month", "text"]
+            }
+        },
+        {
+            "name": "remove_sop_reminder",
+            "description": "Убрать регулярное напоминание по SOP по части текста",
+            "input_schema": {
+                "type": "object",
+                "properties": {"text_part": {"type": "string"}},
+                "required": ["text_part"]
+            }
         }
     ]
 
@@ -908,7 +1047,7 @@ def process_message(user_message, system):
             elif block.name == "get_finance":
                 result = db_get_finance()
             elif block.name == "add_apartment":
-                db_add_apartment(inp["address"], inp.get("owner_name"), inp.get("tenant_rent"), inp.get("owner_rent"), inp.get("deposit"), inp.get("notes"))
+                db_add_apartment(inp["address"], inp.get("owner_name"), inp.get("tenant_rent"), inp.get("owner_rent"), inp.get("deposit"), inp.get("notes"), inp.get("lease_start"), inp.get("lease_end"))
                 result = f"Квартира сохранена: {inp['address']}"
             elif block.name == "get_apartments":
                 result = db_get_apartments()
@@ -945,6 +1084,19 @@ def process_message(user_message, system):
             elif block.name == "create_reminder":
                 db_create_reminder(inp["text"], inp["remind_at"])
                 result = f"Напоминание установлено на {inp['remind_at']}"
+            elif block.name == "get_sop_reminders":
+                result = db_get_sop_reminders()
+            elif block.name == "add_sop_reminder":
+                db_add_sop_reminder(inp["day_of_month"], inp["text"])
+                result = f"Напоминание добавлено на {inp['day_of_month']} число: {inp['text']}"
+            elif block.name == "remove_sop_reminder":
+                status, items = db_remove_sop_reminder(inp["text_part"])
+                if status == "removed":
+                    result = f"Напоминание убрано: {items[0]}"
+                elif status == "ambiguous":
+                    result = "Нашлось несколько подходящих напоминаний, уточни у сэра какое убрать:\n" + "\n".join(f"- {t}" for t in items)
+                else:
+                    result = "Напоминание не найдено"
             tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
 
         messages = messages + [
@@ -969,6 +1121,35 @@ async def send_evening_briefing(bot: Bot):
     await bot.send_message(chat_id=ALLOWED_USER_ID, text=text)
 
 
+async def send_sop_reminders(bot: Bot):
+    now = now_msk()
+    current_month = now.strftime("%Y-%m")
+    for reminder_id, text in db_get_due_sop_reminders(now.day, current_month):
+        await bot.send_message(chat_id=ALLOWED_USER_ID, text=f"📋 Напоминание по SOP, сэр:\n{text}")
+        db_mark_sop_reminder_sent(reminder_id, current_month)
+
+
+async def send_apartment_reminders(bot: Bot):
+    now = now_msk()
+    today = now.date()
+    tomorrow = today + timedelta(days=1)
+    current_month = now.strftime("%Y-%m")
+    for apt_id, address, lease_start, lease_end, end_sent, last_month in db_get_apartments_for_reminders():
+        if lease_start and lease_start.day == tomorrow.day and last_month != current_month:
+            await bot.send_message(
+                chat_id=ALLOWED_USER_ID,
+                text=f"Сэр, завтра аренда по {address}. Попросите у квартиранта фото счётчиков (свет, газ, вода), сделайте просчёт и договоритесь о встрече."
+            )
+            db_set_collection_reminder_sent(apt_id, current_month)
+
+        if lease_end and not end_sent and today <= lease_end <= today + timedelta(days=10):
+            await bot.send_message(
+                chat_id=ALLOWED_USER_ID,
+                text=f"Сэр, по адресу {address} контракт заканчивается {lease_end.strftime('%d.%m.%Y')}. Узнайте у квартиранта про продление или выезд."
+            )
+            db_set_lease_end_reminder_sent(apt_id)
+
+
 async def scheduler(bot: Bot):
     while True:
         now = now_msk()
@@ -978,6 +1159,14 @@ async def scheduler(bot: Bot):
                 await send_morning_briefing(bot)
             except Exception as e:
                 logger.error(f"Morning briefing error: {e}")
+            try:
+                await send_sop_reminders(bot)
+            except Exception as e:
+                logger.error(f"SOP reminders error: {e}")
+            try:
+                await send_apartment_reminders(bot)
+            except Exception as e:
+                logger.error(f"Apartment reminders error: {e}")
 
         if now.hour == 21 and now.minute == 0:
             try:
@@ -1098,11 +1287,13 @@ def create_quick_finance(amount, category, fin_type="расход", comment=None
     return summary
 
 
-def create_quick_apartment(address, owner_name=None, tenant_rent=None, owner_rent=None, deposit=None, notes=None):
-    db_add_apartment(address, owner_name, tenant_rent, owner_rent, deposit, notes)
+def create_quick_apartment(address, owner_name=None, tenant_rent=None, owner_rent=None, deposit=None, notes=None, lease_start=None, lease_end=None):
+    db_add_apartment(address, owner_name, tenant_rent, owner_rent, deposit, notes, lease_start, lease_end)
     summary = f"Квартира сохранена, сэр: {address}"
     if tenant_rent is not None and owner_rent is not None:
         summary += f" (маржа: {tenant_rent - owner_rent})"
+    if lease_start or lease_end:
+        summary += f", срок: {lease_start or '?'} – {lease_end or '?'}"
     return summary
 
 
@@ -1180,7 +1371,7 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except (TypeError, ValueError):
                 return None
 
-        summary = create_quick_apartment(address, owner_name, _num("tenant_rent"), _num("owner_rent"), _num("deposit"), (data.get("notes") or "").strip() or None)
+        summary = create_quick_apartment(address, owner_name, _num("tenant_rent"), _num("owner_rent"), _num("deposit"), (data.get("notes") or "").strip() or None, (data.get("lease_start") or "").strip() or None, (data.get("lease_end") or "").strip() or None)
         await update.message.reply_text(summary, reply_markup=MAIN_KEYBOARD)
         return
 

@@ -158,6 +158,16 @@
     </div>
 
     <div class="field">
+      <label>Срок аренды: с</label>
+      <input type="date" id="lease-start">
+    </div>
+
+    <div class="field">
+      <label>Срок аренды: по</label>
+      <input type="date" id="lease-end">
+    </div>
+
+    <div class="field">
       <label>Заметка</label>
       <textarea id="notes" placeholder="Необязательно"></textarea>
     </div>
@@ -233,7 +243,9 @@
           tenant_rent: document.getElementById("tenant-rent").value,
           owner_rent: document.getElementById("owner-rent").value,
           deposit: document.getElementById("deposit").value,
-          notes: document.getElementById("notes").value.trim()
+          notes: document.getElementById("notes").value.trim(),
+          lease_start: document.getElementById("lease-start").value,
+          lease_end: document.getElementById("lease-end").value
         }));
         return;
       }
