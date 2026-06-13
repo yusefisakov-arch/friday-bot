@@ -160,6 +160,7 @@ def init_db():
             lease_end DATE,
             lease_end_reminder_sent BOOLEAN DEFAULT false,
             last_collection_reminder_month TEXT,
+            utilities_fixed NUMERIC,
             active BOOLEAN DEFAULT true,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
@@ -209,6 +210,19 @@ def init_db():
                     (29, "Срок оплаты оставшихся фактур — до 29 числа (Тестемицану, Садовяну 15/1: счета за свет могут прийти 28-29 числа)"),
                 ]
             )
+        c.execute('''CREATE TABLE IF NOT EXISTS utility_tariffs (
+            utility_type TEXT PRIMARY KEY,
+            tariff NUMERIC NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS apartment_meters (
+            id SERIAL PRIMARY KEY,
+            apartment_id INTEGER REFERENCES apartments(id),
+            utility_type TEXT NOT NULL,
+            last_reading NUMERIC NOT NULL,
+            last_reading_date DATE DEFAULT CURRENT_DATE,
+            UNIQUE (apartment_id, utility_type)
+        )''')
         conn.commit()
     finally:
         conn.close()
@@ -234,6 +248,7 @@ def init_db():
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS lease_end DATE")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS lease_end_reminder_sent BOOLEAN DEFAULT false")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS last_collection_reminder_month TEXT")
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS utilities_fixed NUMERIC")
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -399,11 +414,11 @@ def db_get_finance():
     return "\n".join(result)
 
 
-def db_add_apartment(address, owner_name=None, tenant_rent=None, owner_rent=None, deposit=None, notes=None, lease_start=None, lease_end=None):
+def db_add_apartment(address, owner_name=None, tenant_rent=None, owner_rent=None, deposit=None, notes=None, lease_start=None, lease_end=None, utilities_fixed=None):
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("""INSERT INTO apartments (address, owner_name, tenant_rent, owner_rent, deposit, notes, lease_start, lease_end)
-                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        c.execute("""INSERT INTO apartments (address, owner_name, tenant_rent, owner_rent, deposit, notes, lease_start, lease_end, utilities_fixed)
+                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                      ON CONFLICT (address) DO UPDATE SET
                          owner_name = COALESCE(EXCLUDED.owner_name, apartments.owner_name),
                          tenant_rent = COALESCE(EXCLUDED.tenant_rent, apartments.tenant_rent),
@@ -412,22 +427,23 @@ def db_add_apartment(address, owner_name=None, tenant_rent=None, owner_rent=None
                          notes = COALESCE(EXCLUDED.notes, apartments.notes),
                          lease_start = COALESCE(EXCLUDED.lease_start, apartments.lease_start),
                          lease_end = COALESCE(EXCLUDED.lease_end, apartments.lease_end),
+                         utilities_fixed = COALESCE(EXCLUDED.utilities_fixed, apartments.utilities_fixed),
                          lease_end_reminder_sent = CASE
                              WHEN EXCLUDED.lease_end IS NOT NULL AND EXCLUDED.lease_end IS DISTINCT FROM apartments.lease_end
                              THEN false ELSE apartments.lease_end_reminder_sent END""",
-                  (address, owner_name, tenant_rent, owner_rent, deposit, notes, lease_start, lease_end))
+                  (address, owner_name, tenant_rent, owner_rent, deposit, notes, lease_start, lease_end, utilities_fixed))
 
 
 def db_get_apartments():
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("""SELECT address, owner_name, tenant_rent, owner_rent, deposit, lease_start, lease_end
+        c.execute("""SELECT address, owner_name, tenant_rent, owner_rent, deposit, lease_start, lease_end, utilities_fixed
                      FROM apartments WHERE active ORDER BY address""")
         rows = c.fetchall()
     if not rows:
         return "Квартир в справочнике нет."
     result = []
-    for address, owner_name, tenant_rent, owner_rent, deposit, lease_start, lease_end in rows:
+    for address, owner_name, tenant_rent, owner_rent, deposit, lease_start, lease_end, utilities_fixed in rows:
         line = f"- {address}"
         if owner_name:
             line += f" (собственник: {owner_name})"
@@ -441,6 +457,8 @@ def db_get_apartments():
             line += f", депозит: {deposit}"
         if lease_start or lease_end:
             line += f", срок: {lease_start.strftime('%d.%m.%Y') if lease_start else '?'} – {lease_end.strftime('%d.%m.%Y') if lease_end else '?'}"
+        if utilities_fixed is not None:
+            line += f", фикс. коммуналка: {utilities_fixed}"
         result.append(line)
     return "\n".join(result)
 
@@ -568,6 +586,91 @@ def db_get_apartment_report(apartment=None, category=None, direction=None, date_
     for (currency, op_dir), total in sums.items():
         result.append(f"Итого {op_dir} ({currency}): {total}")
     return "\n".join(result)
+
+
+UTILITY_UNITS = {
+    "свет": "кВт·ч",
+    "газ": "м³",
+    "вода": "м³",
+    "горячая вода": "м³",
+    "отопление": "м³",
+}
+
+
+def db_get_utility_tariffs():
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT utility_type, tariff FROM utility_tariffs ORDER BY utility_type")
+        rows = c.fetchall()
+    if not rows:
+        return "Тарифы пока не заданы."
+    return "\n".join(f"- {utility_type}: {tariff} MDL/{UTILITY_UNITS.get(utility_type, 'ед.')}" for utility_type, tariff in rows)
+
+
+def db_set_utility_tariff(utility_type, tariff):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""INSERT INTO utility_tariffs (utility_type, tariff) VALUES (%s, %s)
+                     ON CONFLICT (utility_type) DO UPDATE SET tariff = EXCLUDED.tariff, updated_at = CURRENT_TIMESTAMP""",
+                  (utility_type, tariff))
+
+
+def db_calculate_utilities(apartment, readings, extra_items=None):
+    status, info = db_find_apartment(apartment)
+    if status == "not_found":
+        return "apartment_not_found", apartment, None, None
+    if status == "ambiguous":
+        return "ambiguous", info, None, None
+    apartment_id, address = info
+
+    with db_conn() as conn:
+        c = conn.cursor()
+        lines = []
+        total = 0
+
+        for item in readings:
+            utility_type = item["utility_type"]
+            new_reading = item["reading"]
+            unit = UTILITY_UNITS.get(utility_type, "ед.")
+
+            c.execute("SELECT last_reading FROM apartment_meters WHERE apartment_id=%s AND utility_type=%s", (apartment_id, utility_type))
+            row = c.fetchone()
+
+            if row is None:
+                lines.append(f"- {utility_type}: первое показание {new_reading} {unit} — сохранено как базовое, стоимость в этот раз 0")
+            else:
+                last_reading = row[0]
+                diff = new_reading - last_reading
+                if diff < 0:
+                    lines.append(f"- {utility_type}: новое показание ({new_reading}) меньше прошлого ({last_reading}) — проверьте счётчик, стоимость не посчитана")
+                else:
+                    c.execute("SELECT tariff FROM utility_tariffs WHERE utility_type=%s", (utility_type,))
+                    tariff_row = c.fetchone()
+                    if tariff_row is None:
+                        lines.append(f"- {utility_type}: {last_reading} → {new_reading} = {diff} {unit}, тариф не задан (используй set_utility_tariff)")
+                    else:
+                        tariff = tariff_row[0]
+                        cost = diff * tariff
+                        total += cost
+                        lines.append(f"- {utility_type}: {last_reading} → {new_reading} = {diff} {unit} × {tariff} = {cost} MDL")
+
+            c.execute("""INSERT INTO apartment_meters (apartment_id, utility_type, last_reading)
+                         VALUES (%s, %s, %s)
+                         ON CONFLICT (apartment_id, utility_type) DO UPDATE SET
+                             last_reading = EXCLUDED.last_reading, last_reading_date = CURRENT_DATE""",
+                      (apartment_id, utility_type, new_reading))
+
+        c.execute("SELECT utilities_fixed FROM apartments WHERE id=%s", (apartment_id,))
+        utilities_fixed = c.fetchone()[0]
+        if utilities_fixed:
+            lines.append(f"- фиксированная часть: {utilities_fixed} MDL")
+            total += utilities_fixed
+
+        for extra in (extra_items or []):
+            lines.append(f"- {extra['description']}: {extra['amount']} MDL")
+            total += extra["amount"]
+
+    return "ok", address, lines, total
 
 
 def db_save_preference(key, value):
@@ -720,7 +823,9 @@ def build_system(context_str=""):
 
 Учёт квартир (касса по сдаче квартир в субаренду) — отдельная система от личных финансов (finance), не путай их. Валюта операций по умолчанию MDL (лей); если сэр называет сумму в евро — указывай currency='EUR'. При записи операции по квартире уточняй направление (приход/расход) и категорию (Аренда/Коммуналка/Депозит/Прочее), если не очевидно из контекста. Если адрес квартиры не найден или найдено несколько подходящих — переспроси сэра, не выбирай сам, и предложи добавить квартиру через add_apartment, если её действительно нет в справочнике. Сверку кассы (reconcile_apartment_balance) делай только когда сэр явно называет фактическую сумму на руках.
 
-Срок аренды (lease_start/lease_end) у квартиры — это период текущего квартиранта. Когда сэр сообщает, что заехал новый квартирант "с такого-то по такое-то число", вызывай add_apartment с lease_start и lease_end (формат YYYY-MM-DD). Бот сам каждый день в 8:00 проверяет: за день до даты lease_start (по числу месяца) — напоминает собрать показания счётчиков и сделать просчёт перед встречей; а в последние 10 дней перед lease_end — напоминает спросить квартиранта про продление или выезд (один раз за контракт). Дополнительно есть регулярные ежемесячные напоминания по SOP (sop_reminders) — фиксированные задачи по числам месяца (фактуры, газ, интернет и т.д.), которые бот тоже сам присылает в 8:00. По просьбе сэра показывай список (get_sop_reminders), добавляй (add_sop_reminder) или убирай (remove_sop_reminder) такие напоминания.
+Срок аренды (lease_start/lease_end) у квартиры — это период текущего квартиранта. Когда сэр сообщает, что заехал новый квартирант "с такого-то по такое-то число", сначала вызови get_apartments, чтобы найти точный адрес этой квартиры как он записан в справочнике (квартира уже должна существовать), и вызови add_apartment с этим же адресом и lease_start/lease_end (формат YYYY-MM-DD) — остальные поля не указывай, они не изменятся. Если адрес не нашёлся в справочнике — переспроси сэра, не создавай новую квартиру по неточному адресу. Бот сам каждый день в 8:00 проверяет: за день до даты lease_start (по числу месяца) — напоминает собрать показания счётчиков и сделать просчёт перед встречей; а в последние 10 дней перед lease_end — напоминает спросить квартиранта про продление или выезд (один раз за контракт). Дополнительно есть регулярные ежемесячные напоминания по SOP (sop_reminders) — фиксированные задачи по числам месяца (фактуры, газ, интернет и т.д.), которые бот тоже сам присылает в 8:00. По просьбе сэра показывай список (get_sop_reminders), добавляй (add_sop_reminder) или убирай (remove_sop_reminder) такие напоминания.
+
+Расчёт коммуналки по счётчикам (calculate_utilities) — сэр называет новые показания (свет/газ/вода, иногда отопление/горячая вода — не у всех квартир), бот сам помнит прошлые показания, считает разницу × тариф и выводит разбивку с итогом. Тарифы (utility_tariffs) единые для всех квартир — если сэр говорит "тариф на газ теперь X" — вызови set_utility_tariff; текущие тарифы — get_utility_tariffs. Если для квартиры/услуги ещё нет сохранённого показания — текущее становится базовым, стоимость в этот раз 0. Фиксированная часть коммуналки (интернет и т.п., apartments.utilities_fixed) добавляется к итогу автоматически — задаётся/обновляется через add_apartment. Разовые статьи "по платёжке" (обслуживание дома, отопление в старых домах, уборка при выселении 500-1000 и т.п.) передавай через extra_items каждый раз отдельно, они не сохраняются. После расчёта, если сэр просит записать итог в кассу — отдельно вызови record_apartment_operation (приход, категория "Коммуналка").
 
 Стиль: простой текст, без символов # ** ---, максимум 3-4 предложения. Язык — тот на котором пишет Юсеф.
 
@@ -856,7 +961,8 @@ def process_message(user_message, system):
                     "deposit": {"type": "number"},
                     "notes": {"type": "string"},
                     "lease_start": {"type": "string", "description": "Дата начала срока текущего квартиранта, YYYY-MM-DD"},
-                    "lease_end": {"type": "string", "description": "Дата окончания срока текущего квартиранта, YYYY-MM-DD"}
+                    "lease_end": {"type": "string", "description": "Дата окончания срока текущего квартиранта, YYYY-MM-DD"},
+                    "utilities_fixed": {"type": "number", "description": "Фиксированная часть коммуналки в месяц (интернет и т.п.), автоматически прибавляется при расчёте через calculate_utilities"}
                 },
                 "required": ["address"]
             }
@@ -928,6 +1034,58 @@ def process_message(user_message, system):
                     "values": {"type": "array", "items": {"type": "number"}}
                 },
                 "required": ["title", "chart_type", "labels", "values"]
+            }
+        },
+        {
+            "name": "get_utility_tariffs",
+            "description": "Получить текущие тарифы на коммунальные услуги (свет, газ, вода и т.п.)",
+            "input_schema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "set_utility_tariff",
+            "description": "Задать или обновить тариф на коммунальную услугу (единый для всех квартир)",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "utility_type": {"type": "string", "description": "свет, газ, вода, отопление, горячая вода и т.п."},
+                    "tariff": {"type": "number", "description": "Цена за единицу (MDL за кВт·ч или м³)"}
+                },
+                "required": ["utility_type", "tariff"]
+            }
+        },
+        {
+            "name": "calculate_utilities",
+            "description": "Рассчитать коммуналку для квартиры по новым показаниям счётчиков. Бот сам помнит прошлые показания и считает разницу × тариф, плюс фиксированную часть квартиры и доп. статьи",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "apartment": {"type": "string", "description": "Адрес или часть адреса квартиры"},
+                    "readings": {
+                        "type": "array",
+                        "description": "Новые показания счётчиков",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "utility_type": {"type": "string", "description": "свет, газ, вода, отопление, горячая вода и т.п."},
+                                "reading": {"type": "number"}
+                            },
+                            "required": ["utility_type", "reading"]
+                        }
+                    },
+                    "extra_items": {
+                        "type": "array",
+                        "description": "Разовые дополнительные статьи: обслуживание дома по платёжке, отопление по платёжке, уборка при выселении и т.п.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "description": {"type": "string"},
+                                "amount": {"type": "number"}
+                            },
+                            "required": ["description", "amount"]
+                        }
+                    }
+                },
+                "required": ["apartment", "readings"]
             }
         },
         {
@@ -1047,7 +1205,7 @@ def process_message(user_message, system):
             elif block.name == "get_finance":
                 result = db_get_finance()
             elif block.name == "add_apartment":
-                db_add_apartment(inp["address"], inp.get("owner_name"), inp.get("tenant_rent"), inp.get("owner_rent"), inp.get("deposit"), inp.get("notes"), inp.get("lease_start"), inp.get("lease_end"))
+                db_add_apartment(inp["address"], inp.get("owner_name"), inp.get("tenant_rent"), inp.get("owner_rent"), inp.get("deposit"), inp.get("notes"), inp.get("lease_start"), inp.get("lease_end"), inp.get("utilities_fixed"))
                 result = f"Квартира сохранена: {inp['address']}"
             elif block.name == "get_apartments":
                 result = db_get_apartments()
@@ -1078,6 +1236,19 @@ def process_message(user_message, system):
             elif block.name == "generate_chart":
                 chart_path = make_chart(inp["title"], inp["chart_type"], inp["labels"], inp["values"])
                 result = "График построен, будет отправлен сэру отдельным сообщением."
+            elif block.name == "get_utility_tariffs":
+                result = db_get_utility_tariffs()
+            elif block.name == "set_utility_tariff":
+                db_set_utility_tariff(inp["utility_type"], inp["tariff"])
+                result = f"Тариф обновлён: {inp['utility_type']} — {inp['tariff']} MDL/{UTILITY_UNITS.get(inp['utility_type'], 'ед.')}"
+            elif block.name == "calculate_utilities":
+                status, info, lines, total = db_calculate_utilities(inp["apartment"], inp["readings"], inp.get("extra_items"))
+                if status == "ok":
+                    result = f"Расчёт коммуналки для {info}:\n" + "\n".join(lines) + f"\n\nИТОГО: {total} MDL"
+                elif status == "ambiguous":
+                    result = "Нашлось несколько подходящих квартир, уточни у сэра какую он имеет в виду:\n" + "\n".join(f"- {a}" for a in info)
+                else:
+                    result = f"Квартира '{info}' не найдена в справочнике. Уточни у сэра адрес или предложи добавить квартиру через add_apartment"
             elif block.name == "save_preference":
                 db_save_preference(inp["key"], inp["value"])
                 result = f"Запомнено: {inp['key']}"
