@@ -290,7 +290,7 @@ def init_db():
         conn.close()
 
 
-PRIORITY_EMOJI = {"Высокий": "🔴", "Средний": "🟡", "Низкий": "🟢"}
+PRIORITY_ORDER = {"Высокий": 0, "Средний": 1, "Низкий": 2}
 
 
 def format_deadline(deadline):
@@ -300,9 +300,8 @@ def format_deadline(deadline):
         return deadline
 
 
-def format_task_line(name, deadline, priority, assignee):
-    emoji = PRIORITY_EMOJI.get(priority, "")
-    line = f"- {emoji + ' ' if emoji else ''}{name}"
+def format_task_line(name, deadline, assignee):
+    line = f"- {name}"
     extra = []
     if deadline:
         extra.append(f"до {format_deadline(deadline)}")
@@ -323,24 +322,47 @@ def db_get_tasks():
     with db_conn() as conn:
         c = conn.cursor()
         c.execute("""SELECT name, deadline, priority, assignee FROM tasks WHERE status != 'Готово'
-                     ORDER BY (deadline IS NULL), deadline ASC, created_at DESC""")
+                     ORDER BY created_at DESC""")
         rows = c.fetchall()
     if not rows:
         return "Открытых задач нет."
-    return "\n".join(format_task_line(name, deadline, priority, assignee) for name, deadline, priority, assignee in rows)
+
+    today = now_msk().strftime("%Y-%m-%d")
+    tomorrow = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    groups = {"Срочно (сегодня и просрочено)": [], "На завтра": [], "Позже": [], "Без срока": []}
+    for row in rows:
+        deadline = row[1]
+        if deadline is None:
+            groups["Без срока"].append(row)
+        elif deadline <= today:
+            groups["Срочно (сегодня и просрочено)"].append(row)
+        elif deadline == tomorrow:
+            groups["На завтра"].append(row)
+        else:
+            groups["Позже"].append(row)
+
+    blocks = []
+    for title, items in groups.items():
+        if not items:
+            continue
+        items.sort(key=lambda r: (PRIORITY_ORDER.get(r[2], 3), r[1] or ""))
+        lines = "\n".join(format_task_line(name, deadline, assignee) for name, deadline, priority, assignee in items)
+        blocks.append(f"*{title}:*\n{lines}")
+    return "\n\n".join(blocks)
 
 
 def db_get_urgent_tasks():
     with db_conn() as conn:
         c = conn.cursor()
         tomorrow = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
-        c.execute("""SELECT name, deadline, priority, assignee FROM tasks
+        c.execute("""SELECT name, deadline, assignee FROM tasks
                      WHERE status != 'Готово' AND deadline IS NOT NULL
                      AND deadline <= %s ORDER BY deadline ASC LIMIT 5""", (tomorrow,))
         rows = c.fetchall()
     if not rows:
         return ""
-    return "\n".join(format_task_line(name, deadline, priority, assignee) for name, deadline, priority, assignee in rows)
+    return "\n".join(format_task_line(name, deadline, assignee) for name, deadline, assignee in rows)
 
 
 def db_close_task(name_part):
@@ -386,7 +408,9 @@ def db_find_task(name_part):
         return "Ничего не найдено."
     result = []
     for name, deadline, priority, assignee, status, created_at in rows:
-        line = format_task_line(name, deadline, priority, assignee)
+        line = format_task_line(name, deadline, assignee)
+        if priority:
+            line += f" [{priority}]"
         line += f" [{status}], создана {created_at.strftime('%d.%m.%Y')}"
         result.append(line)
     return "\n".join(result)
