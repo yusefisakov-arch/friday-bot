@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Новая задача</title>
+<title>Договорённость</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   * { box-sizing: border-box; }
@@ -55,11 +55,19 @@
 </style>
 </head>
 <body>
-  <h2>Новая задача</h2>
+  <h2>Новая договорённость</h2>
 
   <div class="field">
-    <label>Описание</label>
-    <textarea id="name" placeholder="Что нужно сделать"></textarea>
+    <label>С кем</label>
+    <div class="options" id="with-whom-options" data-field="with_whom">
+      <button type="button" data-value="custom" class="selected">Другое</button>
+    </div>
+    <input type="text" id="with-whom-custom" placeholder="Имя">
+  </div>
+
+  <div class="field">
+    <label>О чём договорились</label>
+    <textarea id="what-decided" placeholder="Что именно решили"></textarea>
   </div>
 
   <div class="field">
@@ -74,22 +82,8 @@
   </div>
 
   <div class="field">
-    <label>Приоритет</label>
-    <div class="options" data-field="priority">
-      <button type="button" data-value="Высокий">Высокий</button>
-      <button type="button" data-value="Средний">Средний</button>
-      <button type="button" data-value="Низкий">Низкий</button>
-      <button type="button" data-value="" class="selected">Нет</button>
-    </div>
-  </div>
-
-  <div class="field">
-    <label>Исполнитель</label>
-    <div class="options" id="assignee-options" data-field="assignee">
-      <button type="button" data-value="custom">Свой вариант</button>
-      <button type="button" data-value="" class="selected">Нет</button>
-    </div>
-    <input type="text" id="assignee-custom" class="hidden" placeholder="Имя">
+    <label>Следующий шаг</label>
+    <input type="text" id="next-step" placeholder="Необязательно">
   </div>
 
   <script>
@@ -97,16 +91,16 @@
     tg.ready();
     tg.expand();
 
-    var selected = { deadline: "", priority: "", assignee: "" };
+    var selected = { with_whom: "custom", deadline: "" };
 
-    var assigneeGroup = document.getElementById("assignee-options");
+    var whGroup = document.getElementById("with-whom-options");
     fetch("/api/staff").then(function (r) { return r.json(); }).then(function (staff) {
       staff.slice().reverse().forEach(function (name) {
         var btn = document.createElement("button");
         btn.type = "button";
         btn.dataset.value = name;
         btn.textContent = name;
-        assigneeGroup.insertBefore(btn, assigneeGroup.firstChild);
+        whGroup.insertBefore(btn, whGroup.firstChild);
       });
     }).catch(function () {});
 
@@ -119,19 +113,35 @@
         btn.classList.add("selected");
         selected[field] = btn.dataset.value;
 
-        var customInput = document.getElementById(field + "-custom");
-        if (customInput) {
+        if (field === "with_whom") {
+          var customInput = document.getElementById("with-whom-custom");
           customInput.classList.toggle("hidden", btn.dataset.value !== "custom");
+          if (btn.dataset.value !== "custom") {
+            customInput.value = btn.dataset.value;
+          } else {
+            customInput.value = "";
+          }
+        }
+
+        if (field === "deadline") {
+          var dateInput = document.getElementById("deadline-custom");
+          dateInput.classList.toggle("hidden", btn.dataset.value !== "custom");
         }
       });
     });
 
-    tg.MainButton.setText("Создать задачу");
+    tg.MainButton.setText("Записать");
     tg.MainButton.show();
     tg.MainButton.onClick(function () {
-      var name = document.getElementById("name").value.trim();
-      if (!name) {
-        tg.showAlert("Опишите задачу, сэр.");
+      var withWhom = document.getElementById("with-whom-custom").value.trim();
+      if (!withWhom) {
+        tg.showAlert("Укажите, с кем договорились, сэр.");
+        return;
+      }
+
+      var whatDecided = document.getElementById("what-decided").value.trim();
+      if (!whatDecided) {
+        tg.showAlert("Опишите, о чём договорились, сэр.");
         return;
       }
 
@@ -144,17 +154,12 @@
         }
       }
 
-      var assignee = selected.assignee;
-      if (assignee === "custom") {
-        assignee = document.getElementById("assignee-custom").value.trim();
-      }
-
       tg.sendData(JSON.stringify({
-        form: "task",
-        name: name,
+        form: "decision",
+        with_whom: withWhom,
+        what_decided: whatDecided,
         deadline: deadline,
-        priority: selected.priority,
-        assignee: assignee
+        next_step: document.getElementById("next-step").value.trim()
       }));
     });
   </script>
