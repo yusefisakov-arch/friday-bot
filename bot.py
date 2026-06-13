@@ -51,6 +51,7 @@ VIEW_FINANCE_BUTTON = "💵 Баланс"
 APARTMENT_BUTTON = "🏠 Квартиры"
 VIEW_APARTMENT_BALANCE_BUTTON = "🏦 Касса квартир"
 MOVE_IN_BUTTON = "🔑 Заселение"
+MOVE_OUT_BUTTON = "🚪 Выселение"
 
 DEADLINE_KEYBOARD = ReplyKeyboardMarkup([["Сегодня", "Завтра"], ["Нет"]], resize_keyboard=True)
 PRIORITY_KEYBOARD = ReplyKeyboardMarkup([["Высокий", "Средний", "Низкий"], ["Нет"]], resize_keyboard=True)
@@ -66,7 +67,8 @@ if WEBAPP_URL:
             [KeyboardButton(QUICK_FINANCE_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/finance")), VIEW_FINANCE_BUTTON],
             [KeyboardButton(QUICK_DECISION_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/decisions")), VIEW_DECISIONS_BUTTON],
             [KeyboardButton(APARTMENT_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/apartments")), VIEW_APARTMENT_BALANCE_BUTTON],
-            [KeyboardButton(MOVE_IN_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/move_in"))],
+            [KeyboardButton(MOVE_IN_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/move_in")),
+             KeyboardButton(MOVE_OUT_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/move_out"))],
         ],
         resize_keyboard=True,
     )
@@ -77,7 +79,7 @@ else:
             [QUICK_FINANCE_BUTTON, VIEW_FINANCE_BUTTON],
             [QUICK_DECISION_BUTTON, VIEW_DECISIONS_BUTTON],
             [APARTMENT_BUTTON, VIEW_APARTMENT_BALANCE_BUTTON],
-            [MOVE_IN_BUTTON],
+            [MOVE_IN_BUTTON, MOVE_OUT_BUTTON],
         ],
         resize_keyboard=True,
     )
@@ -520,6 +522,15 @@ def db_add_apartment(address, **fields):
                              WHEN EXCLUDED.lease_end IS NOT NULL AND EXCLUDED.lease_end IS DISTINCT FROM apartments.lease_end
                              THEN false ELSE apartments.lease_end_reminder_sent END""",
                   values)
+
+
+def db_clear_tenant(apartment_id):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""UPDATE apartments SET tenant_name=NULL, tenant_phone=NULL, tenant_phone2=NULL,
+                     lease_start=NULL, lease_end=NULL, tenant_rent=NULL, deposit=NULL,
+                     lease_end_reminder_sent=false
+                     WHERE id=%s""", (apartment_id,))
 
 
 def db_get_apartments():
@@ -1527,6 +1538,7 @@ async def run_webapp_server():
     app.router.add_get("/decisions", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "decisions.html")))
     app.router.add_get("/apartments", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "apartments.html")))
     app.router.add_get("/move_in", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "move_in.html")))
+    app.router.add_get("/move_out", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "move_out.html")))
     app.router.add_get("/", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "form.html")))
     app.router.add_get("/api/staff", get_staff)
     app.router.add_get("/api/apartments", get_apartments_api)
@@ -1639,6 +1651,34 @@ def create_quick_move_in(apartment, tenant_name=None, tenant_phone=None, tenant_
         summary += f", депозит {deposit}"
     if meters:
         summary += ". Показания на момент заселения: " + ", ".join(f"{k} {v}" for k, v in meters.items())
+    return summary
+
+
+def create_quick_move_out(apartment, move_out_date=None, meters=None, deposit_return=None, deposit_comment=None):
+    status, info = db_find_apartment(apartment)
+    if status == "not_found":
+        return f"Квартира '{apartment}' не найдена в справочнике, сэр."
+    if status == "ambiguous":
+        return "Нашлось несколько подходящих квартир: " + ", ".join(info) + ". Уточните, сэр."
+    apartment_id, address = info
+
+    summary = f"Выселение записано, сэр: {address}"
+
+    if meters:
+        readings = [{"utility_type": k, "reading": v} for k, v in meters.items()]
+        _, _, lines, total = db_calculate_utilities(address, readings)
+        if lines:
+            summary += "\n\nКоммуналка на момент выезда:\n" + "\n".join(lines)
+            summary += f"\n*Итого: {total} MDL*"
+
+    if deposit_return is not None:
+        db_record_apartment_operation(address, "расход", "Депозит", deposit_return, comment=deposit_comment, op_date=move_out_date)
+        summary += f"\n\nВозврат депозита: {deposit_return} MDL"
+        if deposit_comment:
+            summary += f" ({deposit_comment})"
+
+    db_clear_tenant(apartment_id)
+    summary += "\n\nКвартира освобождена, готова к новому заселению."
     return summary
 
 
@@ -1771,6 +1811,35 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
             meters=meters,
         )
         await update.message.reply_text(summary, reply_markup=MAIN_KEYBOARD)
+        return
+
+    if form == "move_out":
+        apartment = (data.get("apartment") or "").strip()
+        if not apartment:
+            await update.message.reply_text("Не указана квартира, сэр.", reply_markup=MAIN_KEYBOARD)
+            return
+        meters = {}
+        for utility_type, value in (data.get("meters") or {}).items():
+            try:
+                meters[utility_type] = float(value)
+            except (TypeError, ValueError):
+                pass
+
+        def _num(key):
+            value = data.get(key)
+            try:
+                return float(value) if value not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+
+        summary = create_quick_move_out(
+            apartment,
+            move_out_date=(data.get("move_out_date") or "").strip() or None,
+            meters=meters,
+            deposit_return=_num("deposit_return"),
+            deposit_comment=(data.get("deposit_comment") or "").strip() or None,
+        )
+        await reply_md(update.message, summary, reply_markup=MAIN_KEYBOARD)
         return
 
     if form == "apartment_operation":
