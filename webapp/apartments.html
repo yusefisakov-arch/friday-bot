@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Квартиры</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--tg-theme-bg-color, #ffffff);
+    color: var(--tg-theme-text-color, #000000);
+  }
+  h2 { margin: 0 0 16px; font-size: 18px; }
+  .field { margin-bottom: 20px; }
+  label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--tg-theme-hint-color, #999999);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  textarea, input[type="text"], input[type="number"], input[type="date"], select {
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--tg-theme-hint-color, #cccccc);
+    background: var(--tg-theme-secondary-bg-color, #f0f0f0);
+    color: var(--tg-theme-text-color, #000000);
+    font-size: 16px;
+    font-family: inherit;
+  }
+  textarea { resize: vertical; min-height: 70px; }
+  .options { display: flex; flex-wrap: wrap; gap: 8px; }
+  .options button {
+    padding: 8px 14px;
+    border-radius: 18px;
+    border: 1px solid var(--tg-theme-hint-color, #cccccc);
+    background: transparent;
+    color: var(--tg-theme-text-color, #000000);
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .options button.selected {
+    background: var(--tg-theme-button-color, #2481cc);
+    color: var(--tg-theme-button-text-color, #ffffff);
+    border-color: var(--tg-theme-button-color, #2481cc);
+  }
+  .hidden { display: none; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <h2>Квартиры</h2>
+
+  <div class="field">
+    <div class="options" data-field="mode">
+      <button type="button" data-value="operation" class="selected">Операция</button>
+      <button type="button" data-value="apartment_new">Новая квартира</button>
+    </div>
+  </div>
+
+  <div id="mode-operation">
+    <div class="field">
+      <label>Квартира</label>
+      <select id="apartment-select">
+        <option value="">Без квартиры</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Направление</label>
+      <div class="options" data-field="direction">
+        <button type="button" data-value="приход" class="selected">Приход</button>
+        <button type="button" data-value="расход">Расход</button>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Категория</label>
+      <div class="options" data-field="category">
+        <button type="button" data-value="Аренда">Аренда</button>
+        <button type="button" data-value="Коммуналка">Коммуналка</button>
+        <button type="button" data-value="Депозит">Депозит</button>
+        <button type="button" data-value="Прочее" class="selected">Прочее</button>
+        <button type="button" data-value="custom">Свой вариант</button>
+      </div>
+      <input type="text" id="category-custom" class="hidden" placeholder="Категория">
+    </div>
+
+    <div class="field">
+      <label>От кого / кому</label>
+      <div class="options" data-field="counterpart">
+        <button type="button" data-value="Квартирант" class="selected">Квартирант</button>
+        <button type="button" data-value="Собственник">Собственник</button>
+        <button type="button" data-value="Провайдер">Провайдер</button>
+        <button type="button" data-value="custom">Свой вариант</button>
+      </div>
+      <input type="text" id="counterpart-custom" class="hidden" placeholder="Кто">
+    </div>
+
+    <div class="field">
+      <label>Сумма</label>
+      <input type="number" id="amount" inputmode="decimal" placeholder="0">
+    </div>
+
+    <div class="field">
+      <label>Валюта</label>
+      <div class="options" data-field="currency">
+        <button type="button" data-value="MDL" class="selected">MDL</button>
+        <button type="button" data-value="EUR">EUR</button>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Дата</label>
+      <div class="options" data-field="date">
+        <button type="button" data-value="today" class="selected">Сегодня</button>
+        <button type="button" data-value="custom">Своя дата</button>
+      </div>
+      <input type="date" id="date-custom" class="hidden">
+    </div>
+
+    <div class="field">
+      <label>Комментарий</label>
+      <textarea id="comment" placeholder="Необязательно"></textarea>
+    </div>
+  </div>
+
+  <div id="mode-apartment-new" class="hidden">
+    <div class="field">
+      <label>Адрес</label>
+      <input type="text" id="address" placeholder="Адрес квартиры">
+    </div>
+
+    <div class="field">
+      <label>Собственник</label>
+      <input type="text" id="owner-name" placeholder="Имя собственника">
+    </div>
+
+    <div class="field">
+      <label>Аренда квартиранту</label>
+      <input type="number" id="tenant-rent" inputmode="decimal" placeholder="0">
+    </div>
+
+    <div class="field">
+      <label>Аренда собственнику</label>
+      <input type="number" id="owner-rent" inputmode="decimal" placeholder="0">
+    </div>
+
+    <div class="field">
+      <label>Депозит</label>
+      <input type="number" id="deposit" inputmode="decimal" placeholder="0">
+    </div>
+
+    <div class="field">
+      <label>Заметка</label>
+      <textarea id="notes" placeholder="Необязательно"></textarea>
+    </div>
+  </div>
+
+  <script>
+    var tg = window.Telegram.WebApp;
+    tg.ready();
+    tg.expand();
+
+    var selected = { mode: "operation", direction: "приход", category: "Прочее", counterpart: "Квартирант", currency: "MDL", date: "today" };
+
+    var apartmentSelect = document.getElementById("apartment-select");
+    fetch("/api/apartments").then(function (r) { return r.json(); }).then(function (apartments) {
+      apartments.forEach(function (address) {
+        var opt = document.createElement("option");
+        opt.value = address;
+        opt.textContent = address;
+        apartmentSelect.appendChild(opt);
+      });
+    }).catch(function () {});
+
+    function updateMainButton() {
+      tg.MainButton.setText(selected.mode === "apartment_new" ? "Сохранить квартиру" : "Записать операцию");
+    }
+
+    document.querySelectorAll(".options").forEach(function (group) {
+      var field = group.dataset.field;
+      group.addEventListener("click", function (e) {
+        var btn = e.target.closest("button");
+        if (!btn) return;
+        group.querySelectorAll("button").forEach(function (b) { b.classList.remove("selected"); });
+        btn.classList.add("selected");
+        selected[field] = btn.dataset.value;
+
+        if (field === "mode") {
+          document.getElementById("mode-operation").classList.toggle("hidden", btn.dataset.value !== "operation");
+          document.getElementById("mode-apartment-new").classList.toggle("hidden", btn.dataset.value !== "apartment_new");
+          updateMainButton();
+        }
+
+        if (field === "category") {
+          var customInput = document.getElementById("category-custom");
+          customInput.classList.toggle("hidden", btn.dataset.value !== "custom");
+          if (btn.dataset.value === "custom") customInput.value = "";
+        }
+
+        if (field === "counterpart") {
+          var customInput = document.getElementById("counterpart-custom");
+          customInput.classList.toggle("hidden", btn.dataset.value !== "custom");
+          if (btn.dataset.value === "custom") customInput.value = "";
+        }
+
+        if (field === "date") {
+          document.getElementById("date-custom").classList.toggle("hidden", btn.dataset.value !== "custom");
+        }
+      });
+    });
+
+    tg.MainButton.show();
+    updateMainButton();
+    tg.MainButton.onClick(function () {
+      if (selected.mode === "apartment_new") {
+        var address = document.getElementById("address").value.trim();
+        if (!address) {
+          tg.showAlert("Укажите адрес квартиры, сэр.");
+          return;
+        }
+        tg.sendData(JSON.stringify({
+          form: "apartment_new",
+          address: address,
+          owner_name: document.getElementById("owner-name").value.trim(),
+          tenant_rent: document.getElementById("tenant-rent").value,
+          owner_rent: document.getElementById("owner-rent").value,
+          deposit: document.getElementById("deposit").value,
+          notes: document.getElementById("notes").value.trim()
+        }));
+        return;
+      }
+
+      var amount = parseFloat(document.getElementById("amount").value);
+      if (!amount || amount <= 0) {
+        tg.showAlert("Укажите сумму, сэр.");
+        return;
+      }
+
+      var category = selected.category === "custom" ? document.getElementById("category-custom").value.trim() : selected.category;
+      if (!category) {
+        tg.showAlert("Укажите категорию, сэр.");
+        return;
+      }
+
+      var counterpart = selected.counterpart === "custom" ? document.getElementById("counterpart-custom").value.trim() : selected.counterpart;
+
+      var date = selected.date;
+      if (date === "custom") {
+        date = document.getElementById("date-custom").value;
+        if (!date) {
+          tg.showAlert("Укажите дату или выберите другой вариант.");
+          return;
+        }
+      }
+
+      tg.sendData(JSON.stringify({
+        form: "apartment_operation",
+        apartment: apartmentSelect.value,
+        direction: selected.direction,
+        category: category,
+        counterpart: counterpart,
+        amount: amount,
+        currency: selected.currency,
+        date: date,
+        comment: document.getElementById("comment").value.trim()
+      }));
+    });
+  </script>
+</body>
+</html>

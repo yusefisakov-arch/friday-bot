@@ -1,6 +1,8 @@
 import os
 import json
 import logging
+import uuid
+import tempfile
 from contextlib import contextmanager
 import psycopg2
 from psycopg2 import pool as pg_pool
@@ -9,6 +11,9 @@ from zoneinfo import ZoneInfo
 import asyncio
 from aiohttp import web
 from anthropic import Anthropic
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from telegram import Update, Bot, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, WebAppInfo
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
@@ -41,6 +46,8 @@ QUICK_DECISION_BUTTON = "🤝 Договорённость"
 VIEW_TASKS_BUTTON = "📋 Задачи"
 VIEW_DECISIONS_BUTTON = "📒 Договорённости"
 VIEW_FINANCE_BUTTON = "💵 Баланс"
+APARTMENT_BUTTON = "🏠 Квартиры"
+VIEW_APARTMENT_BALANCE_BUTTON = "🏦 Касса квартир"
 
 DEADLINE_KEYBOARD = ReplyKeyboardMarkup([["Сегодня", "Завтра"], ["Нет"]], resize_keyboard=True)
 PRIORITY_KEYBOARD = ReplyKeyboardMarkup([["Высокий", "Средний", "Низкий"], ["Нет"]], resize_keyboard=True)
@@ -55,6 +62,7 @@ if WEBAPP_URL:
             [KeyboardButton(QUICK_TASK_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/form")), VIEW_TASKS_BUTTON],
             [KeyboardButton(QUICK_FINANCE_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/finance")), VIEW_FINANCE_BUTTON],
             [KeyboardButton(QUICK_DECISION_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/decisions")), VIEW_DECISIONS_BUTTON],
+            [KeyboardButton(APARTMENT_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/apartments")), VIEW_APARTMENT_BALANCE_BUTTON],
         ],
         resize_keyboard=True,
     )
@@ -64,6 +72,7 @@ else:
             [QUICK_TASK_BUTTON, VIEW_TASKS_BUTTON],
             [QUICK_FINANCE_BUTTON, VIEW_FINANCE_BUTTON],
             [QUICK_DECISION_BUTTON, VIEW_DECISIONS_BUTTON],
+            [APARTMENT_BUTTON, VIEW_APARTMENT_BALANCE_BUTTON],
         ],
         resize_keyboard=True,
     )
@@ -137,6 +146,39 @@ def init_db():
             id SERIAL PRIMARY KEY,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS apartments (
+            id SERIAL PRIMARY KEY,
+            address TEXT NOT NULL UNIQUE,
+            owner_name TEXT,
+            tenant_rent NUMERIC,
+            owner_rent NUMERIC,
+            deposit NUMERIC,
+            notes TEXT,
+            active BOOLEAN DEFAULT true,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS apartment_operations (
+            id SERIAL PRIMARY KEY,
+            apartment_id INTEGER REFERENCES apartments(id),
+            op_date DATE DEFAULT CURRENT_DATE,
+            direction TEXT NOT NULL,
+            category TEXT NOT NULL,
+            counterpart TEXT,
+            amount NUMERIC NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'MDL',
+            comment TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS apartment_balance_checks (
+            id SERIAL PRIMARY KEY,
+            check_date DATE DEFAULT CURRENT_DATE,
+            currency TEXT NOT NULL,
+            expected_balance NUMERIC NOT NULL,
+            actual_balance NUMERIC NOT NULL,
+            difference NUMERIC NOT NULL,
+            comment TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
         conn.commit()
@@ -320,6 +362,170 @@ def db_get_finance():
     return "\n".join(result)
 
 
+def db_add_apartment(address, owner_name=None, tenant_rent=None, owner_rent=None, deposit=None, notes=None):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""INSERT INTO apartments (address, owner_name, tenant_rent, owner_rent, deposit, notes)
+                     VALUES (%s, %s, %s, %s, %s, %s)
+                     ON CONFLICT (address) DO UPDATE SET
+                         owner_name = COALESCE(EXCLUDED.owner_name, apartments.owner_name),
+                         tenant_rent = COALESCE(EXCLUDED.tenant_rent, apartments.tenant_rent),
+                         owner_rent = COALESCE(EXCLUDED.owner_rent, apartments.owner_rent),
+                         deposit = COALESCE(EXCLUDED.deposit, apartments.deposit),
+                         notes = COALESCE(EXCLUDED.notes, apartments.notes)""",
+                  (address, owner_name, tenant_rent, owner_rent, deposit, notes))
+
+
+def db_get_apartments():
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""SELECT address, owner_name, tenant_rent, owner_rent, deposit
+                     FROM apartments WHERE active ORDER BY address""")
+        rows = c.fetchall()
+    if not rows:
+        return "Квартир в справочнике нет."
+    result = []
+    for address, owner_name, tenant_rent, owner_rent, deposit in rows:
+        line = f"- {address}"
+        if owner_name:
+            line += f" (собственник: {owner_name})"
+        if tenant_rent is not None:
+            line += f", аренда с квартиранта: {tenant_rent}"
+        if owner_rent is not None:
+            line += f", собственнику: {owner_rent}"
+        if tenant_rent is not None and owner_rent is not None:
+            line += f", маржа: {tenant_rent - owner_rent}"
+        if deposit is not None:
+            line += f", депозит: {deposit}"
+        result.append(line)
+    return "\n".join(result)
+
+
+def db_find_apartment(name_part):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT id, address FROM apartments WHERE active AND address ILIKE %s", (f"%{name_part}%",))
+        rows = c.fetchall()
+    if not rows:
+        return "not_found", []
+    if len(rows) > 1:
+        return "ambiguous", [address for _, address in rows]
+    return "found", rows[0]
+
+
+def db_record_apartment_operation(apartment, direction, category, amount, currency="MDL", counterpart=None, op_date=None, comment=None):
+    apartment_id = None
+    apartment_address = None
+    if apartment:
+        status, info = db_find_apartment(apartment)
+        if status == "not_found":
+            return "apartment_not_found", apartment
+        if status == "ambiguous":
+            return "ambiguous", info
+        apartment_id, apartment_address = info
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""INSERT INTO apartment_operations
+                     (apartment_id, op_date, direction, category, counterpart, amount, currency, comment)
+                     VALUES (%s, COALESCE(%s, CURRENT_DATE), %s, %s, %s, %s, %s, %s)""",
+                  (apartment_id, op_date, direction, category, counterpart, amount, currency, comment))
+    return "recorded", apartment_address
+
+
+def db_get_apartment_balance():
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""SELECT currency, direction, COALESCE(SUM(amount), 0)
+                     FROM apartment_operations GROUP BY currency, direction""")
+        rows = c.fetchall()
+        c.execute("""SELECT DISTINCT ON (currency) currency, check_date, difference
+                     FROM apartment_balance_checks ORDER BY currency, check_date DESC, id DESC""")
+        checks = c.fetchall()
+    if not rows:
+        return "Операций по кассе квартир пока нет."
+    balances = {}
+    for currency, direction, total in rows:
+        d = balances.setdefault(currency, {"приход": 0, "расход": 0})
+        d[direction] = total
+    checks_map = {currency: (check_date, diff) for currency, check_date, diff in checks}
+    result = []
+    for currency, d in balances.items():
+        balance = d["приход"] - d["расход"]
+        line = f"Касса ({currency}): {balance} (приход {d['приход']}, расход {d['расход']})"
+        if currency in checks_map:
+            check_date, diff = checks_map[currency]
+            if diff:
+                line += f"\n  последняя сверка {check_date.strftime('%d.%m.%Y')}: расхождение {diff}"
+            else:
+                line += f"\n  последняя сверка {check_date.strftime('%d.%m.%Y')}: совпало"
+        result.append(line)
+    return "\n".join(result)
+
+
+def db_reconcile_apartment_balance(actual_balance, currency="MDL", comment=None):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""SELECT COALESCE(SUM(CASE WHEN direction='приход' THEN amount ELSE -amount END), 0)
+                     FROM apartment_operations WHERE currency=%s""", (currency,))
+        expected = float(c.fetchone()[0])
+        diff = actual_balance - expected
+        c.execute("""INSERT INTO apartment_balance_checks (currency, expected_balance, actual_balance, difference, comment)
+                     VALUES (%s, %s, %s, %s, %s)""",
+                  (currency, expected, actual_balance, diff, comment))
+        if diff:
+            direction = "приход" if diff > 0 else "расход"
+            c.execute("""INSERT INTO apartment_operations (direction, category, counterpart, amount, currency, comment)
+                         VALUES (%s, 'Корректировка', 'сверка кассы', %s, %s, %s)""",
+                      (direction, abs(diff), currency, comment or f"Корректировка по сверке {now_msk().strftime('%d.%m.%Y')}"))
+    return expected, actual_balance, diff
+
+
+def db_get_apartment_report(apartment=None, category=None, direction=None, date_from=None, date_to=None):
+    query = """SELECT o.op_date, a.address, o.direction, o.category, o.counterpart, o.amount, o.currency, o.comment
+               FROM apartment_operations o
+               LEFT JOIN apartments a ON a.id = o.apartment_id
+               WHERE 1=1"""
+    params = []
+    if apartment:
+        query += " AND a.address ILIKE %s"
+        params.append(f"%{apartment}%")
+    if category:
+        query += " AND o.category ILIKE %s"
+        params.append(f"%{category}%")
+    if direction:
+        query += " AND o.direction = %s"
+        params.append(direction)
+    if date_from:
+        query += " AND o.op_date >= %s"
+        params.append(date_from)
+    if date_to:
+        query += " AND o.op_date <= %s"
+        params.append(date_to)
+    query += " ORDER BY o.op_date DESC, o.id DESC LIMIT 200"
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute(query, params)
+        rows = c.fetchall()
+    if not rows:
+        return "Операций по заданным условиям не найдено."
+    result = []
+    sums = {}
+    for op_date, address, op_dir, op_cat, counterpart, amount, currency, op_comment in rows:
+        sign = "+" if op_dir == "приход" else "-"
+        line = f"- {op_date.strftime('%d.%m.%Y')} {address or '(без квартиры)'}: {sign}{amount} {currency} [{op_cat}]"
+        if counterpart:
+            line += f" — {counterpart}"
+        if op_comment:
+            line += f" ({op_comment})"
+        result.append(line)
+        key = (currency, op_dir)
+        sums[key] = sums.get(key, 0) + amount
+    result.append("")
+    for (currency, op_dir), total in sums.items():
+        result.append(f"Итого {op_dir} ({currency}): {total}")
+    return "\n".join(result)
+
+
 def db_save_preference(key, value):
     with db_conn() as conn:
         c = conn.cursor()
@@ -403,9 +609,29 @@ def build_system(context_str=""):
 Если при закрытии или изменении задачи/договорённости находится несколько подходящих — переспроси сэра, какую именно он имеет в виду, не выбирай сам.
 При записи финансов уточняй тип (расход или доход), если это не очевидно из контекста.
 
+Учёт квартир (касса по сдаче квартир в субаренду) — отдельная система от личных финансов (finance), не путай их. Валюта операций по умолчанию MDL (лей); если сэр называет сумму в евро — указывай currency='EUR'. При записи операции по квартире уточняй направление (приход/расход) и категорию (Аренда/Коммуналка/Депозит/Прочее), если не очевидно из контекста. Если адрес квартиры не найден или найдено несколько подходящих — переспроси сэра, не выбирай сам, и предложи добавить квартиру через add_apartment, если её действительно нет в справочнике. Сверку кассы (reconcile_apartment_balance) делай только когда сэр явно называет фактическую сумму на руках.
+
 Стиль: простой текст, без символов # ** ---, максимум 3-4 предложения. Язык — тот на котором пишет Юсеф.
 
 Дата: {current_datetime}{prefs_block}{context_str}"""
+
+
+def make_chart(title, chart_type, labels, values):
+    fig, ax = plt.subplots(figsize=(6, 4))
+    if chart_type == "pie":
+        ax.pie(values, labels=labels, autopct="%1.0f%%")
+    elif chart_type == "line":
+        ax.plot(labels, values, marker="o")
+        ax.tick_params(axis="x", rotation=45)
+    else:
+        ax.bar(labels, values)
+        ax.tick_params(axis="x", rotation=45)
+    ax.set_title(title)
+    fig.tight_layout()
+    path = os.path.join(tempfile.gettempdir(), f"chart_{uuid.uuid4().hex}.png")
+    fig.savefig(path)
+    plt.close(fig)
+    return path
 
 
 def process_message(user_message, system):
@@ -507,6 +733,91 @@ def process_message(user_message, system):
             "input_schema": {"type": "object", "properties": {}}
         },
         {
+            "name": "add_apartment",
+            "description": "Добавить квартиру в справочник учёта квартир, или обновить данные существующей (по адресу)",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "address": {"type": "string"},
+                    "owner_name": {"type": "string"},
+                    "tenant_rent": {"type": "number", "description": "Аренда, которую платит квартирант"},
+                    "owner_rent": {"type": "number", "description": "Аренда, которую отдаём собственнику"},
+                    "deposit": {"type": "number"},
+                    "notes": {"type": "string"}
+                },
+                "required": ["address"]
+            }
+        },
+        {
+            "name": "get_apartments",
+            "description": "Получить справочник квартир (адрес, собственник, аренда, маржа, депозит)",
+            "input_schema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "record_apartment_operation",
+            "description": "Записать операцию в кассу по квартирам (приход или расход денег)",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "apartment": {"type": "string", "description": "Адрес или часть адреса квартиры. Можно не указывать для общих операций"},
+                    "direction": {"type": "string", "enum": ["приход", "расход"]},
+                    "category": {"type": "string", "description": "Аренда, Коммуналка, Депозит, Прочее и т.п."},
+                    "amount": {"type": "number"},
+                    "currency": {"type": "string", "description": "MDL или EUR, по умолчанию MDL"},
+                    "counterpart": {"type": "string", "description": "Квартирант, Собственник, название провайдера и т.п."},
+                    "date": {"type": "string", "description": "YYYY-MM-DD, по умолчанию сегодня"},
+                    "comment": {"type": "string"}
+                },
+                "required": ["direction", "category", "amount"]
+            }
+        },
+        {
+            "name": "get_apartment_balance",
+            "description": "Получить расчётный баланс кассы по квартирам и результат последней сверки",
+            "input_schema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "reconcile_apartment_balance",
+            "description": "Сверить расчётный баланс кассы по квартирам с фактической суммой на руках. Вызывай только когда сэр явно называет фактическую сумму",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "actual_balance": {"type": "number"},
+                    "currency": {"type": "string", "description": "MDL или EUR, по умолчанию MDL"},
+                    "comment": {"type": "string"}
+                },
+                "required": ["actual_balance"]
+            }
+        },
+        {
+            "name": "get_apartment_report",
+            "description": "Получить операции по кассе квартир с фильтрами — для произвольных отчётов",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "apartment": {"type": "string"},
+                    "category": {"type": "string"},
+                    "direction": {"type": "string", "enum": ["приход", "расход"]},
+                    "date_from": {"type": "string", "description": "YYYY-MM-DD"},
+                    "date_to": {"type": "string", "description": "YYYY-MM-DD"}
+                }
+            }
+        },
+        {
+            "name": "generate_chart",
+            "description": "Построить картинку-график по готовым данным (например, из get_apartment_report) для наглядного отчёта",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "chart_type": {"type": "string", "enum": ["bar", "pie", "line"]},
+                    "labels": {"type": "array", "items": {"type": "string"}},
+                    "values": {"type": "array", "items": {"type": "number"}}
+                },
+                "required": ["title", "chart_type", "labels", "values"]
+            }
+        },
+        {
             "name": "save_preference",
             "description": "Запомнить предпочтение или важную информацию",
             "input_schema": {
@@ -534,6 +845,7 @@ def process_message(user_message, system):
 
     messages = conversation_history
     text = ""
+    chart_path = None
     for _ in range(5):
         response = anthropic.messages.create(
             model="claude-sonnet-4-6",
@@ -595,6 +907,38 @@ def process_message(user_message, system):
                 result = f"Записано: {inp['category']} {sign}{inp['amount']}"
             elif block.name == "get_finance":
                 result = db_get_finance()
+            elif block.name == "add_apartment":
+                db_add_apartment(inp["address"], inp.get("owner_name"), inp.get("tenant_rent"), inp.get("owner_rent"), inp.get("deposit"), inp.get("notes"))
+                result = f"Квартира сохранена: {inp['address']}"
+            elif block.name == "get_apartments":
+                result = db_get_apartments()
+            elif block.name == "record_apartment_operation":
+                status, info = db_record_apartment_operation(
+                    inp.get("apartment"), inp["direction"], inp["category"], inp["amount"],
+                    inp.get("currency", "MDL"), inp.get("counterpart"), inp.get("date"), inp.get("comment")
+                )
+                if status == "recorded":
+                    sign = "+" if inp["direction"] == "приход" else "-"
+                    address_part = f" ({info})" if info else ""
+                    result = f"Записано в кассу квартир{address_part}: {sign}{inp['amount']} {inp.get('currency', 'MDL')} [{inp['category']}]"
+                elif status == "ambiguous":
+                    result = "Нашлось несколько подходящих квартир, уточни у сэра какую он имеет в виду:\n" + "\n".join(f"- {a}" for a in info)
+                else:
+                    result = f"Квартира '{info}' не найдена в справочнике. Уточни у сэра адрес или предложи добавить квартиру через add_apartment"
+            elif block.name == "get_apartment_balance":
+                result = db_get_apartment_balance()
+            elif block.name == "reconcile_apartment_balance":
+                currency = inp.get("currency", "MDL")
+                expected, actual, diff = db_reconcile_apartment_balance(inp["actual_balance"], currency, inp.get("comment"))
+                if diff == 0:
+                    result = f"Сверка ({currency}): расчётный баланс {expected} совпал с фактическим {actual}."
+                else:
+                    result = f"Сверка ({currency}): расчётный баланс {expected}, по факту {actual}, расхождение {diff}. Записал корректирующую операцию."
+            elif block.name == "get_apartment_report":
+                result = db_get_apartment_report(inp.get("apartment"), inp.get("category"), inp.get("direction"), inp.get("date_from"), inp.get("date_to"))
+            elif block.name == "generate_chart":
+                chart_path = make_chart(inp["title"], inp["chart_type"], inp["labels"], inp["values"])
+                result = "График построен, будет отправлен сэру отдельным сообщением."
             elif block.name == "save_preference":
                 db_save_preference(inp["key"], inp["value"])
                 result = f"Запомнено: {inp['key']}"
@@ -608,7 +952,7 @@ def process_message(user_message, system):
             {"role": "user", "content": tool_results}
         ]
 
-    return text or "Готово, сэр."
+    return (text or "Готово, сэр."), chart_path
 
 
 async def send_morning_briefing(bot: Bot):
@@ -661,6 +1005,14 @@ async def get_staff(request):
     return web.json_response(list(STAFF.keys()))
 
 
+async def get_apartments_api(request):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT address FROM apartments WHERE active ORDER BY address")
+        rows = c.fetchall()
+    return web.json_response([address for (address,) in rows])
+
+
 async def health(request):
     return web.json_response({"status": "ok"})
 
@@ -670,8 +1022,10 @@ async def run_webapp_server():
     app.router.add_get("/form", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "form.html")))
     app.router.add_get("/finance", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "finance.html")))
     app.router.add_get("/decisions", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "decisions.html")))
+    app.router.add_get("/apartments", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "apartments.html")))
     app.router.add_get("/", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "form.html")))
     app.router.add_get("/api/staff", get_staff)
+    app.router.add_get("/api/apartments", get_apartments_api)
     app.router.add_get("/health", health)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -744,6 +1098,28 @@ def create_quick_finance(amount, category, fin_type="расход", comment=None
     return summary
 
 
+def create_quick_apartment(address, owner_name=None, tenant_rent=None, owner_rent=None, deposit=None, notes=None):
+    db_add_apartment(address, owner_name, tenant_rent, owner_rent, deposit, notes)
+    summary = f"Квартира сохранена, сэр: {address}"
+    if tenant_rent is not None and owner_rent is not None:
+        summary += f" (маржа: {tenant_rent - owner_rent})"
+    return summary
+
+
+def create_quick_apartment_operation(apartment, direction, category, amount, currency="MDL", counterpart=None, op_date=None, comment=None):
+    status, info = db_record_apartment_operation(apartment, direction, category, amount, currency, counterpart, op_date, comment)
+    if status == "recorded":
+        sign = "+" if direction == "приход" else "-"
+        address_part = f" ({info})" if info else ""
+        summary = f"Записал в кассу квартир{address_part}, сэр: {sign}{amount} {currency} [{category}]"
+        if comment:
+            summary += f" ({comment})"
+        return summary
+    if status == "ambiguous":
+        return "Нашлось несколько подходящих квартир: " + ", ".join(info) + ". Уточните, сэр."
+    return f"Квартира '{info}' не найдена в справочнике, сэр. Добавьте её сначала через форму или чат."
+
+
 def create_quick_decision(with_whom, what_decided, deadline=None, next_step=None):
     db_create_decision(with_whom, what_decided, deadline, next_step)
     summary = f"Записал, сэр: {with_whom} — {what_decided}"
@@ -787,6 +1163,44 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
         fin_type = "доход" if data.get("type") == "доход" else "расход"
         comment = (data.get("comment") or "").strip() or None
         summary = create_quick_finance(amount, category, fin_type, comment)
+        await update.message.reply_text(summary, reply_markup=MAIN_KEYBOARD)
+        return
+
+    if form == "apartment_new":
+        address = (data.get("address") or "").strip()
+        if not address:
+            await update.message.reply_text("Не указан адрес квартиры, сэр.", reply_markup=MAIN_KEYBOARD)
+            return
+        owner_name = (data.get("owner_name") or "").strip() or None
+
+        def _num(key):
+            value = data.get(key)
+            try:
+                return float(value) if value not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+
+        summary = create_quick_apartment(address, owner_name, _num("tenant_rent"), _num("owner_rent"), _num("deposit"), (data.get("notes") or "").strip() or None)
+        await update.message.reply_text(summary, reply_markup=MAIN_KEYBOARD)
+        return
+
+    if form == "apartment_operation":
+        try:
+            amount = float(data.get("amount"))
+        except (TypeError, ValueError):
+            await update.message.reply_text("Не понял сумму, сэр. Попробуйте ещё раз.", reply_markup=MAIN_KEYBOARD)
+            return
+        category = (data.get("category") or "").strip()
+        if not category:
+            await update.message.reply_text("Не указана категория, сэр.", reply_markup=MAIN_KEYBOARD)
+            return
+        direction = "приход" if data.get("direction") == "приход" else "расход"
+        apartment = (data.get("apartment") or "").strip() or None
+        currency = (data.get("currency") or "MDL").strip() or "MDL"
+        counterpart = (data.get("counterpart") or "").strip() or None
+        op_date = resolve_deadline(data.get("date") or "")
+        comment = (data.get("comment") or "").strip() or None
+        summary = create_quick_apartment_operation(apartment, direction, category, amount, currency, counterpart, op_date, comment)
         await update.message.reply_text(summary, reply_markup=MAIN_KEYBOARD)
         return
 
@@ -953,6 +1367,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(summary, reply_markup=MAIN_KEYBOARD)
         return
 
+    # --- Квартиры без мини-формы (если WEBAPP_URL не настроен) ---
+    if user_message == APARTMENT_BUTTON:
+        await update.message.reply_text(
+            "Опишите операцию текстом, сэр, например: \"запиши приход 700 лей аренды по Лев Толстой от квартиранта\". "
+            "Я разберусь сам."
+        )
+        return
+
     # --- Кнопки мониторинга ---
     if user_message == VIEW_TASKS_BUTTON:
         await update.message.reply_text(db_get_tasks())
@@ -964,6 +1386,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_message == VIEW_FINANCE_BUTTON:
         await update.message.reply_text(db_get_finance())
+        return
+
+    if user_message == VIEW_APARTMENT_BALANCE_BUTTON:
+        await update.message.reply_text(db_get_apartment_balance())
         return
 
     global conversation_history
@@ -978,10 +1404,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         db_save_message("user", user_message)
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        assistant_message = process_message(user_message, system)
+        assistant_message, chart_path = process_message(user_message, system)
         conversation_history.append({"role": "assistant", "content": assistant_message})
         db_save_message("assistant", assistant_message)
         await update.message.reply_text(assistant_message)
+        if chart_path:
+            try:
+                with open(chart_path, "rb") as f:
+                    await update.message.reply_photo(photo=f)
+            finally:
+                os.remove(chart_path)
     except Exception as e:
         logger.error(f"Error: {e}")
         await update.message.reply_text("Произошла ошибка, сэр. Попробуйте ещё раз.")
