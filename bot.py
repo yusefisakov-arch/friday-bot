@@ -293,7 +293,6 @@ def init_db():
 
 
 PRIORITY_ORDER = {"Высокий": 0, "Средний": 1, "Низкий": 2}
-PRIORITY_EMOJI = {"Высокий": "🔴", "Средний": "🟡", "Низкий": "🟢"}
 
 
 def format_deadline(deadline):
@@ -303,9 +302,8 @@ def format_deadline(deadline):
         return deadline
 
 
-def format_task_line(prefix, name, deadline, priority, assignee):
-    emoji = PRIORITY_EMOJI.get(priority, "")
-    line = f"{prefix} {emoji + ' ' if emoji else ''}{name}"
+def format_task_line(prefix, name, deadline, assignee):
+    line = f"{prefix} {name}"
     extra = []
     if deadline:
         extra.append(f"до {format_deadline(deadline)}")
@@ -351,11 +349,19 @@ def db_get_tasks():
         if not items:
             continue
         items.sort(key=lambda r: (PRIORITY_ORDER.get(r[2], 3), r[1] or ""))
-        lines = "\n".join(
-            format_task_line(f"{i}.", name, deadline, priority, assignee)
-            for i, (name, deadline, priority, assignee) in enumerate(items, 1)
-        )
-        blocks.append(f"*{title}:*\n{lines}")
+        high = [r for r in items if r[2] == "Высокий"]
+        rest = [r for r in items if r[2] != "Высокий"]
+
+        sections = [f"*{title}:*"]
+        for emoji, group_items in (("🔴", high), ("🟡", rest)):
+            if not group_items:
+                continue
+            lines = "\n".join(
+                format_task_line(f"{i}.", name, deadline, assignee)
+                for i, (name, deadline, priority, assignee) in enumerate(group_items, 1)
+            )
+            sections.append(f"{emoji}\n{lines}")
+        blocks.append("\n\n".join(sections))
     return "\n\n".join(blocks)
 
 
@@ -363,15 +369,15 @@ def db_get_urgent_tasks():
     with db_conn() as conn:
         c = conn.cursor()
         tomorrow = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
-        c.execute("""SELECT name, deadline, priority, assignee FROM tasks
+        c.execute("""SELECT name, deadline, assignee FROM tasks
                      WHERE status != 'Готово' AND deadline IS NOT NULL
                      AND deadline <= %s ORDER BY deadline ASC LIMIT 5""", (tomorrow,))
         rows = c.fetchall()
     if not rows:
         return ""
     return "\n".join(
-        format_task_line(f"{i}.", name, deadline, priority, assignee)
-        for i, (name, deadline, priority, assignee) in enumerate(rows, 1)
+        format_task_line(f"{i}.", name, deadline, assignee)
+        for i, (name, deadline, assignee) in enumerate(rows, 1)
     )
 
 
@@ -418,7 +424,9 @@ def db_find_task(name_part):
         return "Ничего не найдено."
     result = []
     for name, deadline, priority, assignee, status, created_at in rows:
-        line = format_task_line("-", name, deadline, priority, assignee)
+        line = format_task_line("-", name, deadline, assignee)
+        if priority:
+            line += f" [{priority}]"
         line += f" [{status}], создана {created_at.strftime('%d.%m.%Y')}"
         result.append(line)
     return "\n".join(result)
