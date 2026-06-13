@@ -50,6 +50,7 @@ VIEW_DECISIONS_BUTTON = "📒 Договорённости"
 VIEW_FINANCE_BUTTON = "💵 Баланс"
 APARTMENT_BUTTON = "🏠 Квартиры"
 VIEW_APARTMENT_BALANCE_BUTTON = "🏦 Касса квартир"
+MOVE_IN_BUTTON = "🔑 Заселение"
 
 DEADLINE_KEYBOARD = ReplyKeyboardMarkup([["Сегодня", "Завтра"], ["Нет"]], resize_keyboard=True)
 PRIORITY_KEYBOARD = ReplyKeyboardMarkup([["Высокий", "Средний", "Низкий"], ["Нет"]], resize_keyboard=True)
@@ -65,6 +66,7 @@ if WEBAPP_URL:
             [KeyboardButton(QUICK_FINANCE_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/finance")), VIEW_FINANCE_BUTTON],
             [KeyboardButton(QUICK_DECISION_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/decisions")), VIEW_DECISIONS_BUTTON],
             [KeyboardButton(APARTMENT_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/apartments")), VIEW_APARTMENT_BALANCE_BUTTON],
+            [KeyboardButton(MOVE_IN_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/move_in"))],
         ],
         resize_keyboard=True,
     )
@@ -75,6 +77,7 @@ else:
             [QUICK_FINANCE_BUTTON, VIEW_FINANCE_BUTTON],
             [QUICK_DECISION_BUTTON, VIEW_DECISIONS_BUTTON],
             [APARTMENT_BUTTON, VIEW_APARTMENT_BALANCE_BUTTON],
+            [MOVE_IN_BUTTON],
         ],
         resize_keyboard=True,
     )
@@ -112,6 +115,7 @@ def init_db():
             name TEXT NOT NULL,
             deadline TEXT,
             priority TEXT,
+            assignee TEXT,
             status TEXT DEFAULT 'Открыта',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
@@ -163,6 +167,14 @@ def init_db():
             lease_end_reminder_sent BOOLEAN DEFAULT false,
             last_collection_reminder_month TEXT,
             utilities_fixed NUMERIC,
+            floor TEXT,
+            unit_number TEXT,
+            wifi_login TEXT,
+            wifi_password TEXT,
+            owner_contacts TEXT,
+            tenant_name TEXT,
+            tenant_phone TEXT,
+            tenant_phone2 TEXT,
             active BOOLEAN DEFAULT true,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
@@ -255,48 +267,80 @@ def init_db():
         except Exception as e:
             conn.rollback()
             logger.warning(f"Миграция apartments lease-полей пропущена: {e}")
+        try:
+            c.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assignee TEXT")
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.warning(f"Миграция tasks.assignee пропущена: {e}")
+        try:
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS floor TEXT")
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS unit_number TEXT")
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS wifi_login TEXT")
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS wifi_password TEXT")
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS owner_contacts TEXT")
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS tenant_name TEXT")
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS tenant_phone TEXT")
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS tenant_phone2 TEXT")
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.warning(f"Миграция apartments contact-полей пропущена: {e}")
     finally:
         conn.close()
 
 
-def db_create_task(name, deadline=None, priority=None):
+PRIORITY_EMOJI = {"Высокий": "🔴", "Средний": "🟡", "Низкий": "🟢"}
+
+
+def format_deadline(deadline):
+    try:
+        return datetime.strptime(deadline, "%Y-%m-%d").strftime("%d.%m")
+    except (ValueError, TypeError):
+        return deadline
+
+
+def format_task_line(name, deadline, priority, assignee):
+    emoji = PRIORITY_EMOJI.get(priority, "")
+    line = f"- {emoji + ' ' if emoji else ''}{name}"
+    extra = []
+    if deadline:
+        extra.append(f"до {format_deadline(deadline)}")
+    if assignee:
+        extra.append(assignee)
+    if extra:
+        line += " — " + " · ".join(extra)
+    return line
+
+
+def db_create_task(name, deadline=None, priority=None, assignee=None):
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("INSERT INTO tasks (name, deadline, priority) VALUES (%s, %s, %s)", (name, deadline, priority))
+        c.execute("INSERT INTO tasks (name, deadline, priority, assignee) VALUES (%s, %s, %s, %s)", (name, deadline, priority, assignee))
 
 
 def db_get_tasks():
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT name, deadline, priority FROM tasks WHERE status != 'Готово' ORDER BY created_at DESC")
+        c.execute("""SELECT name, deadline, priority, assignee FROM tasks WHERE status != 'Готово'
+                     ORDER BY (deadline IS NULL), deadline ASC, created_at DESC""")
         rows = c.fetchall()
     if not rows:
         return "Открытых задач нет."
-    result = []
-    for name, deadline, priority in rows:
-        line = f"- {name}"
-        if deadline:
-            line += f" (дедлайн: {deadline})"
-        if priority:
-            line += f" [{priority}]"
-        result.append(line)
-    return "\n".join(result)
+    return "\n".join(format_task_line(name, deadline, priority, assignee) for name, deadline, priority, assignee in rows)
 
 
 def db_get_urgent_tasks():
     with db_conn() as conn:
         c = conn.cursor()
         tomorrow = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
-        c.execute("""SELECT name, deadline, priority FROM tasks
+        c.execute("""SELECT name, deadline, priority, assignee FROM tasks
                      WHERE status != 'Готово' AND deadline IS NOT NULL
                      AND deadline <= %s ORDER BY deadline ASC LIMIT 5""", (tomorrow,))
         rows = c.fetchall()
     if not rows:
         return ""
-    result = []
-    for name, deadline, priority in rows:
-        result.append(f"- {name} (дедлайн: {deadline})")
-    return "\n".join(result)
+    return "\n".join(format_task_line(name, deadline, priority, assignee) for name, deadline, priority, assignee in rows)
 
 
 def db_close_task(name_part):
@@ -313,7 +357,7 @@ def db_close_task(name_part):
         return "closed", [name]
 
 
-def db_update_task(name_part, deadline=None, priority=None):
+def db_update_task(name_part, deadline=None, priority=None, assignee=None):
     with db_conn() as conn:
         c = conn.cursor()
         c.execute("SELECT id, name FROM tasks WHERE name ILIKE %s AND status != 'Готово'", (f"%{name_part}%",))
@@ -327,25 +371,23 @@ def db_update_task(name_part, deadline=None, priority=None):
             c.execute("UPDATE tasks SET deadline=%s WHERE id=%s", (deadline, task_id))
         if priority is not None:
             c.execute("UPDATE tasks SET priority=%s WHERE id=%s", (priority, task_id))
+        if assignee is not None:
+            c.execute("UPDATE tasks SET assignee=%s WHERE id=%s", (assignee, task_id))
         return "updated", [name]
 
 
 def db_find_task(name_part):
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("""SELECT name, deadline, priority, status, created_at FROM tasks
+        c.execute("""SELECT name, deadline, priority, assignee, status, created_at FROM tasks
                      WHERE name ILIKE %s ORDER BY created_at DESC LIMIT 5""", (f"%{name_part}%",))
         rows = c.fetchall()
     if not rows:
         return "Ничего не найдено."
     result = []
-    for name, deadline, priority, status, created_at in rows:
-        line = f"- {name} [{status}]"
-        if deadline:
-            line += f" (дедлайн: {deadline})"
-        if priority:
-            line += f" [{priority}]"
-        line += f", создана {created_at.strftime('%d.%m.%Y')}"
+    for name, deadline, priority, assignee, status, created_at in rows:
+        line = format_task_line(name, deadline, priority, assignee)
+        line += f" [{status}], создана {created_at.strftime('%d.%m.%Y')}"
         result.append(line)
     return "\n".join(result)
 
@@ -416,39 +458,49 @@ def db_get_finance():
     return "\n".join(result)
 
 
-def db_add_apartment(address, owner_name=None, tenant_rent=None, owner_rent=None, deposit=None, notes=None, lease_start=None, lease_end=None, utilities_fixed=None):
+APARTMENT_FIELDS = [
+    "owner_name", "tenant_rent", "owner_rent", "deposit", "notes",
+    "lease_start", "lease_end", "utilities_fixed",
+    "floor", "unit_number", "wifi_login", "wifi_password", "owner_contacts",
+    "tenant_name", "tenant_phone", "tenant_phone2",
+]
+
+
+def db_add_apartment(address, **fields):
+    cols = ["address"] + APARTMENT_FIELDS
+    values = [address] + [fields.get(f) for f in APARTMENT_FIELDS]
+    set_clause = ", ".join(f"{f} = COALESCE(EXCLUDED.{f}, apartments.{f})" for f in APARTMENT_FIELDS)
+    placeholders = ", ".join(["%s"] * len(cols))
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("""INSERT INTO apartments (address, owner_name, tenant_rent, owner_rent, deposit, notes, lease_start, lease_end, utilities_fixed)
-                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        c.execute(f"""INSERT INTO apartments ({", ".join(cols)}) VALUES ({placeholders})
                      ON CONFLICT (address) DO UPDATE SET
-                         owner_name = COALESCE(EXCLUDED.owner_name, apartments.owner_name),
-                         tenant_rent = COALESCE(EXCLUDED.tenant_rent, apartments.tenant_rent),
-                         owner_rent = COALESCE(EXCLUDED.owner_rent, apartments.owner_rent),
-                         deposit = COALESCE(EXCLUDED.deposit, apartments.deposit),
-                         notes = COALESCE(EXCLUDED.notes, apartments.notes),
-                         lease_start = COALESCE(EXCLUDED.lease_start, apartments.lease_start),
-                         lease_end = COALESCE(EXCLUDED.lease_end, apartments.lease_end),
-                         utilities_fixed = COALESCE(EXCLUDED.utilities_fixed, apartments.utilities_fixed),
+                         {set_clause},
                          lease_end_reminder_sent = CASE
                              WHEN EXCLUDED.lease_end IS NOT NULL AND EXCLUDED.lease_end IS DISTINCT FROM apartments.lease_end
                              THEN false ELSE apartments.lease_end_reminder_sent END""",
-                  (address, owner_name, tenant_rent, owner_rent, deposit, notes, lease_start, lease_end, utilities_fixed))
+                  values)
 
 
 def db_get_apartments():
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("""SELECT address, owner_name, tenant_rent, owner_rent, deposit, lease_start, lease_end, utilities_fixed
+        c.execute("""SELECT address, owner_name, tenant_rent, owner_rent, deposit, lease_start, lease_end, utilities_fixed,
+                            floor, unit_number, wifi_login, wifi_password, owner_contacts, tenant_name, tenant_phone, tenant_phone2
                      FROM apartments WHERE active ORDER BY address""")
         rows = c.fetchall()
     if not rows:
         return "Квартир в справочнике нет."
     result = []
-    for address, owner_name, tenant_rent, owner_rent, deposit, lease_start, lease_end, utilities_fixed in rows:
+    for (address, owner_name, tenant_rent, owner_rent, deposit, lease_start, lease_end, utilities_fixed,
+         floor, unit_number, wifi_login, wifi_password, owner_contacts, tenant_name, tenant_phone, tenant_phone2) in rows:
         line = f"*{address}*"
+        if floor or unit_number:
+            line += f"\n  этаж {floor or '?'}, кв. {unit_number or '?'}"
         if owner_name:
             line += f"\n  собственник: {owner_name}"
+        if owner_contacts:
+            line += f"\n  контакты собственника: {owner_contacts}"
         if tenant_rent is not None:
             line += f"\n  аренда с квартиранта: {tenant_rent}"
         if owner_rent is not None:
@@ -459,8 +511,17 @@ def db_get_apartments():
             line += f"\n  депозит: {deposit}"
         if lease_start or lease_end:
             line += f"\n  срок: {lease_start.strftime('%d.%m.%Y') if lease_start else '?'} – {lease_end.strftime('%d.%m.%Y') if lease_end else '?'}"
+        if tenant_name or tenant_phone:
+            tenant_line = tenant_name or "?"
+            if tenant_phone:
+                tenant_line += f", {tenant_phone}"
+            if tenant_phone2:
+                tenant_line += f", {tenant_phone2}"
+            line += f"\n  квартирант: {tenant_line}"
         if utilities_fixed is not None:
             line += f"\n  фикс. коммуналка: {utilities_fixed}"
+        if wifi_login or wifi_password:
+            line += f"\n  wifi: {wifi_login or '?'} / {wifi_password or '?'}"
         result.append(line)
     return "\n\n".join(result)
 
@@ -615,6 +676,16 @@ def db_set_utility_tariff(utility_type, tariff):
         c.execute("""INSERT INTO utility_tariffs (utility_type, tariff) VALUES (%s, %s)
                      ON CONFLICT (utility_type) DO UPDATE SET tariff = EXCLUDED.tariff, updated_at = CURRENT_TIMESTAMP""",
                   (utility_type, tariff))
+
+
+def db_set_meter_reading(apartment_id, utility_type, reading, reading_date=None):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""INSERT INTO apartment_meters (apartment_id, utility_type, last_reading, last_reading_date)
+                     VALUES (%s, %s, %s, COALESCE(%s, CURRENT_DATE))
+                     ON CONFLICT (apartment_id, utility_type) DO UPDATE SET
+                         last_reading = EXCLUDED.last_reading, last_reading_date = EXCLUDED.last_reading_date""",
+                  (apartment_id, utility_type, reading, reading_date))
 
 
 def db_calculate_utilities(apartment, readings, extra_items=None):
@@ -876,7 +947,8 @@ def process_message(user_message, system):
                 "properties": {
                     "name": {"type": "string"},
                     "deadline": {"type": "string", "description": "YYYY-MM-DD"},
-                    "priority": {"type": "string", "description": "Высокий, Средний, Низкий"}
+                    "priority": {"type": "string", "description": "Высокий, Средний, Низкий"},
+                    "assignee": {"type": "string", "description": "Кому поручено, если делегируется, например: " + ", ".join(STAFF.keys())}
                 },
                 "required": ["name"]
             }
@@ -897,13 +969,14 @@ def process_message(user_message, system):
         },
         {
             "name": "update_task",
-            "description": "Изменить дедлайн и/или приоритет существующей открытой задачи",
+            "description": "Изменить дедлайн, приоритет и/или исполнителя существующей открытой задачи",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "name_part": {"type": "string"},
                     "deadline": {"type": "string", "description": "YYYY-MM-DD"},
-                    "priority": {"type": "string", "description": "Высокий, Средний, Низкий"}
+                    "priority": {"type": "string", "description": "Высокий, Средний, Низкий"},
+                    "assignee": {"type": "string", "description": "Кому поручено, например: " + ", ".join(STAFF.keys())}
                 },
                 "required": ["name_part"]
             }
@@ -978,7 +1051,12 @@ def process_message(user_message, system):
                     "notes": {"type": "string"},
                     "lease_start": {"type": "string", "description": "Дата начала срока текущего квартиранта, YYYY-MM-DD"},
                     "lease_end": {"type": "string", "description": "Дата окончания срока текущего квартиранта, YYYY-MM-DD"},
-                    "utilities_fixed": {"type": "number", "description": "Фиксированная часть коммуналки в месяц (интернет и т.п.), автоматически прибавляется при расчёте через calculate_utilities"}
+                    "utilities_fixed": {"type": "number", "description": "Фиксированная часть коммуналки в месяц (интернет и т.п.), автоматически прибавляется при расчёте через calculate_utilities"},
+                    "floor": {"type": "string", "description": "Этаж"},
+                    "unit_number": {"type": "string", "description": "Номер квартиры"},
+                    "wifi_login": {"type": "string"},
+                    "wifi_password": {"type": "string"},
+                    "owner_contacts": {"type": "string", "description": "Телефон/телеграм собственника"}
                 },
                 "required": ["address"]
             }
@@ -1179,7 +1257,7 @@ def process_message(user_message, system):
             inp = block.input
             result = ""
             if block.name == "create_task":
-                db_create_task(inp["name"], inp.get("deadline"), inp.get("priority"))
+                db_create_task(inp["name"], inp.get("deadline"), inp.get("priority"), inp.get("assignee"))
                 result = f"Задача создана: {inp['name']}"
             elif block.name == "get_tasks":
                 result = db_get_tasks()
@@ -1192,7 +1270,7 @@ def process_message(user_message, system):
                 else:
                     result = "Задача не найдена"
             elif block.name == "update_task":
-                status, items = db_update_task(inp["name_part"], inp.get("deadline"), inp.get("priority"))
+                status, items = db_update_task(inp["name_part"], inp.get("deadline"), inp.get("priority"), inp.get("assignee"))
                 if status == "updated":
                     result = f"Задача обновлена: {items[0]}"
                 elif status == "ambiguous":
@@ -1221,7 +1299,7 @@ def process_message(user_message, system):
             elif block.name == "get_finance":
                 result = db_get_finance()
             elif block.name == "add_apartment":
-                db_add_apartment(inp["address"], inp.get("owner_name"), inp.get("tenant_rent"), inp.get("owner_rent"), inp.get("deposit"), inp.get("notes"), inp.get("lease_start"), inp.get("lease_end"), inp.get("utilities_fixed"))
+                db_add_apartment(inp["address"], **{f: inp.get(f) for f in APARTMENT_FIELDS})
                 result = f"Квартира сохранена: {inp['address']}"
             elif block.name == "get_apartments":
                 result = db_get_apartments()
@@ -1405,6 +1483,7 @@ async def run_webapp_server():
     app.router.add_get("/finance", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "finance.html")))
     app.router.add_get("/decisions", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "decisions.html")))
     app.router.add_get("/apartments", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "apartments.html")))
+    app.router.add_get("/move_in", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "move_in.html")))
     app.router.add_get("/", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "form.html")))
     app.router.add_get("/api/staff", get_staff)
     app.router.add_get("/api/apartments", get_apartments_api)
@@ -1460,14 +1539,14 @@ async def memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def create_quick_task(name, deadline=None, priority=None, assignee=None):
-    if assignee:
-        name = f"{name} [{assignee}]"
-    db_create_task(name, deadline, priority)
+    db_create_task(name, deadline, priority, assignee)
     summary = f"Записал, сэр: {name}"
     if deadline:
         summary += f" (дедлайн: {deadline})"
     if priority:
         summary += f" [{priority}]"
+    if assignee:
+        summary += f" [{assignee}]"
     return summary
 
 
@@ -1480,13 +1559,35 @@ def create_quick_finance(amount, category, fin_type="расход", comment=None
     return summary
 
 
-def create_quick_apartment(address, owner_name=None, tenant_rent=None, owner_rent=None, deposit=None, notes=None, lease_start=None, lease_end=None):
-    db_add_apartment(address, owner_name, tenant_rent, owner_rent, deposit, notes, lease_start, lease_end)
+def create_quick_apartment(address, **fields):
+    db_add_apartment(address, **fields)
     summary = f"Квартира сохранена, сэр: {address}"
+    tenant_rent, owner_rent = fields.get("tenant_rent"), fields.get("owner_rent")
     if tenant_rent is not None and owner_rent is not None:
         summary += f" (маржа: {tenant_rent - owner_rent})"
+    lease_start, lease_end = fields.get("lease_start"), fields.get("lease_end")
     if lease_start or lease_end:
         summary += f", срок: {lease_start or '?'} – {lease_end or '?'}"
+    return summary
+
+
+def create_quick_move_in(apartment, tenant_name=None, tenant_phone=None, tenant_phone2=None, lease_start=None, lease_end=None, meters=None):
+    status, info = db_find_apartment(apartment)
+    if status == "not_found":
+        return f"Квартира '{apartment}' не найдена в справочнике, сэр."
+    if status == "ambiguous":
+        return "Нашлось несколько подходящих квартир: " + ", ".join(info) + ". Уточните, сэр."
+    apartment_id, address = info
+    db_add_apartment(address, tenant_name=tenant_name, tenant_phone=tenant_phone, tenant_phone2=tenant_phone2, lease_start=lease_start, lease_end=lease_end)
+    for utility_type, reading in (meters or {}).items():
+        db_set_meter_reading(apartment_id, utility_type, reading, lease_start)
+    summary = f"Заселение записано, сэр: {address}"
+    if tenant_name:
+        summary += f" — {tenant_name}"
+    if lease_start or lease_end:
+        summary += f", срок: {lease_start or '?'} – {lease_end or '?'}"
+    if meters:
+        summary += ". Показания на момент заселения: " + ", ".join(f"{k} {v}" for k, v in meters.items())
     return summary
 
 
@@ -1555,7 +1656,6 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not address:
             await update.message.reply_text("Не указан адрес квартиры, сэр.", reply_markup=MAIN_KEYBOARD)
             return
-        owner_name = (data.get("owner_name") or "").strip() or None
 
         def _num(key):
             value = data.get(key)
@@ -1564,7 +1664,47 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except (TypeError, ValueError):
                 return None
 
-        summary = create_quick_apartment(address, owner_name, _num("tenant_rent"), _num("owner_rent"), _num("deposit"), (data.get("notes") or "").strip() or None, (data.get("lease_start") or "").strip() or None, (data.get("lease_end") or "").strip() or None)
+        def _str(key):
+            return (data.get(key) or "").strip() or None
+
+        summary = create_quick_apartment(
+            address,
+            owner_name=_str("owner_name"),
+            tenant_rent=_num("tenant_rent"),
+            owner_rent=_num("owner_rent"),
+            deposit=_num("deposit"),
+            notes=_str("notes"),
+            lease_start=_str("lease_start"),
+            lease_end=_str("lease_end"),
+            floor=_str("floor"),
+            unit_number=_str("unit_number"),
+            wifi_login=_str("wifi_login"),
+            wifi_password=_str("wifi_password"),
+            owner_contacts=_str("owner_contacts"),
+        )
+        await update.message.reply_text(summary, reply_markup=MAIN_KEYBOARD)
+        return
+
+    if form == "move_in":
+        apartment = (data.get("apartment") or "").strip()
+        if not apartment:
+            await update.message.reply_text("Не указана квартира, сэр.", reply_markup=MAIN_KEYBOARD)
+            return
+        meters = {}
+        for utility_type, value in (data.get("meters") or {}).items():
+            try:
+                meters[utility_type] = float(value)
+            except (TypeError, ValueError):
+                pass
+        summary = create_quick_move_in(
+            apartment,
+            (data.get("tenant_name") or "").strip() or None,
+            (data.get("tenant_phone") or "").strip() or None,
+            (data.get("tenant_phone2") or "").strip() or None,
+            (data.get("lease_start") or "").strip() or None,
+            (data.get("lease_end") or "").strip() or None,
+            meters,
+        )
         await update.message.reply_text(summary, reply_markup=MAIN_KEYBOARD)
         return
 
