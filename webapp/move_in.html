@@ -73,6 +73,16 @@
     <input type="date" id="lease-end">
   </div>
 
+  <div class="field">
+    <label>Сумма аренды</label>
+    <input type="number" id="tenant-rent" inputmode="decimal" placeholder="0">
+  </div>
+
+  <div class="field">
+    <label>Депозит</label>
+    <input type="number" id="deposit" inputmode="decimal" placeholder="0">
+  </div>
+
   <h3>Показания счётчиков на момент заселения</h3>
   <div id="meters"></div>
 
@@ -138,6 +148,8 @@
         tenant_phone2: document.getElementById("tenant-phone2").value.trim(),
         lease_start: document.getElementById("lease-start").value,
         lease_end: document.getElementById("lease-end").value,
+        tenant_rent: document.getElementById("tenant-rent").value,
+        deposit: document.getElementById("deposit").value,
         meters: meters
       }));
     });

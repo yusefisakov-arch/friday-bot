@@ -160,6 +160,7 @@ def init_db():
             owner_name TEXT,
             tenant_rent NUMERIC,
             owner_rent NUMERIC,
+            rent_day INTEGER,
             deposit NUMERIC,
             notes TEXT,
             lease_start DATE,
@@ -282,6 +283,7 @@ def init_db():
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS tenant_name TEXT")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS tenant_phone TEXT")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS tenant_phone2 TEXT")
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS rent_day INTEGER")
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -483,7 +485,7 @@ def db_get_finance():
 
 
 APARTMENT_FIELDS = [
-    "owner_name", "tenant_rent", "owner_rent", "deposit", "notes",
+    "owner_name", "tenant_rent", "owner_rent", "rent_day", "deposit", "notes",
     "lease_start", "lease_end", "utilities_fixed",
     "floor", "unit_number", "wifi_login", "wifi_password", "owner_contacts",
     "tenant_name", "tenant_phone", "tenant_phone2",
@@ -509,14 +511,14 @@ def db_add_apartment(address, **fields):
 def db_get_apartments():
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("""SELECT address, owner_name, tenant_rent, owner_rent, deposit, lease_start, lease_end, utilities_fixed,
+        c.execute("""SELECT address, owner_name, tenant_rent, owner_rent, rent_day, deposit, lease_start, lease_end, utilities_fixed,
                             floor, unit_number, wifi_login, wifi_password, owner_contacts, tenant_name, tenant_phone, tenant_phone2
                      FROM apartments WHERE active ORDER BY address""")
         rows = c.fetchall()
     if not rows:
         return "Квартир в справочнике нет."
     result = []
-    for (address, owner_name, tenant_rent, owner_rent, deposit, lease_start, lease_end, utilities_fixed,
+    for (address, owner_name, tenant_rent, owner_rent, rent_day, deposit, lease_start, lease_end, utilities_fixed,
          floor, unit_number, wifi_login, wifi_password, owner_contacts, tenant_name, tenant_phone, tenant_phone2) in rows:
         line = f"*{address}*"
         if floor or unit_number:
@@ -525,10 +527,12 @@ def db_get_apartments():
             line += f"\n  собственник: {owner_name}"
         if owner_contacts:
             line += f"\n  контакты собственника: {owner_contacts}"
+        if owner_rent is not None:
+            line += f"\n  сумма аренды: {owner_rent}"
+        if rent_day is not None:
+            line += f"\n  день аренды: {rent_day}-го числа"
         if tenant_rent is not None:
             line += f"\n  аренда с квартиранта: {tenant_rent}"
-        if owner_rent is not None:
-            line += f"\n  собственнику: {owner_rent}"
         if tenant_rent is not None and owner_rent is not None:
             line += f"\n  маржа: {tenant_rent - owner_rent}"
         if deposit is not None:
@@ -854,7 +858,7 @@ def db_mark_sop_reminder_sent(reminder_id, current_month):
 def db_get_apartments_for_reminders():
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("""SELECT id, address, lease_start, lease_end, lease_end_reminder_sent, last_collection_reminder_month
+        c.execute("""SELECT id, address, rent_day, lease_end, lease_end_reminder_sent, last_collection_reminder_month
                      FROM apartments WHERE active""")
         return c.fetchall()
 
@@ -920,7 +924,7 @@ def build_system(context_str=""):
 
 Учёт квартир (касса по сдаче квартир в субаренду) — отдельная система от личных финансов (finance), не путай их. Валюта операций по умолчанию MDL (лей); если сэр называет сумму в евро — указывай currency='EUR'. При записи операции по квартире уточняй направление (приход/расход) и категорию (Аренда/Коммуналка/Депозит/Прочее), если не очевидно из контекста. Если адрес квартиры не найден или найдено несколько подходящих — переспроси сэра, не выбирай сам, и предложи добавить квартиру через add_apartment, если её действительно нет в справочнике. Сверку кассы (reconcile_apartment_balance) делай только когда сэр явно называет фактическую сумму на руках.
 
-Срок аренды (lease_start/lease_end) у квартиры — это период текущего квартиранта. Когда сэр сообщает, что заехал новый квартирант "с такого-то по такое-то число", сначала вызови get_apartments, чтобы найти точный адрес этой квартиры как он записан в справочнике (квартира уже должна существовать), и вызови add_apartment с этим же адресом и lease_start/lease_end (формат YYYY-MM-DD) — остальные поля не указывай, они не изменятся. Если адрес не нашёлся в справочнике — переспроси сэра, не создавай новую квартиру по неточному адресу. Бот сам каждый день в 8:00 проверяет: за день до даты lease_start (по числу месяца) — напоминает собрать показания счётчиков и сделать просчёт перед встречей; а в последние 10 дней перед lease_end — напоминает спросить квартиранта про продление или выезд (один раз за контракт). Дополнительно есть регулярные ежемесячные напоминания по SOP (sop_reminders) — фиксированные задачи по числам месяца (фактуры, газ, интернет и т.д.), которые бот тоже сам присылает в 8:00. По просьбе сэра показывай список (get_sop_reminders), добавляй (add_sop_reminder) или убирай (remove_sop_reminder) такие напоминания.
+У квартиры есть два разных понятия аренды: rent_day — постоянное число месяца (1-31), когда обычно собирают показания счётчиков и арендную плату, не меняется при смене квартиранта (задаётся один раз через add_apartment вместе с owner_rent — суммой аренды, которую отдаём собственнику). И lease_start/lease_end/tenant_rent/deposit — данные ТЕКУЩЕГО квартиранта (период проживания, сумма его аренды, депозит), которые обновляются при каждом заселении. Когда сэр сообщает, что заехал новый квартирант "с такого-то по такое-то число", сначала вызови get_apartments, чтобы найти точный адрес этой квартиры как он записан в справочнике (квартира уже должна существовать), и вызови add_apartment с этим же адресом и lease_start/lease_end (формат YYYY-MM-DD), а также tenant_rent/deposit, если сэр их называет — остальные поля не указывай, они не изменятся. Если адрес не нашёлся в справочнике — переспроси сэра, не создавай новую квартиру по неточному адресу. Бот сам каждый день в 8:00 проверяет: за день до rent_day (по числу месяца) — напоминает собрать показания счётчиков и сделать просчёт перед встречей; а в последние 10 дней перед lease_end — напоминает спросить квартиранта про продление или выезд (один раз за контракт). Дополнительно есть регулярные ежемесячные напоминания по SOP (sop_reminders) — фиксированные задачи по числам месяца (фактуры, газ, интернет и т.д.), которые бот тоже сам присылает в 8:00. По просьбе сэра показывай список (get_sop_reminders), добавляй (add_sop_reminder) или убирай (remove_sop_reminder) такие напоминания.
 
 Расчёт коммуналки по счётчикам (calculate_utilities) — сэр называет новые показания (свет/газ/вода, иногда отопление/горячая вода — не у всех квартир), бот сам помнит прошлые показания, считает разницу × тариф и выводит разбивку с итогом. Тарифы (utility_tariffs) единые для всех квартир — если сэр говорит "тариф на газ теперь X" — вызови set_utility_tariff; текущие тарифы — get_utility_tariffs. Если для квартиры/услуги ещё нет сохранённого показания — текущее становится базовым, стоимость в этот раз 0. Фиксированная часть коммуналки (интернет и т.п., apartments.utilities_fixed) добавляется к итогу автоматически — задаётся/обновляется через add_apartment. Разовые статьи "по платёжке" (обслуживание дома, отопление в старых домах, уборка при выселении 500-1000 и т.п.) передавай через extra_items каждый раз отдельно, они не сохраняются. После расчёта, если сэр просит записать итог в кассу — отдельно вызови record_apartment_operation (приход, категория "Коммуналка").
 
@@ -1069,12 +1073,13 @@ def process_message(user_message, system):
                 "properties": {
                     "address": {"type": "string"},
                     "owner_name": {"type": "string"},
-                    "tenant_rent": {"type": "number", "description": "Аренда, которую платит квартирант"},
-                    "owner_rent": {"type": "number", "description": "Аренда, которую отдаём собственнику"},
-                    "deposit": {"type": "number"},
+                    "tenant_rent": {"type": "number", "description": "Сумма аренды, которую платит текущий квартирант (обычно задаётся при заселении)"},
+                    "owner_rent": {"type": "number", "description": "Сумма аренды, которую отдаём собственнику — постоянная для квартиры"},
+                    "rent_day": {"type": "integer", "description": "Число месяца (1-31), когда нужно собирать показания счётчиков и арендную плату. Постоянное для квартиры, не меняется при смене квартиранта"},
+                    "deposit": {"type": "number", "description": "Депозит текущего квартиранта (обычно задаётся при заселении)"},
                     "notes": {"type": "string"},
-                    "lease_start": {"type": "string", "description": "Дата начала срока текущего квартиранта, YYYY-MM-DD"},
-                    "lease_end": {"type": "string", "description": "Дата окончания срока текущего квартиранта, YYYY-MM-DD"},
+                    "lease_start": {"type": "string", "description": "Дата заезда текущего квартиранта, YYYY-MM-DD"},
+                    "lease_end": {"type": "string", "description": "Дата выезда текущего квартиранта, YYYY-MM-DD"},
                     "utilities_fixed": {"type": "number", "description": "Фиксированная часть коммуналки в месяц (интернет и т.п.), автоматически прибавляется при расчёте через calculate_utilities"},
                     "floor": {"type": "string", "description": "Этаж"},
                     "unit_number": {"type": "string", "description": "Номер квартиры"},
@@ -1429,8 +1434,8 @@ async def send_apartment_reminders(bot: Bot):
     today = now.date()
     tomorrow = today + timedelta(days=1)
     current_month = now.strftime("%Y-%m")
-    for apt_id, address, lease_start, lease_end, end_sent, last_month in db_get_apartments_for_reminders():
-        if lease_start and lease_start.day == tomorrow.day and last_month != current_month:
+    for apt_id, address, rent_day, lease_end, end_sent, last_month in db_get_apartments_for_reminders():
+        if rent_day and rent_day == tomorrow.day and last_month != current_month:
             await send_md(
                 bot, ALLOWED_USER_ID,
                 text=f"Сэр, завтра аренда по *{address}*. Попросите у квартиранта фото счётчиков (свет, газ, вода), сделайте просчёт и договоритесь о встрече."
@@ -1589,20 +1594,24 @@ def create_quick_apartment(address, **fields):
     tenant_rent, owner_rent = fields.get("tenant_rent"), fields.get("owner_rent")
     if tenant_rent is not None and owner_rent is not None:
         summary += f" (маржа: {tenant_rent - owner_rent})"
+    rent_day = fields.get("rent_day")
+    if rent_day:
+        summary += f", аренда {rent_day}-го числа каждый месяц"
     lease_start, lease_end = fields.get("lease_start"), fields.get("lease_end")
     if lease_start or lease_end:
         summary += f", срок: {lease_start or '?'} – {lease_end or '?'}"
     return summary
 
 
-def create_quick_move_in(apartment, tenant_name=None, tenant_phone=None, tenant_phone2=None, lease_start=None, lease_end=None, meters=None):
+def create_quick_move_in(apartment, tenant_name=None, tenant_phone=None, tenant_phone2=None, lease_start=None, lease_end=None, tenant_rent=None, deposit=None, meters=None):
     status, info = db_find_apartment(apartment)
     if status == "not_found":
         return f"Квартира '{apartment}' не найдена в справочнике, сэр."
     if status == "ambiguous":
         return "Нашлось несколько подходящих квартир: " + ", ".join(info) + ". Уточните, сэр."
     apartment_id, address = info
-    db_add_apartment(address, tenant_name=tenant_name, tenant_phone=tenant_phone, tenant_phone2=tenant_phone2, lease_start=lease_start, lease_end=lease_end)
+    db_add_apartment(address, tenant_name=tenant_name, tenant_phone=tenant_phone, tenant_phone2=tenant_phone2,
+                     lease_start=lease_start, lease_end=lease_end, tenant_rent=tenant_rent, deposit=deposit)
     for utility_type, reading in (meters or {}).items():
         db_set_meter_reading(apartment_id, utility_type, reading, lease_start)
     summary = f"Заселение записано, сэр: {address}"
@@ -1610,6 +1619,10 @@ def create_quick_move_in(apartment, tenant_name=None, tenant_phone=None, tenant_
         summary += f" — {tenant_name}"
     if lease_start or lease_end:
         summary += f", срок: {lease_start or '?'} – {lease_end or '?'}"
+    if tenant_rent is not None:
+        summary += f", аренда {tenant_rent}"
+    if deposit is not None:
+        summary += f", депозит {deposit}"
     if meters:
         summary += ". Показания на момент заселения: " + ", ".join(f"{k} {v}" for k, v in meters.items())
     return summary
@@ -1688,18 +1701,22 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except (TypeError, ValueError):
                 return None
 
+        def _int(key):
+            value = data.get(key)
+            try:
+                return int(value) if value not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+
         def _str(key):
             return (data.get(key) or "").strip() or None
 
         summary = create_quick_apartment(
             address,
             owner_name=_str("owner_name"),
-            tenant_rent=_num("tenant_rent"),
             owner_rent=_num("owner_rent"),
-            deposit=_num("deposit"),
+            rent_day=_int("rent_day"),
             notes=_str("notes"),
-            lease_start=_str("lease_start"),
-            lease_end=_str("lease_end"),
             floor=_str("floor"),
             unit_number=_str("unit_number"),
             wifi_login=_str("wifi_login"),
@@ -1720,6 +1737,14 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 meters[utility_type] = float(value)
             except (TypeError, ValueError):
                 pass
+
+        def _num(key):
+            value = data.get(key)
+            try:
+                return float(value) if value not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+
         summary = create_quick_move_in(
             apartment,
             (data.get("tenant_name") or "").strip() or None,
@@ -1727,7 +1752,9 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
             (data.get("tenant_phone2") or "").strip() or None,
             (data.get("lease_start") or "").strip() or None,
             (data.get("lease_end") or "").strip() or None,
-            meters,
+            tenant_rent=_num("tenant_rent"),
+            deposit=_num("deposit"),
+            meters=meters,
         )
         await update.message.reply_text(summary, reply_markup=MAIN_KEYBOARD)
         return
