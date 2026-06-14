@@ -501,7 +501,7 @@ def db_get_finance():
 
 
 APARTMENT_FIELDS = [
-    "owner_name", "tenant_rent", "owner_rent", "rent_day", "deposit", "notes",
+    "owner_name", "tenant_rent", "tenant_pay_day", "owner_rent", "rent_day", "deposit", "notes",
     "lease_start", "lease_end", "utilities_fixed",
     "floor", "unit_number", "wifi_login", "wifi_password", "owner_contacts",
     "tenant_name", "tenant_phone", "tenant_phone2",
@@ -536,14 +536,14 @@ def db_clear_tenant(apartment_id):
 def db_get_apartments():
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("""SELECT address, owner_name, tenant_rent, owner_rent, rent_day, deposit, lease_start, lease_end, utilities_fixed,
+        c.execute("""SELECT address, owner_name, tenant_rent, tenant_pay_day, owner_rent, rent_day, deposit, lease_start, lease_end, utilities_fixed,
                             floor, unit_number, wifi_login, wifi_password, owner_contacts, tenant_name, tenant_phone, tenant_phone2
                      FROM apartments WHERE active ORDER BY address""")
         rows = c.fetchall()
     if not rows:
         return "Квартир в справочнике нет."
     result = []
-    for (address, owner_name, tenant_rent, owner_rent, rent_day, deposit, lease_start, lease_end, utilities_fixed,
+    for (address, owner_name, tenant_rent, tenant_pay_day, owner_rent, rent_day, deposit, lease_start, lease_end, utilities_fixed,
          floor, unit_number, wifi_login, wifi_password, owner_contacts, tenant_name, tenant_phone, tenant_phone2) in rows:
         line = f"*{address}*"
         if floor or unit_number:
@@ -558,6 +558,8 @@ def db_get_apartments():
             line += f"\n  день аренды: {rent_day}-го числа"
         if tenant_rent is not None:
             line += f"\n  аренда с квартиранта: {tenant_rent}"
+        if tenant_pay_day is not None:
+            line += f"\n  квартирант платит {tenant_pay_day}-го числа"
         if tenant_rent is not None and owner_rent is not None:
             line += f"\n  маржа: {tenant_rent - owner_rent}"
         if deposit is not None:
@@ -949,7 +951,7 @@ def build_system(context_str=""):
 
 Учёт квартир (касса по сдаче квартир в субаренду) — отдельная система от личных финансов (finance), не путай их. Валюта операций по умолчанию MDL (лей); если сэр называет сумму в евро — указывай currency='EUR'. При записи операции по квартире уточняй направление (приход/расход) и категорию (Аренда/Коммуналка/Депозит/Прочее), если не очевидно из контекста. Если адрес квартиры не найден или найдено несколько подходящих — переспроси сэра, не выбирай сам, и предложи добавить квартиру через add_apartment, если её действительно нет в справочнике. Сверку кассы (reconcile_apartment_balance) делай только когда сэр явно называет фактическую сумму на руках.
 
-У квартиры есть два разных понятия аренды: rent_day — постоянное число месяца (1-31), когда обычно собирают показания счётчиков и арендную плату, не меняется при смене квартиранта (задаётся один раз через add_apartment вместе с owner_rent — суммой аренды, которую отдаём собственнику). И lease_start/lease_end/tenant_rent/deposit — данные ТЕКУЩЕГО квартиранта (период проживания, сумма его аренды, депозит), которые обновляются при каждом заселении. Когда сэр сообщает, что заехал новый квартирант "с такого-то по такое-то число", сначала вызови get_apartments, чтобы найти точный адрес этой квартиры как он записан в справочнике (квартира уже должна существовать), и вызови add_apartment с этим же адресом и lease_start/lease_end (формат YYYY-MM-DD), а также tenant_rent/deposit, если сэр их называет — остальные поля не указывай, они не изменятся. Если адрес не нашёлся в справочнике — переспроси сэра, не создавай новую квартиру по неточному адресу. Бот сам каждый день в 8:00 проверяет: за день до rent_day (по числу месяца) — напоминает собрать показания счётчиков и сделать просчёт перед встречей; а в последние 10 дней перед lease_end — напоминает спросить квартиранта про продление или выезд (один раз за контракт). Дополнительно есть регулярные ежемесячные напоминания по SOP (sop_reminders) — фиксированные задачи по числам месяца (фактуры, газ, интернет и т.д.), которые бот тоже сам присылает в 8:00. По просьбе сэра показывай список (get_sop_reminders), добавляй (add_sop_reminder) или убирай (remove_sop_reminder) такие напоминания.
+У квартиры есть два разных понятия дня оплаты — не путай их: rent_day — день, когда МЫ платим аренду собственнику и собираем показания счётчиков; постоянное число месяца (1-31), не меняется при смене квартиранта (задаётся один раз через add_apartment вместе с owner_rent — суммой аренды, которую отдаём собственнику). И tenant_pay_day — день, когда ТЕКУЩИЙ квартирант платит аренду НАМ (день сбора оплаты с квартиранта); меняется при смене квартиранта, задаётся/обновляется через add_apartment вместе с tenant_rent. Когда сэр спрашивает про график сбора аренды с квартирантов ("когда забираем аренду у квартирантов", "список по квартирантам") — используй tenant_pay_day, а не rent_day. И lease_start/lease_end/tenant_rent/tenant_pay_day/deposit — данные ТЕКУЩЕГО квартиранта (период проживания, сумма его аренды, день оплаты, депозит), которые обновляются при каждом заселении. Когда сэр сообщает, что заехал новый квартирант "с такого-то по такое-то число", сначала вызови get_apartments, чтобы найти точный адрес этой квартиры как он записан в справочнике (квартира уже должна существовать), и вызови add_apartment с этим же адресом и lease_start/lease_end (формат YYYY-MM-DD), а также tenant_rent/tenant_pay_day/deposit, если сэр их называет — остальные поля не указывай, они не изменятся. Если адрес не нашёлся в справочнике — переспроси сэра, не создавай новую квартиру по неточному адресу. Бот сам каждый день в 8:00 проверяет: за день до rent_day (по числу месяца) — напоминает собрать показания счётчиков и сделать просчёт перед встречей; а в последние 10 дней перед lease_end — напоминает спросить квартиранта про продление или выезд (один раз за контракт). Дополнительно есть регулярные ежемесячные напоминания по SOP (sop_reminders) — фиксированные задачи по числам месяца (фактуры, газ, интернет и т.д.), которые бот тоже сам присылает в 8:00. По просьбе сэра показывай список (get_sop_reminders), добавляй (add_sop_reminder) или убирай (remove_sop_reminder) такие напоминания.
 
 Расчёт коммуналки по счётчикам (calculate_utilities) — сэр называет новые показания (свет/газ/вода, иногда отопление/горячая вода — не у всех квартир), бот сам помнит прошлые показания, считает разницу × тариф и выводит разбивку с итогом. Тарифы (utility_tariffs) единые для всех квартир — если сэр говорит "тариф на газ теперь X" — вызови set_utility_tariff; текущие тарифы — get_utility_tariffs. Если для квартиры/услуги ещё нет сохранённого показания — текущее становится базовым, стоимость в этот раз 0. Фиксированная часть коммуналки (интернет и т.п., apartments.utilities_fixed) добавляется к итогу автоматически — задаётся/обновляется через add_apartment. Разовые статьи "по платёжке" (обслуживание дома, отопление в старых домах, уборка при выселении 500-1000 и т.п.) передавай через extra_items каждый раз отдельно, они не сохраняются. После расчёта, если сэр просит записать итог в кассу — отдельно вызови record_apartment_operation (приход, категория "Коммуналка").
 
@@ -1099,8 +1101,9 @@ def process_message(user_message, system):
                     "address": {"type": "string"},
                     "owner_name": {"type": "string"},
                     "tenant_rent": {"type": "number", "description": "Сумма аренды, которую платит текущий квартирант (обычно задаётся при заселении)"},
+                    "tenant_pay_day": {"type": "integer", "description": "Число месяца (1-31), когда ТЕКУЩИЙ квартирант платит аренду нам (день сбора оплаты с квартиранта). Меняется при смене квартиранта. Не путать с rent_day!"},
                     "owner_rent": {"type": "number", "description": "Сумма аренды, которую отдаём собственнику — постоянная для квартиры"},
-                    "rent_day": {"type": "integer", "description": "Число месяца (1-31), когда нужно собирать показания счётчиков и арендную плату. Постоянное для квартиры, не меняется при смене квартиранта"},
+                    "rent_day": {"type": "integer", "description": "Число месяца (1-31), когда МЫ платим аренду собственнику и собираем показания счётчиков. Постоянное для квартиры, не меняется при смене квартиранта. Не путать с tenant_pay_day!"},
                     "deposit": {"type": "number", "description": "Депозит текущего квартиранта (обычно задаётся при заселении)"},
                     "notes": {"type": "string"},
                     "lease_start": {"type": "string", "description": "Дата заезда текущего квартиранта, YYYY-MM-DD"},
