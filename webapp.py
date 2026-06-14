@@ -20,30 +20,40 @@ logger = logging.getLogger(__name__)
 def verify_init_data(init_data, max_age_seconds=86400):
     """Проверяет подпись Telegram WebApp initData и что это наш пользователь."""
     if not init_data:
+        logger.warning("initData: пусто (форма открыта вне Telegram или клиент не передал подпись)")
         return False
     try:
         parsed = dict(parse_qsl(init_data, strict_parsing=True))
     except ValueError:
+        logger.warning("initData: не удалось разобрать строку")
         return False
     received_hash = parsed.pop("hash", None)
+    # Поле signature (новые клиенты Telegram) тоже исключается из строки проверки
+    parsed.pop("signature", None)
     if not received_hash:
+        logger.warning("initData: нет поля hash")
         return False
     data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
     secret_key = hmac.new(b"WebAppData", TELEGRAM_TOKEN.encode(), hashlib.sha256).digest()
     calc_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(calc_hash, received_hash):
+        logger.warning("initData: подпись не совпала")
         return False
     # Защита от старых/повторных данных
     try:
         auth_date = int(parsed.get("auth_date", "0"))
         if max_age_seconds and (now_msk().timestamp() - auth_date) > max_age_seconds:
+            logger.warning("initData: данные устарели (auth_date старше суток)")
             return False
     except ValueError:
         return False
     # Только разрешённый пользователь
     try:
         user = json.loads(parsed.get("user", "{}"))
-        return int(user.get("id", 0)) == ALLOWED_USER_ID
+        if int(user.get("id", 0)) == ALLOWED_USER_ID:
+            return True
+        logger.warning("initData: чужой пользователь id=%s", user.get("id"))
+        return False
     except (ValueError, TypeError):
         return False
 
