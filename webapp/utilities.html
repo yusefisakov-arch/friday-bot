@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Коммуналка</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--tg-theme-bg-color, #ffffff);
+    color: var(--tg-theme-text-color, #000000);
+  }
+  h2 { margin: 0 0 16px; font-size: 18px; }
+  h3 { margin: 24px 0 8px; font-size: 14px; color: var(--tg-theme-hint-color, #999999); text-transform: uppercase; letter-spacing: 0.03em; }
+  .field { margin-bottom: 20px; }
+  label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--tg-theme-hint-color, #999999);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  input[type="text"], input[type="number"], select {
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--tg-theme-hint-color, #cccccc);
+    background: var(--tg-theme-secondary-bg-color, #f0f0f0);
+    color: var(--tg-theme-text-color, #000000);
+    font-size: 16px;
+    font-family: inherit;
+  }
+  .checkbox-row { display: flex; align-items: center; gap: 10px; }
+  .checkbox-row input { width: auto; }
+  .checkbox-row label { margin: 0; text-transform: none; letter-spacing: normal; font-weight: 400; font-size: 15px; color: var(--tg-theme-text-color, #000000); }
+  .hint { font-size: 13px; color: var(--tg-theme-hint-color, #999999); margin-top: -8px; }
+</style>
+</head>
+<body>
+  <h2>Расчёт коммуналки</h2>
+
+  <div class="field">
+    <label>Квартира</label>
+    <select id="apartment-select">
+      <option value="">Выберите квартиру</option>
+    </select>
+  </div>
+
+  <h3>Новые показания счётчиков</h3>
+  <p class="hint">Введите текущие показания. Бот сам вспомнит прошлые, посчитает разницу × тариф и сохранит новые как базу.</p>
+  <div id="meters"></div>
+
+  <div class="field checkbox-row">
+    <input type="checkbox" id="record-cash">
+    <label for="record-cash">Записать итог в кассу (приход, Коммуналка)</label>
+  </div>
+
+  <script>
+    var tg = window.Telegram.WebApp;
+    tg.ready();
+    tg.expand();
+
+    var UNITS = {
+      "свет": "кВт·ч",
+      "газ": "м³",
+      "вода": "м³",
+      "горячая вода": "м³",
+      "отопление": "м³"
+    };
+
+    var metersContainer = document.getElementById("meters");
+    Object.keys(UNITS).forEach(function (utilityType) {
+      var field = document.createElement("div");
+      field.className = "field";
+      var label = document.createElement("label");
+      label.textContent = utilityType + " (" + UNITS[utilityType] + ")";
+      var input = document.createElement("input");
+      input.type = "number";
+      input.inputMode = "decimal";
+      input.placeholder = "0";
+      input.dataset.utility = utilityType;
+      field.appendChild(label);
+      field.appendChild(input);
+      metersContainer.appendChild(field);
+    });
+
+    var apartmentSelect = document.getElementById("apartment-select");
+    fetch("/api/apartments", { headers: { "X-Telegram-Init-Data": tg.initData } }).then(function (r) { return r.json(); }).then(function (apartments) {
+      apartments.forEach(function (address) {
+        var opt = document.createElement("option");
+        opt.value = address;
+        opt.textContent = address;
+        apartmentSelect.appendChild(opt);
+      });
+    }).catch(function () {});
+
+    tg.MainButton.setText("Посчитать коммуналку");
+    tg.MainButton.show();
+    tg.MainButton.onClick(function () {
+      if (!apartmentSelect.value) {
+        tg.showAlert("Выберите квартиру, сэр.");
+        return;
+      }
+
+      var meters = {};
+      metersContainer.querySelectorAll("input").forEach(function (input) {
+        if (input.value !== "") {
+          meters[input.dataset.utility] = input.value;
+        }
+      });
+
+      if (Object.keys(meters).length === 0) {
+        tg.showAlert("Введите хотя бы одно показание, сэр.");
+        return;
+      }
+
+      tg.sendData(JSON.stringify({
+        form: "utilities",
+        apartment: apartmentSelect.value,
+        meters: meters,
+        record_cash: document.getElementById("record-cash").checked
+      }));
+    });
+  </script>
+</body>
+</html>
