@@ -1294,7 +1294,7 @@ def process_message(user_message, system):
     for _ in range(5):
         response = anthropic.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=2048,
+            max_tokens=4096,
             system=system,
             messages=messages,
             tools=tools
@@ -1310,112 +1310,116 @@ def process_message(user_message, system):
         for block in tool_uses:
             inp = block.input
             result = ""
-            if block.name == "create_task":
-                db_create_task(inp["name"], inp.get("deadline"), inp.get("priority"), inp.get("assignee"))
-                result = f"Задача создана: {inp['name']}"
-            elif block.name == "get_tasks":
-                result = db_get_tasks()
-            elif block.name == "close_task":
-                status, items = db_close_task(inp["name_part"])
-                if status == "closed":
-                    result = f"Задача закрыта: {items[0]}"
-                elif status == "ambiguous":
-                    result = "Нашлось несколько подходящих задач, уточни у сэра какую закрыть:\n" + "\n".join(f"- {n}" for n in items)
-                else:
-                    result = "Задача не найдена"
-            elif block.name == "update_task":
-                status, items = db_update_task(inp["name_part"], inp.get("deadline"), inp.get("priority"), inp.get("assignee"))
-                if status == "updated":
-                    result = f"Задача обновлена: {items[0]}"
-                elif status == "ambiguous":
-                    result = "Нашлось несколько подходящих задач, уточни у сэра какую менять:\n" + "\n".join(f"- {n}" for n in items)
-                else:
-                    result = "Задача не найдена"
-            elif block.name == "find_task":
-                result = db_find_task(inp["name_part"])
-            elif block.name == "create_decision":
-                db_create_decision(inp["with_whom"], inp["what_decided"], inp.get("deadline"), inp.get("next_step"))
-                result = f"Записано: {inp['with_whom']} — {inp['what_decided']}"
-            elif block.name == "get_decisions":
-                result = db_get_decisions()
-            elif block.name == "close_decision":
-                status, items = db_close_decision(inp["text_part"])
-                if status == "closed":
-                    result = f"Договорённость закрыта: {items[0]}"
-                elif status == "ambiguous":
-                    result = "Нашлось несколько подходящих договорённостей, уточни у сэра какую закрыть:\n" + "\n".join(f"- {n}" for n in items)
-                else:
-                    result = "Договорённость не найдена"
-            elif block.name == "create_finance":
-                db_create_finance(inp["amount"], inp["category"], inp.get("type", "расход"), inp.get("comment"))
-                sign = "-" if inp.get("type", "расход") == "расход" else "+"
-                result = f"Записано: {inp['category']} {sign}{inp['amount']}"
-            elif block.name == "get_finance":
-                result = db_get_finance()
-            elif block.name == "add_apartment":
-                db_add_apartment(inp["address"], **{f: inp.get(f) for f in APARTMENT_FIELDS})
-                result = f"Квартира сохранена: {inp['address']}"
-            elif block.name == "get_apartments":
-                result = db_get_apartments()
-            elif block.name == "record_apartment_operation":
-                status, info = db_record_apartment_operation(
-                    inp.get("apartment"), inp["direction"], inp["category"], inp["amount"],
-                    inp.get("currency", "MDL"), inp.get("counterpart"), inp.get("date"), inp.get("comment")
-                )
-                if status == "recorded":
-                    sign = "+" if inp["direction"] == "приход" else "-"
-                    address_part = f" ({info})" if info else ""
-                    result = f"Записано в кассу квартир{address_part}: {sign}{inp['amount']} {inp.get('currency', 'MDL')} [{inp['category']}]"
-                elif status == "ambiguous":
-                    result = "Нашлось несколько подходящих квартир, уточни у сэра какую он имеет в виду:\n" + "\n".join(f"- {a}" for a in info)
-                else:
-                    result = f"Квартира '{info}' не найдена в справочнике. Уточни у сэра адрес или предложи добавить квартиру через add_apartment"
-            elif block.name == "get_apartment_balance":
-                result = db_get_apartment_balance()
-            elif block.name == "reconcile_apartment_balance":
-                currency = inp.get("currency", "MDL")
-                expected, actual, diff = db_reconcile_apartment_balance(inp["actual_balance"], currency, inp.get("comment"))
-                if diff == 0:
-                    result = f"Сверка ({currency}): расчётный баланс {expected} совпал с фактическим {actual}."
-                else:
-                    result = f"Сверка ({currency}): расчётный баланс {expected}, по факту {actual}, расхождение {diff}. Записал корректирующую операцию."
-            elif block.name == "get_apartment_report":
-                result = db_get_apartment_report(inp.get("apartment"), inp.get("category"), inp.get("direction"), inp.get("date_from"), inp.get("date_to"))
-            elif block.name == "generate_chart":
-                chart_path = make_chart(inp["title"], inp["chart_type"], inp["labels"], inp["values"])
-                result = "График построен, будет отправлен сэру отдельным сообщением."
-            elif block.name == "get_utility_tariffs":
-                result = db_get_utility_tariffs()
-            elif block.name == "set_utility_tariff":
-                db_set_utility_tariff(inp["utility_type"], inp["tariff"])
-                result = f"Тариф обновлён: {inp['utility_type']} — {inp['tariff']} MDL/{UTILITY_UNITS.get(inp['utility_type'], 'ед.')}"
-            elif block.name == "calculate_utilities":
-                status, info, lines, total = db_calculate_utilities(inp["apartment"], inp["readings"], inp.get("extra_items"))
-                if status == "ok":
-                    result = f"Расчёт коммуналки для {info}:\n" + "\n".join(lines) + f"\n\nИТОГО: {total} MDL"
-                elif status == "ambiguous":
-                    result = "Нашлось несколько подходящих квартир, уточни у сэра какую он имеет в виду:\n" + "\n".join(f"- {a}" for a in info)
-                else:
-                    result = f"Квартира '{info}' не найдена в справочнике. Уточни у сэра адрес или предложи добавить квартиру через add_apartment"
-            elif block.name == "save_preference":
-                db_save_preference(inp["key"], inp["value"])
-                result = f"Запомнено: {inp['key']}"
-            elif block.name == "create_reminder":
-                db_create_reminder(inp["text"], inp["remind_at"])
-                result = f"Напоминание установлено на {inp['remind_at']}"
-            elif block.name == "get_sop_reminders":
-                result = db_get_sop_reminders()
-            elif block.name == "add_sop_reminder":
-                db_add_sop_reminder(inp["day_of_month"], inp["text"])
-                result = f"Напоминание добавлено на {inp['day_of_month']} число: {inp['text']}"
-            elif block.name == "remove_sop_reminder":
-                status, items = db_remove_sop_reminder(inp["text_part"])
-                if status == "removed":
-                    result = f"Напоминание убрано: {items[0]}"
-                elif status == "ambiguous":
-                    result = "Нашлось несколько подходящих напоминаний, уточни у сэра какое убрать:\n" + "\n".join(f"- {t}" for t in items)
-                else:
-                    result = "Напоминание не найдено"
+            try:
+                if block.name == "create_task":
+                    db_create_task(inp["name"], inp.get("deadline"), inp.get("priority"), inp.get("assignee"))
+                    result = f"Задача создана: {inp['name']}"
+                elif block.name == "get_tasks":
+                    result = db_get_tasks()
+                elif block.name == "close_task":
+                    status, items = db_close_task(inp["name_part"])
+                    if status == "closed":
+                        result = f"Задача закрыта: {items[0]}"
+                    elif status == "ambiguous":
+                        result = "Нашлось несколько подходящих задач, уточни у сэра какую закрыть:\n" + "\n".join(f"- {n}" for n in items)
+                    else:
+                        result = "Задача не найдена"
+                elif block.name == "update_task":
+                    status, items = db_update_task(inp["name_part"], inp.get("deadline"), inp.get("priority"), inp.get("assignee"))
+                    if status == "updated":
+                        result = f"Задача обновлена: {items[0]}"
+                    elif status == "ambiguous":
+                        result = "Нашлось несколько подходящих задач, уточни у сэра какую менять:\n" + "\n".join(f"- {n}" for n in items)
+                    else:
+                        result = "Задача не найдена"
+                elif block.name == "find_task":
+                    result = db_find_task(inp["name_part"])
+                elif block.name == "create_decision":
+                    db_create_decision(inp["with_whom"], inp["what_decided"], inp.get("deadline"), inp.get("next_step"))
+                    result = f"Записано: {inp['with_whom']} — {inp['what_decided']}"
+                elif block.name == "get_decisions":
+                    result = db_get_decisions()
+                elif block.name == "close_decision":
+                    status, items = db_close_decision(inp["text_part"])
+                    if status == "closed":
+                        result = f"Договорённость закрыта: {items[0]}"
+                    elif status == "ambiguous":
+                        result = "Нашлось несколько подходящих договорённостей, уточни у сэра какую закрыть:\n" + "\n".join(f"- {n}" for n in items)
+                    else:
+                        result = "Договорённость не найдена"
+                elif block.name == "create_finance":
+                    db_create_finance(inp["amount"], inp["category"], inp.get("type", "расход"), inp.get("comment"))
+                    sign = "-" if inp.get("type", "расход") == "расход" else "+"
+                    result = f"Записано: {inp['category']} {sign}{inp['amount']}"
+                elif block.name == "get_finance":
+                    result = db_get_finance()
+                elif block.name == "add_apartment":
+                    db_add_apartment(inp["address"], **{f: inp.get(f) for f in APARTMENT_FIELDS})
+                    result = f"Квартира сохранена: {inp['address']}"
+                elif block.name == "get_apartments":
+                    result = db_get_apartments()
+                elif block.name == "record_apartment_operation":
+                    status, info = db_record_apartment_operation(
+                        inp.get("apartment"), inp["direction"], inp["category"], inp["amount"],
+                        inp.get("currency", "MDL"), inp.get("counterpart"), inp.get("date"), inp.get("comment")
+                    )
+                    if status == "recorded":
+                        sign = "+" if inp["direction"] == "приход" else "-"
+                        address_part = f" ({info})" if info else ""
+                        result = f"Записано в кассу квартир{address_part}: {sign}{inp['amount']} {inp.get('currency', 'MDL')} [{inp['category']}]"
+                    elif status == "ambiguous":
+                        result = "Нашлось несколько подходящих квартир, уточни у сэра какую он имеет в виду:\n" + "\n".join(f"- {a}" for a in info)
+                    else:
+                        result = f"Квартира '{info}' не найдена в справочнике. Уточни у сэра адрес или предложи добавить квартиру через add_apartment"
+                elif block.name == "get_apartment_balance":
+                    result = db_get_apartment_balance()
+                elif block.name == "reconcile_apartment_balance":
+                    currency = inp.get("currency", "MDL")
+                    expected, actual, diff = db_reconcile_apartment_balance(inp["actual_balance"], currency, inp.get("comment"))
+                    if diff == 0:
+                        result = f"Сверка ({currency}): расчётный баланс {expected} совпал с фактическим {actual}."
+                    else:
+                        result = f"Сверка ({currency}): расчётный баланс {expected}, по факту {actual}, расхождение {diff}. Записал корректирующую операцию."
+                elif block.name == "get_apartment_report":
+                    result = db_get_apartment_report(inp.get("apartment"), inp.get("category"), inp.get("direction"), inp.get("date_from"), inp.get("date_to"))
+                elif block.name == "generate_chart":
+                    chart_path = make_chart(inp["title"], inp["chart_type"], inp["labels"], inp["values"])
+                    result = "График построен, будет отправлен сэру отдельным сообщением."
+                elif block.name == "get_utility_tariffs":
+                    result = db_get_utility_tariffs()
+                elif block.name == "set_utility_tariff":
+                    db_set_utility_tariff(inp["utility_type"], inp["tariff"])
+                    result = f"Тариф обновлён: {inp['utility_type']} — {inp['tariff']} MDL/{UTILITY_UNITS.get(inp['utility_type'], 'ед.')}"
+                elif block.name == "calculate_utilities":
+                    status, info, lines, total = db_calculate_utilities(inp["apartment"], inp["readings"], inp.get("extra_items"))
+                    if status == "ok":
+                        result = f"Расчёт коммуналки для {info}:\n" + "\n".join(lines) + f"\n\nИТОГО: {total} MDL"
+                    elif status == "ambiguous":
+                        result = "Нашлось несколько подходящих квартир, уточни у сэра какую он имеет в виду:\n" + "\n".join(f"- {a}" for a in info)
+                    else:
+                        result = f"Квартира '{info}' не найдена в справочнике. Уточни у сэра адрес или предложи добавить квартиру через add_apartment"
+                elif block.name == "save_preference":
+                    db_save_preference(inp["key"], inp["value"])
+                    result = f"Запомнено: {inp['key']}"
+                elif block.name == "create_reminder":
+                    db_create_reminder(inp["text"], inp["remind_at"])
+                    result = f"Напоминание установлено на {inp['remind_at']}"
+                elif block.name == "get_sop_reminders":
+                    result = db_get_sop_reminders()
+                elif block.name == "add_sop_reminder":
+                    db_add_sop_reminder(inp["day_of_month"], inp["text"])
+                    result = f"Напоминание добавлено на {inp['day_of_month']} число: {inp['text']}"
+                elif block.name == "remove_sop_reminder":
+                    status, items = db_remove_sop_reminder(inp["text_part"])
+                    if status == "removed":
+                        result = f"Напоминание убрано: {items[0]}"
+                    elif status == "ambiguous":
+                        result = "Нашлось несколько подходящих напоминаний, уточни у сэра какое убрать:\n" + "\n".join(f"- {t}" for t in items)
+                    else:
+                        result = "Напоминание не найдено"
+            except Exception as e:
+                logger.error(f"Tool {block.name} error: {e}")
+                result = f"Ошибка при выполнении {block.name}: {e}. Если задача большая (много квартир/объектов), разбей её на несколько меньших шагов."
             tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
 
         messages = messages + [
@@ -1450,8 +1454,10 @@ async def send_sop_reminders(bot: Bot):
         return
     lines = "\n".join(f"- {text}" for _, text in due)
     await send_md(bot, ALLOWED_USER_ID, f"*Напоминания по SOP, сэр:*\n{lines}")
-    for reminder_id, _ in due:
+    tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    for reminder_id, text in due:
         db_mark_sop_reminder_sent(reminder_id, current_month)
+        db_create_task(text, deadline=tomorrow)
 
 
 async def send_apartment_reminders(bot: Bot):
@@ -2074,6 +2080,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(chart_path)
     except Exception as e:
         logger.error(f"Error: {e}")
+        if conversation_history and conversation_history[-1] == {"role": "user", "content": user_message}:
+            conversation_history.pop()
         await update.message.reply_text("Произошла ошибка, сэр. Попробуйте ещё раз.")
 
 
