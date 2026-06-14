@@ -94,13 +94,14 @@
 
   <script>
     var tg = window.Telegram.WebApp;
+    var WAKEY = new URLSearchParams(location.search).get("k") || "";
     tg.ready();
     tg.expand();
 
     var selected = { deadline: "", priority: "", assignee: "" };
 
     var assigneeGroup = document.getElementById("assignee-options");
-    fetch("/api/staff", { headers: { "X-Telegram-Init-Data": tg.initData } }).then(function (r) { return r.json(); }).then(function (staff) {
+    fetch("/api/staff", { headers: { "X-Webapp-Key": WAKEY } }).then(function (r) { return r.json(); }).then(function (staff) {
       staff.slice().reverse().forEach(function (name) {
         var btn = document.createElement("button");
         btn.type = "button";

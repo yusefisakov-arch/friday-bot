@@ -2,6 +2,7 @@
 Не зависит от остальных модулей проекта."""
 import os
 import logging
+import hashlib
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -28,6 +29,13 @@ HISTORY_KEEP = 300   # сколько строк истории храним в 
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "").rstrip("/")
 PORT = int(os.environ.get("PORT", "8080"))
 WEBAPP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp")
+# Секрет для доступа к /api/* из мини-форм. Стабильно выводится из токена бота,
+# попадает только в ссылки клавиатуры, которую видит лишь разрешённый пользователь.
+WEBAPP_SECRET = hashlib.sha256(("webapp-api:" + TELEGRAM_TOKEN).encode()).hexdigest()[:32]
+
+
+def webapp_url(path):
+    return f"{WEBAPP_URL}/{path}?k={WEBAPP_SECRET}"
 
 STAFF = {
     "Жанель": "финансы, администрация",
@@ -57,13 +65,13 @@ SKIP_KEYBOARD = ReplyKeyboardMarkup([["Нет"]], resize_keyboard=True)
 if WEBAPP_URL:
     MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [
-            [KeyboardButton(QUICK_TASK_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/form")), VIEW_TASKS_BUTTON],
-            [KeyboardButton(QUICK_FINANCE_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/finance")), VIEW_FINANCE_BUTTON],
-            [KeyboardButton(QUICK_DECISION_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/decisions")), VIEW_DECISIONS_BUTTON],
-            [KeyboardButton(APARTMENT_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/apartments")), VIEW_APARTMENT_BALANCE_BUTTON],
-            [KeyboardButton(MOVE_IN_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/move_in")),
-             KeyboardButton(MOVE_OUT_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/move_out"))],
-            [KeyboardButton(UTILITIES_BUTTON, web_app=WebAppInfo(url=f"{WEBAPP_URL}/utilities"))],
+            [KeyboardButton(QUICK_TASK_BUTTON, web_app=WebAppInfo(url=webapp_url("form"))), VIEW_TASKS_BUTTON],
+            [KeyboardButton(QUICK_FINANCE_BUTTON, web_app=WebAppInfo(url=webapp_url("finance"))), VIEW_FINANCE_BUTTON],
+            [KeyboardButton(QUICK_DECISION_BUTTON, web_app=WebAppInfo(url=webapp_url("decisions"))), VIEW_DECISIONS_BUTTON],
+            [KeyboardButton(APARTMENT_BUTTON, web_app=WebAppInfo(url=webapp_url("apartments"))), VIEW_APARTMENT_BALANCE_BUTTON],
+            [KeyboardButton(MOVE_IN_BUTTON, web_app=WebAppInfo(url=webapp_url("move_in"))),
+             KeyboardButton(MOVE_OUT_BUTTON, web_app=WebAppInfo(url=webapp_url("move_out")))],
+            [KeyboardButton(UTILITIES_BUTTON, web_app=WebAppInfo(url=webapp_url("utilities")))],
         ],
         resize_keyboard=True,
     )

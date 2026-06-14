@@ -59,8 +59,15 @@ def verify_init_data(init_data, max_age_seconds=86400):
 
 
 def is_webapp_request_allowed(request):
-    init_data = request.headers.get("X-Telegram-Init-Data", "")
-    return verify_init_data(init_data)
+    # Мини-формы открываются кнопками reply-клавиатуры — Telegram им initData не даёт,
+    # поэтому доступ к /api/* проверяем по секретному ключу из адреса формы.
+    key = request.headers.get("X-Webapp-Key", "") or request.query.get("k", "")
+    if not WEBAPP_SECRET:
+        return False
+    if hmac.compare_digest(key, WEBAPP_SECRET):
+        return True
+    logger.warning("api: неверный или отсутствующий ключ доступа")
+    return False
 
 
 async def get_staff(request):

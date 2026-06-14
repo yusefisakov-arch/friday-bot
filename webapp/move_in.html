@@ -88,6 +88,7 @@
 
   <script>
     var tg = window.Telegram.WebApp;
+    var WAKEY = new URLSearchParams(location.search).get("k") || "";
     tg.ready();
     tg.expand();
 
@@ -116,7 +117,7 @@
     });
 
     var apartmentSelect = document.getElementById("apartment-select");
-    fetch("/api/apartments", { headers: { "X-Telegram-Init-Data": tg.initData } }).then(function (r) { return r.json(); }).then(function (apartments) {
+    fetch("/api/apartments", { headers: { "X-Webapp-Key": WAKEY } }).then(function (r) { return r.json(); }).then(function (apartments) {
       apartments.forEach(function (address) {
         var opt = document.createElement("option");
         opt.value = address;
