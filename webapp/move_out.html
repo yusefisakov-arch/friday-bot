@@ -97,7 +97,7 @@
     });
 
     var apartmentSelect = document.getElementById("apartment-select");
-    fetch("/api/apartments").then(function (r) { return r.json(); }).then(function (apartments) {
+    fetch("/api/apartments", { headers: { "X-Telegram-Init-Data": tg.initData } }).then(function (r) { return r.json(); }).then(function (apartments) {
       apartments.forEach(function (address) {
         var opt = document.createElement("option");
         opt.value = address;

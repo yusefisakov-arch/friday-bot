@@ -3,6 +3,10 @@ import json
 import logging
 import uuid
 import tempfile
+import hmac
+import hashlib
+from urllib.parse import parse_qsl
+from decimal import Decimal, InvalidOperation
 from contextlib import contextmanager
 import psycopg2
 from psycopg2 import pool as pg_pool
@@ -31,6 +35,8 @@ if not ALLOWED_USER_ID:
 DATABASE_URL = os.environ["DATABASE_URL"]
 MSK = ZoneInfo("Europe/Moscow")
 conversation_history = []
+HISTORY_WINDOW = 20  # сколько последних сообщений держим в оперативной памяти диалога
+HISTORY_KEEP = 300   # сколько строк истории храним в базе (старше — чистим)
 
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "").rstrip("/")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -84,7 +90,7 @@ else:
         resize_keyboard=True,
     )
 
-_pool = pg_pool.SimpleConnectionPool(1, 5, DATABASE_URL)
+_pool = pg_pool.ThreadedConnectionPool(1, 10, DATABASE_URL)
 
 
 @contextmanager
@@ -106,6 +112,22 @@ def is_allowed(user_id):
 
 def now_msk():
     return datetime.now(MSK)
+
+
+def today_msk():
+    return now_msk().date()
+
+
+def to_decimal(value):
+    """Безопасно привести число (int/float/str/Decimal) к Decimal. None -> None."""
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
 
 
 def init_db():
@@ -161,6 +183,7 @@ def init_db():
             address TEXT NOT NULL UNIQUE,
             owner_name TEXT,
             tenant_rent NUMERIC,
+            tenant_pay_day INTEGER,
             owner_rent NUMERIC,
             rent_day INTEGER,
             deposit NUMERIC,
@@ -232,6 +255,10 @@ def init_db():
             tariff NUMERIC NOT NULL,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS job_runs (
+            job TEXT PRIMARY KEY,
+            last_run_date TEXT
+        )''')
         c.execute('''CREATE TABLE IF NOT EXISTS apartment_meters (
             id SERIAL PRIMARY KEY,
             apartment_id INTEGER REFERENCES apartments(id),
@@ -286,6 +313,7 @@ def init_db():
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS tenant_phone TEXT")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS tenant_phone2 TEXT")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS rent_day INTEGER")
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS tenant_pay_day INTEGER")
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -320,6 +348,17 @@ def db_create_task(name, deadline=None, priority=None, assignee=None):
     with db_conn() as conn:
         c = conn.cursor()
         c.execute("INSERT INTO tasks (name, deadline, priority, assignee) VALUES (%s, %s, %s, %s)", (name, deadline, priority, assignee))
+
+
+def db_create_task_if_absent(name, deadline=None):
+    """Создаёт задачу, только если открытой задачи с таким же названием ещё нет (защита от дублей SOP)."""
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT 1 FROM tasks WHERE name=%s AND status != 'Готово' LIMIT 1", (name,))
+        if c.fetchone():
+            return False
+        c.execute("INSERT INTO tasks (name, deadline) VALUES (%s, %s)", (name, deadline))
+        return True
 
 
 def db_get_tasks():
@@ -476,8 +515,8 @@ def db_close_decision(text_part):
 def db_create_finance(amount, category, fin_type="расход", comment=None):
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("INSERT INTO finance (amount, category, type, comment) VALUES (%s, %s, %s, %s)",
-                  (amount, category, fin_type, comment))
+        c.execute("INSERT INTO finance (amount, category, type, comment, date) VALUES (%s, %s, %s, %s, %s)",
+                  (amount, category, fin_type, comment, today_msk()))
 
 
 def db_get_finance():
@@ -485,8 +524,9 @@ def db_get_finance():
         c = conn.cursor()
         c.execute("SELECT amount, category, type, date FROM finance ORDER BY date DESC, id DESC LIMIT 10")
         rows = c.fetchall()
+        month_start = today_msk().replace(day=1)
         c.execute("""SELECT type, COALESCE(SUM(amount), 0) FROM finance
-                     WHERE date >= date_trunc('month', CURRENT_DATE) GROUP BY type""")
+                     WHERE date >= %s GROUP BY type""", (month_start,))
         totals = dict(c.fetchall())
     if not rows:
         return "Финансовых записей нет."
@@ -607,8 +647,8 @@ def db_record_apartment_operation(apartment, direction, category, amount, curren
         c = conn.cursor()
         c.execute("""INSERT INTO apartment_operations
                      (apartment_id, op_date, direction, category, counterpart, amount, currency, comment)
-                     VALUES (%s, COALESCE(%s, CURRENT_DATE), %s, %s, %s, %s, %s, %s)""",
-                  (apartment_id, op_date, direction, category, counterpart, amount, currency, comment))
+                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                  (apartment_id, op_date or today_msk(), direction, category, counterpart, amount, currency, comment))
     return "recorded", apartment_address
 
 
@@ -706,6 +746,43 @@ def db_get_apartment_report(apartment=None, category=None, direction=None, date_
     return "\n".join(result)
 
 
+def db_get_rent_status(month=None):
+    """Кто из квартирантов заплатил аренду за месяц, а кто нет (по приходам категории «Аренда»)."""
+    if month is None:
+        month = today_msk().strftime("%Y-%m")
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT a.address, a.tenant_name, a.tenant_rent, a.tenant_pay_day,
+                   EXISTS(SELECT 1 FROM apartment_operations o
+                          WHERE o.apartment_id = a.id AND o.direction = 'приход'
+                            AND o.category ILIKE 'аренда'
+                            AND to_char(o.op_date, 'YYYY-MM') = %s) AS paid
+            FROM apartments a
+            WHERE a.active AND a.tenant_name IS NOT NULL AND a.tenant_pay_day IS NOT NULL
+            ORDER BY a.tenant_pay_day, a.address
+        """, (month,))
+        rows = c.fetchall()
+    if not rows:
+        return "Нет квартир с заданной датой оплаты квартиранта."
+
+    def fmt(address, tenant_name, tenant_rent, pay_day):
+        line = f"- {address} — {tenant_name}"
+        if tenant_rent is not None:
+            line += f" — {tenant_rent}"
+        line += f" (платит {pay_day}-го)"
+        return line
+
+    unpaid = [fmt(a, t, r, d) for a, t, r, d, paid in rows if not paid]
+    paid_list = [fmt(a, t, r, d) for a, t, r, d, paid in rows if paid]
+    blocks = [f"*Оплата аренды за {month}:*"]
+    if unpaid:
+        blocks.append(f"\n*Не оплатили ({len(unpaid)}):*\n" + "\n".join(unpaid))
+    if paid_list:
+        blocks.append(f"\n*Оплатили ({len(paid_list)}):*\n" + "\n".join(paid_list))
+    return "\n".join(blocks)
+
+
 UTILITY_UNITS = {
     "свет": "кВт·ч",
     "газ": "м³",
@@ -754,12 +831,15 @@ def db_calculate_utilities(apartment, readings, extra_items=None):
     with db_conn() as conn:
         c = conn.cursor()
         lines = []
-        total = 0
+        total = Decimal(0)
 
         for item in readings:
             utility_type = item["utility_type"]
-            new_reading = item["reading"]
+            new_reading = to_decimal(item["reading"])
             unit = UTILITY_UNITS.get(utility_type, "ед.")
+            if new_reading is None:
+                lines.append(f"- {utility_type}: не понял показание ({item.get('reading')!r}) — пропущено")
+                continue
 
             c.execute("SELECT last_reading FROM apartment_meters WHERE apartment_id=%s AND utility_type=%s", (apartment_id, utility_type))
             row = c.fetchone()
@@ -795,8 +875,11 @@ def db_calculate_utilities(apartment, readings, extra_items=None):
             total += utilities_fixed
 
         for extra in (extra_items or []):
-            lines.append(f"- {extra['description']}: {extra['amount']} MDL")
-            total += extra["amount"]
+            amount = to_decimal(extra.get("amount"))
+            if amount is None:
+                continue
+            lines.append(f"- {extra['description']}: {amount} MDL")
+            total += amount
 
     return "ok", address, lines, total
 
@@ -882,6 +965,17 @@ def db_mark_sop_reminder_sent(reminder_id, current_month):
         c.execute("UPDATE sop_reminders SET last_sent_month=%s WHERE id=%s", (current_month, reminder_id))
 
 
+def db_claim_daily_job(job, today_str):
+    """Возвращает True ровно один раз за день для данной задачи (защита от пропусков и дублей)."""
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""INSERT INTO job_runs (job, last_run_date) VALUES (%s, %s)
+                     ON CONFLICT (job) DO UPDATE SET last_run_date = EXCLUDED.last_run_date
+                     WHERE job_runs.last_run_date IS DISTINCT FROM EXCLUDED.last_run_date
+                     RETURNING job""", (job, today_str))
+        return c.fetchone() is not None
+
+
 def db_get_apartments_for_reminders():
     with db_conn() as conn:
         c = conn.cursor()
@@ -908,12 +1002,20 @@ def db_save_message(role, content):
         c.execute("INSERT INTO conversation_history (role, content) VALUES (%s, %s)", (role, content))
 
 
-def db_get_recent_history(limit=10):
+def db_get_recent_history(limit=HISTORY_WINDOW):
     with db_conn() as conn:
         c = conn.cursor()
         c.execute("SELECT role, content FROM conversation_history ORDER BY id DESC LIMIT %s", (limit,))
         rows = c.fetchall()
     return [{"role": role, "content": content} for role, content in reversed(rows)]
+
+
+def db_prune_history(keep=HISTORY_KEEP):
+    """Чистим старую историю, оставляя последние `keep` записей — чтобы таблица не росла вечно."""
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""DELETE FROM conversation_history WHERE id NOT IN (
+                         SELECT id FROM conversation_history ORDER BY id DESC LIMIT %s)""", (keep,))
 
 
 def db_clear_history():
@@ -934,10 +1036,7 @@ def get_db_context():
     return f"Задачи:\n{tasks}\n\nДоговорённости:\n{decisions}"
 
 
-def build_system(context_str=""):
-    prefs = db_get_preferences()
-    prefs_block = f"\n\nЗапомненные предпочтения сэра:\n{prefs}" if prefs else ""
-    current_datetime = now_msk().strftime("%d.%m.%Y %H:%M")
+def build_system_static():
     staff_lines = ", ".join(f"{name} ({role})" for name, role in STAFF.items())
     return f"""Ты FRIDAY — исполнительный ассистент Юсефа, предпринимателя (отели, апартаменты, общепит, крипто).
 Сотрудники: {staff_lines}.
@@ -950,14 +1049,25 @@ def build_system(context_str=""):
 При записи финансов уточняй тип (расход или доход), если это не очевидно из контекста.
 
 Учёт квартир (касса по сдаче квартир в субаренду) — отдельная система от личных финансов (finance), не путай их. Валюта операций по умолчанию MDL (лей); если сэр называет сумму в евро — указывай currency='EUR'. При записи операции по квартире уточняй направление (приход/расход) и категорию (Аренда/Коммуналка/Депозит/Прочее), если не очевидно из контекста. Если адрес квартиры не найден или найдено несколько подходящих — переспроси сэра, не выбирай сам, и предложи добавить квартиру через add_apartment, если её действительно нет в справочнике. Сверку кассы (reconcile_apartment_balance) делай только когда сэр явно называет фактическую сумму на руках.
+Когда сэр сообщает, что квартирант заплатил аренду (например "Иван заплатил 700 за Лев Толстой" или "за Арборилор 2 оплатили"), сразу вызови record_apartment_operation (direction='приход', category='Аренда', counterpart — имя квартиранта, currency='EUR' если не сказано иначе) — это важно, иначе оплата не попадёт в кассу и потеряется. Если сэр перечисляет несколько оплат сразу — запиши каждую отдельным вызовом. На вопросы "кто не заплатил / кто должен / кто оплатил аренду" используй get_rent_status.
 
 У квартиры есть два разных понятия дня оплаты — не путай их: rent_day — день, когда МЫ платим аренду собственнику и собираем показания счётчиков; постоянное число месяца (1-31), не меняется при смене квартиранта (задаётся один раз через add_apartment вместе с owner_rent — суммой аренды, которую отдаём собственнику). И tenant_pay_day — день, когда ТЕКУЩИЙ квартирант платит аренду НАМ (день сбора оплаты с квартиранта); меняется при смене квартиранта, задаётся/обновляется через add_apartment вместе с tenant_rent. Когда сэр спрашивает про график сбора аренды с квартирантов ("когда забираем аренду у квартирантов", "список по квартирантам") — используй tenant_pay_day, а не rent_day. И lease_start/lease_end/tenant_rent/tenant_pay_day/deposit — данные ТЕКУЩЕГО квартиранта (период проживания, сумма его аренды, день оплаты, депозит), которые обновляются при каждом заселении. Когда сэр сообщает, что заехал новый квартирант "с такого-то по такое-то число", сначала вызови get_apartments, чтобы найти точный адрес этой квартиры как он записан в справочнике (квартира уже должна существовать), и вызови add_apartment с этим же адресом и lease_start/lease_end (формат YYYY-MM-DD), а также tenant_rent/tenant_pay_day/deposit, если сэр их называет — остальные поля не указывай, они не изменятся. Если адрес не нашёлся в справочнике — переспроси сэра, не создавай новую квартиру по неточному адресу. Бот сам каждый день в 8:00 проверяет: за день до rent_day (по числу месяца) — напоминает собрать показания счётчиков и сделать просчёт перед встречей; а в последние 10 дней перед lease_end — напоминает спросить квартиранта про продление или выезд (один раз за контракт). Дополнительно есть регулярные ежемесячные напоминания по SOP (sop_reminders) — фиксированные задачи по числам месяца (фактуры, газ, интернет и т.д.), которые бот тоже сам присылает в 8:00. По просьбе сэра показывай список (get_sop_reminders), добавляй (add_sop_reminder) или убирай (remove_sop_reminder) такие напоминания.
 
 Расчёт коммуналки по счётчикам (calculate_utilities) — сэр называет новые показания (свет/газ/вода, иногда отопление/горячая вода — не у всех квартир), бот сам помнит прошлые показания, считает разницу × тариф и выводит разбивку с итогом. Тарифы (utility_tariffs) единые для всех квартир — если сэр говорит "тариф на газ теперь X" — вызови set_utility_tariff; текущие тарифы — get_utility_tariffs. Если для квартиры/услуги ещё нет сохранённого показания — текущее становится базовым, стоимость в этот раз 0. Фиксированная часть коммуналки (интернет и т.п., apartments.utilities_fixed) добавляется к итогу автоматически — задаётся/обновляется через add_apartment. Разовые статьи "по платёжке" (обслуживание дома, отопление в старых домах, уборка при выселении 500-1000 и т.п.) передавай через extra_items каждый раз отдельно, они не сохраняются. После расчёта, если сэр просит записать итог в кассу — отдельно вызови record_apartment_operation (приход, категория "Коммуналка").
 
-Стиль: простой текст, язык — тот на котором пишет Юсеф. Для выделения важного (итоговые суммы, заголовки разделов в списках/отчётах) можно использовать *жирный* (одна звёздочка с каждой стороны) — Telegram отрендерит это жирным шрифтом. Не используй markdown-таблицы, заголовки с #, ---, двойные звёздочки ** , обратные кавычки и квадратные скобки. Обычные ответы — максимум 3-4 предложения; для списков/отчётов длина может быть больше.
+Стиль: простой текст, язык — тот на котором пишет Юсеф. Для выделения важного (итоговые суммы, заголовки разделов в списках/отчётах) можно использовать *жирный* (одна звёздочка с каждой стороны) — Telegram отрендерит это жирным шрифтом. Не используй markdown-таблицы, заголовки с #, ---, двойные звёздочки ** , обратные кавычки и квадратные скобки. Обычные ответы — максимум 3-4 предложения; для списков/отчётов длина может быть больше."""
 
-Дата: {current_datetime}{prefs_block}{context_str}"""
+
+def build_system(context_str=""):
+    """Системный промпт двумя блоками: статичная инструкция (кэшируется) + изменчивый хвост (дата/предпочтения/контекст)."""
+    prefs = db_get_preferences()
+    prefs_block = f"\n\nЗапомненные предпочтения сэра:\n{prefs}" if prefs else ""
+    current_datetime = now_msk().strftime("%d.%m.%Y %H:%M")
+    volatile = f"Дата: {current_datetime}{prefs_block}{context_str}"
+    return [
+        {"type": "text", "text": build_system_static(), "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": volatile},
+    ]
 
 
 async def reply_md(message, text, **kwargs):
@@ -992,7 +1102,7 @@ def make_chart(title, chart_type, labels, values):
     return path
 
 
-def process_message(user_message, system):
+def process_message(messages, system):
     tools = [
         {
             "name": "create_task",
@@ -1174,6 +1284,16 @@ def process_message(user_message, system):
             }
         },
         {
+            "name": "get_rent_status",
+            "description": "Показать, кто из квартирантов заплатил аренду за месяц, а кто нет. Используй на вопросы 'кто не заплатил', 'кто должен', 'кто оплатил аренду'. Оплата определяется по приходам категории «Аренда» в кассе квартир",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "month": {"type": "string", "description": "Месяц в формате YYYY-MM, по умолчанию текущий"}
+                }
+            }
+        },
+        {
             "name": "generate_chart",
             "description": "Построить картинку-график по готовым данным (например, из get_apartment_report) для наглядного отчёта",
             "input_schema": {
@@ -1291,7 +1411,11 @@ def process_message(user_message, system):
         }
     ]
 
-    messages = conversation_history
+    # Кэшируем массив инструментов (самая большая статичная часть запроса) —
+    # повторные запросы за ним стоят в ~10 раз дешевле.
+    tools[-1]["cache_control"] = {"type": "ephemeral"}
+
+    messages = list(messages)
     text = ""
     chart_path = None
     for _ in range(5):
@@ -1385,6 +1509,8 @@ def process_message(user_message, system):
                         result = f"Сверка ({currency}): расчётный баланс {expected}, по факту {actual}, расхождение {diff}. Записал корректирующую операцию."
                 elif block.name == "get_apartment_report":
                     result = db_get_apartment_report(inp.get("apartment"), inp.get("category"), inp.get("direction"), inp.get("date_from"), inp.get("date_to"))
+                elif block.name == "get_rent_status":
+                    result = db_get_rent_status(inp.get("month"))
                 elif block.name == "generate_chart":
                     chart_path = make_chart(inp["title"], inp["chart_type"], inp["labels"], inp["values"])
                     result = "График построен, будет отправлен сэру отдельным сообщением."
@@ -1460,7 +1586,7 @@ async def send_sop_reminders(bot: Bot):
     tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     for reminder_id, text in due:
         db_mark_sop_reminder_sent(reminder_id, current_month)
-        db_create_task(text, deadline=tomorrow)
+        db_create_task_if_absent(text, deadline=tomorrow)
 
 
 async def send_apartment_reminders(bot: Bot):
@@ -1487,8 +1613,10 @@ async def send_apartment_reminders(bot: Bot):
 async def scheduler(bot: Bot):
     while True:
         now = now_msk()
+        today_str = now.strftime("%Y-%m-%d")
 
-        if now.hour == 8 and now.minute == 0:
+        # Утренний блок: один раз за день в окне 8:00–11:59 (переживает рестарты и задержки).
+        if 8 <= now.hour <= 11 and db_claim_daily_job("morning", today_str):
             try:
                 await send_morning_briefing(bot)
             except Exception as e:
@@ -1501,8 +1629,13 @@ async def scheduler(bot: Bot):
                 await send_apartment_reminders(bot)
             except Exception as e:
                 logger.error(f"Apartment reminders error: {e}")
+            try:
+                db_prune_history()
+            except Exception as e:
+                logger.error(f"History prune error: {e}")
 
-        if now.hour == 21 and now.minute == 0:
+        # Вечерний блок: один раз за день в окне 21:00–23:59.
+        if now.hour >= 21 and db_claim_daily_job("evening", today_str):
             try:
                 await send_evening_briefing(bot)
             except Exception as e:
@@ -1524,11 +1657,51 @@ async def scheduler(bot: Bot):
         await asyncio.sleep(60)
 
 
+def verify_init_data(init_data, max_age_seconds=86400):
+    """Проверяет подпись Telegram WebApp initData и что это наш пользователь."""
+    if not init_data:
+        return False
+    try:
+        parsed = dict(parse_qsl(init_data, strict_parsing=True))
+    except ValueError:
+        return False
+    received_hash = parsed.pop("hash", None)
+    if not received_hash:
+        return False
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
+    secret_key = hmac.new(b"WebAppData", TELEGRAM_TOKEN.encode(), hashlib.sha256).digest()
+    calc_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calc_hash, received_hash):
+        return False
+    # Защита от старых/повторных данных
+    try:
+        auth_date = int(parsed.get("auth_date", "0"))
+        if max_age_seconds and (now_msk().timestamp() - auth_date) > max_age_seconds:
+            return False
+    except ValueError:
+        return False
+    # Только разрешённый пользователь
+    try:
+        user = json.loads(parsed.get("user", "{}"))
+        return int(user.get("id", 0)) == ALLOWED_USER_ID
+    except (ValueError, TypeError):
+        return False
+
+
+def is_webapp_request_allowed(request):
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    return verify_init_data(init_data)
+
+
 async def get_staff(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
     return web.json_response(list(STAFF.keys()))
 
 
 async def get_apartments_api(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
     with db_conn() as conn:
         c = conn.cursor()
         c.execute("SELECT address FROM apartments WHERE active ORDER BY address")
@@ -1715,12 +1888,32 @@ def create_quick_decision(with_whom, what_decided, deadline=None, next_step=None
     return summary
 
 
-def resolve_deadline(value):
-    if value == "today":
+def normalize_deadline(value):
+    """Приводит дедлайн к YYYY-MM-DD. Понимает кнопки и распространённые форматы дат.
+    Если распознать как дату не удалось — возвращает None (чтобы не ломать сортировку по срокам)."""
+    if not value:
+        return None
+    v = str(value).strip()
+    low = v.lower()
+    if low in ("нет", "no", "none"):
+        return None
+    if low in ("today", "сегодня"):
         return now_msk().strftime("%Y-%m-%d")
-    if value == "tomorrow":
+    if low in ("tomorrow", "завтра"):
         return (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
-    return value or None
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y", "%d/%m/%Y", "%d.%m"):
+        try:
+            d = datetime.strptime(v, fmt)
+            if fmt == "%d.%m":
+                d = d.replace(year=now_msk().year)
+            return d.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+
+def resolve_deadline(value):
+    return normalize_deadline(value)
 
 
 async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1919,14 +2112,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if quick_task_step == "deadline":
-        if user_message == "Сегодня":
-            deadline = now_msk().strftime("%Y-%m-%d")
-        elif user_message == "Завтра":
-            deadline = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
-        elif user_message == "Нет":
-            deadline = None
-        else:
-            deadline = user_message
+        deadline = normalize_deadline(user_message)
         context.user_data["quick_task"]["deadline"] = deadline
         context.user_data["quick_task_step"] = "priority"
         await update.message.reply_text("Приоритет? Выберите или напишите свой вариант.", reply_markup=PRIORITY_KEYBOARD)
@@ -2012,14 +2198,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if quick_decision_step == "deadline":
-        if user_message == "Сегодня":
-            deadline = now_msk().strftime("%Y-%m-%d")
-        elif user_message == "Завтра":
-            deadline = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
-        elif user_message == "Нет":
-            deadline = None
-        else:
-            deadline = user_message
+        deadline = normalize_deadline(user_message)
         context.user_data["quick_decision"]["deadline"] = deadline
         context.user_data["quick_decision_step"] = "next_step"
         await update.message.reply_text("Следующий шаг? Напишите или 'Нет'.", reply_markup=SKIP_KEYBOARD)
@@ -2062,8 +2241,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global conversation_history
 
     conversation_history.append({"role": "user", "content": user_message})
-    if len(conversation_history) > 10:
-        conversation_history = conversation_history[-10:]
+    if len(conversation_history) > HISTORY_WINDOW:
+        conversation_history = conversation_history[-HISTORY_WINDOW:]
 
     context_str = f"\n\n{get_db_context()}" if needs_context(user_message) else ""
     system = build_system(context_str)
@@ -2071,7 +2250,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         db_save_message("user", user_message)
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        assistant_message, chart_path = process_message(user_message, system)
+        # Тяжёлый синхронный вызов ИИ — в отдельном потоке, чтобы не блокировать
+        # напоминания, веб-формы и другие сообщения.
+        assistant_message, chart_path = await asyncio.to_thread(
+            process_message, list(conversation_history), system
+        )
         conversation_history.append({"role": "assistant", "content": assistant_message})
         db_save_message("assistant", assistant_message)
         await reply_md(update.message, assistant_message)
@@ -2095,6 +2278,10 @@ async def post_init(application: Application):
 
 def main():
     init_db()
+    try:
+        db_prune_history()
+    except Exception as e:
+        logger.warning(f"Чистка истории при старте пропущена: {e}")
     global conversation_history
     conversation_history = db_get_recent_history()
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()

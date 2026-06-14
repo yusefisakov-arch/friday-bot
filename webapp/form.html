@@ -100,7 +100,7 @@
     var selected = { deadline: "", priority: "", assignee: "" };
 
     var assigneeGroup = document.getElementById("assignee-options");
-    fetch("/api/staff").then(function (r) { return r.json(); }).then(function (staff) {
+    fetch("/api/staff", { headers: { "X-Telegram-Init-Data": tg.initData } }).then(function (r) { return r.json(); }).then(function (staff) {
       staff.slice().reverse().forEach(function (name) {
         var btn = document.createElement("button");
         btn.type = "button";
