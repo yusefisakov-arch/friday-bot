@@ -22,7 +22,8 @@ def build_system_static():
 Сотрудники: {staff_lines}.
 При делегировании — создавай задачу с пометкой исполнителя и задачу контроля для Юсефа.
 
-Обращайся к нему "сэр". Говори как доверенный советник — прямо, коротко, без воды. Всегда подтверждай что зафиксировал.
+Обращайся к нему "сэр". Говори как доверенный советник — прямо, коротко, без воды, но живо и по-человечески, а не сухо. Всегда подтверждай что зафиксировал.
+Точность важнее скорости: не выдумывай данные. Если чего-то не знаешь или не уверен — проверь через инструменты (get_tasks, get_apartments, get_rent_status, get_finance, get_apartment_report и т.п.) или переспроси сэра, но не угадывай. Если вопрос про конкретные цифры/списки/статусы — сначала возьми реальные данные инструментом, потом отвечай. Если просьба неоднозначна — задай один уточняющий вопрос вместо того, чтобы сделать наугад.
 Приоритеты: финансовые риски → просроченные договорённости → зависшие задачи → хаос в планах.
 Когда создаёшь задачу с дедлайном — всегда спрашивай: "Напомнить вам за день до дедлайна, сэр?" Если говорит да — ставь напоминание автоматически на 08:00 за день до дедлайна.
 Если при закрытии или изменении задачи/договорённости находится несколько подходящих — переспроси сэра, какую именно он имеет в виду, не выбирай сам.
@@ -91,11 +92,20 @@ def process_message(messages, system):
         },
         {
             "name": "close_task",
-            "description": "Закрыть задачу как выполненную",
+            "description": "Закрыть задачу как выполненную. В name_part можно передать номер задачи (#123 или 123) — так надёжнее, особенно если есть одинаковые задачи",
             "input_schema": {
                 "type": "object",
-                "properties": {"name_part": {"type": "string"}},
+                "properties": {"name_part": {"type": "string", "description": "Номер задачи (#123) или часть названия"}},
                 "required": ["name_part"]
+            }
+        },
+        {
+            "name": "delete_task",
+            "description": "Полностью удалить задачу по номеру (для дублей или мусора). Узнать номера можно через get_tasks — они показаны как #123",
+            "input_schema": {
+                "type": "object",
+                "properties": {"task_id": {"type": "string", "description": "Номер задачи, например 123 или #123"}},
+                "required": ["task_id"]
             }
         },
         {
@@ -104,7 +114,7 @@ def process_message(messages, system):
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "name_part": {"type": "string"},
+                    "name_part": {"type": "string", "description": "Номер задачи (#123) или часть названия"},
                     "deadline": {"type": "string", "description": "YYYY-MM-DD"},
                     "priority": {"type": "string", "description": "Высокий, Средний, Низкий"},
                     "assignee": {"type": "string", "description": "Кому поручено, например: " + ", ".join(STAFF.keys())}
@@ -158,6 +168,7 @@ def process_message(messages, system):
                     "amount": {"type": "number", "description": "Сумма, положительное число"},
                     "category": {"type": "string"},
                     "type": {"type": "string", "enum": ["расход", "доход"], "description": "расход или доход"},
+                    "currency": {"type": "string", "enum": ["MDL", "EUR", "USD", "USDT"], "description": "Валюта, по умолчанию MDL"},
                     "comment": {"type": "string"}
                 },
                 "required": ["amount", "category", "type"]
@@ -414,9 +425,13 @@ def process_message(messages, system):
                     if status == "closed":
                         result = f"Задача закрыта: {items[0]}"
                     elif status == "ambiguous":
-                        result = "Нашлось несколько подходящих задач, уточни у сэра какую закрыть:\n" + "\n".join(f"- {n}" for n in items)
+                        result = ("Нашлось несколько подходящих задач. Покажи сэру с номерами и закрой по нужному номеру (#id):\n"
+                                  + "\n".join(f"- {n}" for n in items))
                     else:
                         result = "Задача не найдена"
+                elif block.name == "delete_task":
+                    status, name = db_delete_task(inp["task_id"])
+                    result = f"Задача удалена: {name}" if status == "deleted" else "Задача с таким номером не найдена"
                 elif block.name == "update_task":
                     status, items = db_update_task(inp["name_part"], inp.get("deadline"), inp.get("priority"), inp.get("assignee"))
                     if status == "updated":
@@ -441,9 +456,10 @@ def process_message(messages, system):
                     else:
                         result = "Договорённость не найдена"
                 elif block.name == "create_finance":
-                    db_create_finance(inp["amount"], inp["category"], inp.get("type", "расход"), inp.get("comment"))
+                    currency = inp.get("currency", "MDL")
+                    db_create_finance(inp["amount"], inp["category"], inp.get("type", "расход"), inp.get("comment"), currency)
                     sign = "-" if inp.get("type", "расход") == "расход" else "+"
-                    result = f"Записано: {inp['category']} {sign}{inp['amount']}"
+                    result = f"Записано: {inp['category']} {sign}{inp['amount']} {currency}"
                 elif block.name == "get_finance":
                     result = db_get_finance()
                 elif block.name == "add_apartment":

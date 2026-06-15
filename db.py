@@ -40,7 +40,8 @@ def init_db():
             category TEXT NOT NULL,
             type TEXT NOT NULL DEFAULT 'расход',
             comment TEXT,
-            date DATE DEFAULT CURRENT_DATE
+            date DATE DEFAULT CURRENT_DATE,
+            currency TEXT NOT NULL DEFAULT 'MDL'
         )''')
         c.execute('''CREATE TABLE IF NOT EXISTS preferences (
             id SERIAL PRIMARY KEY,
@@ -170,6 +171,12 @@ def init_db():
             conn.rollback()
             logger.warning(f"Миграция finance.amount пропущена: {e}")
         try:
+            c.execute("ALTER TABLE finance ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'MDL'")
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.warning(f"Миграция finance.currency пропущена: {e}")
+        try:
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS lease_start DATE")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS lease_end DATE")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS lease_end_reminder_sent BOOLEAN DEFAULT false")
@@ -246,7 +253,7 @@ def db_create_task_if_absent(name, deadline=None):
 def db_get_tasks():
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("""SELECT name, deadline, priority, assignee FROM tasks WHERE status != 'Готово'
+        c.execute("""SELECT id, name, deadline, priority, assignee FROM tasks WHERE status != 'Готово'
                      ORDER BY created_at DESC""")
         rows = c.fetchall()
     if not rows:
@@ -257,7 +264,7 @@ def db_get_tasks():
 
     groups = {"Срочно (сегодня и просрочено)": [], "На завтра": [], "Позже": [], "Без срока": []}
     for row in rows:
-        deadline = row[1]
+        deadline = row[2]
         if deadline is None:
             groups["Без срока"].append(row)
         elif deadline <= today:
@@ -271,17 +278,17 @@ def db_get_tasks():
     for title, items in groups.items():
         if not items:
             continue
-        items.sort(key=lambda r: (PRIORITY_ORDER.get(r[2], 3), r[1] or ""))
-        high = [r for r in items if r[2] == "Высокий"]
-        rest = [r for r in items if r[2] != "Высокий"]
+        items.sort(key=lambda r: (PRIORITY_ORDER.get(r[3], 3), r[2] or ""))
+        high = [r for r in items if r[3] == "Высокий"]
+        rest = [r for r in items if r[3] != "Высокий"]
 
         sections = [f"*{title}:*"]
         for emoji, group_items in (("🔴", high), ("🟡", rest)):
             if not group_items:
                 continue
             lines = "\n".join(
-                format_task_line(f"{i}.", name, deadline, assignee)
-                for i, (name, deadline, priority, assignee) in enumerate(group_items, 1)
+                format_task_line(f"#{tid}", name, deadline, assignee)
+                for (tid, name, deadline, priority, assignee) in group_items
             )
             sections.append(f"{emoji}\n{lines}")
         blocks.append("\n\n".join(sections))
@@ -304,29 +311,59 @@ def db_get_urgent_tasks():
     )
 
 
+def _task_id_from(identifier):
+    """Если идентификатор похож на номер (#123 / 123) — вернуть int, иначе None."""
+    s = str(identifier).strip().lstrip("#").strip()
+    return int(s) if s.isdigit() else None
+
+
 def db_close_task(name_part):
     with db_conn() as conn:
         c = conn.cursor()
+        task_id = _task_id_from(name_part)
+        if task_id is not None:
+            c.execute("SELECT name FROM tasks WHERE id=%s AND status != 'Готово'", (task_id,))
+            row = c.fetchone()
+            if not row:
+                return "not_found", []
+            c.execute("UPDATE tasks SET status='Готово' WHERE id=%s", (task_id,))
+            return "closed", [row[0]]
         c.execute("SELECT id, name FROM tasks WHERE name ILIKE %s AND status != 'Готово'", (f"%{name_part}%",))
         rows = c.fetchall()
         if not rows:
             return "not_found", []
         if len(rows) > 1:
-            return "ambiguous", [name for _, name in rows]
+            return "ambiguous", [f"#{tid} {name}" for tid, name in rows]
         task_id, name = rows[0]
         c.execute("UPDATE tasks SET status='Готово' WHERE id=%s", (task_id,))
         return "closed", [name]
 
 
+def db_delete_task(task_id):
+    """Полностью удалить задачу по номеру (для дублей/мусора)."""
+    task_id = _task_id_from(task_id)
+    if task_id is None:
+        return "not_found", None
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM tasks WHERE id=%s RETURNING name", (task_id,))
+        row = c.fetchone()
+    return ("deleted", row[0]) if row else ("not_found", None)
+
+
 def db_update_task(name_part, deadline=None, priority=None, assignee=None):
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT id, name FROM tasks WHERE name ILIKE %s AND status != 'Готово'", (f"%{name_part}%",))
+        tid = _task_id_from(name_part)
+        if tid is not None:
+            c.execute("SELECT id, name FROM tasks WHERE id=%s AND status != 'Готово'", (tid,))
+        else:
+            c.execute("SELECT id, name FROM tasks WHERE name ILIKE %s AND status != 'Готово'", (f"%{name_part}%",))
         rows = c.fetchall()
         if not rows:
             return "not_found", []
         if len(rows) > 1:
-            return "ambiguous", [name for _, name in rows]
+            return "ambiguous", [f"#{tid} {name}" for tid, name in rows]
         task_id, name = rows[0]
         if deadline is not None:
             c.execute("UPDATE tasks SET deadline=%s WHERE id=%s", (deadline, task_id))
@@ -340,14 +377,14 @@ def db_update_task(name_part, deadline=None, priority=None, assignee=None):
 def db_find_task(name_part):
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("""SELECT name, deadline, priority, assignee, status, created_at FROM tasks
+        c.execute("""SELECT id, name, deadline, priority, assignee, status, created_at FROM tasks
                      WHERE name ILIKE %s ORDER BY created_at DESC LIMIT 5""", (f"%{name_part}%",))
         rows = c.fetchall()
     if not rows:
         return "Ничего не найдено."
     result = []
-    for name, deadline, priority, assignee, status, created_at in rows:
-        line = format_task_line("-", name, deadline, assignee)
+    for tid, name, deadline, priority, assignee, status, created_at in rows:
+        line = format_task_line(f"#{tid}", name, deadline, assignee)
         if priority:
             line += f" [{priority}]"
         line += f" [{status}], создана {created_at.strftime('%d.%m.%Y')}"
@@ -394,31 +431,37 @@ def db_close_decision(text_part):
         return "closed", [f"{w}: {d}"]
 
 
-def db_create_finance(amount, category, fin_type="расход", comment=None):
+def db_create_finance(amount, category, fin_type="расход", comment=None, currency="MDL"):
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("INSERT INTO finance (amount, category, type, comment, date) VALUES (%s, %s, %s, %s, %s)",
-                  (amount, category, fin_type, comment, today_msk()))
+        c.execute("INSERT INTO finance (amount, category, type, comment, date, currency) VALUES (%s, %s, %s, %s, %s, %s)",
+                  (amount, category, fin_type, comment, today_msk(), currency or "MDL"))
 
 
 def db_get_finance():
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT amount, category, type, date FROM finance ORDER BY date DESC, id DESC LIMIT 10")
+        c.execute("SELECT amount, category, type, date, currency FROM finance ORDER BY date DESC, id DESC LIMIT 10")
         rows = c.fetchall()
         month_start = today_msk().replace(day=1)
-        c.execute("""SELECT type, COALESCE(SUM(amount), 0) FROM finance
-                     WHERE date >= %s GROUP BY type""", (month_start,))
-        totals = dict(c.fetchall())
+        c.execute("""SELECT type, currency, COALESCE(SUM(amount), 0) FROM finance
+                     WHERE date >= %s GROUP BY type, currency""", (month_start,))
+        totals = c.fetchall()
     if not rows:
         return "Финансовых записей нет."
     result = []
-    for amount, category, fin_type, date in rows:
+    for amount, category, fin_type, date, currency in rows:
         sign = "-" if fin_type == "расход" else "+"
-        result.append(f"- {category}: {sign}{amount} ({date.strftime('%d.%m')})")
-    expense = totals.get("расход", 0)
-    income = totals.get("доход", 0)
-    result.append(f"\n*Итого в этом месяце:* расходы {expense}, доходы {income}")
+        result.append(f"- {category}: {sign}{amount} {currency or 'MDL'} ({date.strftime('%d.%m')})")
+    # Итоги за месяц по каждой валюте
+    by_cur = {}
+    for fin_type, currency, total in totals:
+        cur = currency or "MDL"
+        by_cur.setdefault(cur, {"расход": 0, "доход": 0})[fin_type] = total
+    if by_cur:
+        result.append("\n*Итого в этом месяце:*")
+        for cur, d in by_cur.items():
+            result.append(f"- {cur}: расходы {d['расход']}, доходы {d['доход']}")
     return "\n".join(result)
 
 

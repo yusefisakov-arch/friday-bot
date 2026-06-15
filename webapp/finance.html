@@ -71,6 +71,16 @@
   </div>
 
   <div class="field">
+    <label>Валюта</label>
+    <div class="options" data-field="currency">
+      <button type="button" data-value="MDL" class="selected">MDL</button>
+      <button type="button" data-value="EUR">EUR</button>
+      <button type="button" data-value="USD">USD</button>
+      <button type="button" data-value="USDT">USDT</button>
+    </div>
+  </div>
+
+  <div class="field">
     <label>Категория</label>
     <div class="options" data-field="category">
       <button type="button" data-value="Еда">Еда</button>
@@ -93,7 +103,7 @@
     tg.ready();
     tg.expand();
 
-    var selected = { type: "расход", category: "custom" };
+    var selected = { type: "расход", category: "custom", currency: "MDL" };
 
     document.querySelectorAll(".options").forEach(function (group) {
       var field = group.dataset.field;
@@ -136,6 +146,7 @@
         amount: amount,
         category: category,
         type: selected.type,
+        currency: selected.currency,
         comment: document.getElementById("comment").value.trim()
       }));
     });

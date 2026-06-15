@@ -34,10 +34,10 @@ async def send_sop_reminders(bot: Bot):
         return
     lines = "\n".join(f"- {text}" for _, text in due)
     await send_md(bot, ALLOWED_USER_ID, f"*Напоминания по SOP, сэр:*\n{lines}")
-    tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
-    for reminder_id, text in due:
+    # Раньше тут ещё создавалась задача-копия на каждое напоминание — это засоряло
+    # список задач дублями. Теперь SOP-напоминание приходит только сообщением.
+    for reminder_id, _text in due:
         db_mark_sop_reminder_sent(reminder_id, current_month)
-        db_create_task_if_absent(text, deadline=tomorrow)
 
 
 async def send_apartment_reminders(bot: Bot):

@@ -122,10 +122,10 @@ def create_quick_task(name, deadline=None, priority=None, assignee=None):
     return summary
 
 
-def create_quick_finance(amount, category, fin_type="расход", comment=None):
-    db_create_finance(amount, category, fin_type, comment)
+def create_quick_finance(amount, category, fin_type="расход", comment=None, currency="MDL"):
+    db_create_finance(amount, category, fin_type, comment, currency)
     sign = "-" if fin_type == "расход" else "+"
-    summary = f"Записал, сэр: {category} {sign}{amount}"
+    summary = f"Записал, сэр: {category} {sign}{amount} {currency}"
     if comment:
         summary += f" ({comment})"
     return summary
@@ -293,7 +293,8 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         fin_type = "доход" if data.get("type") == "доход" else "расход"
         comment = (data.get("comment") or "").strip() or None
-        summary = create_quick_finance(amount, category, fin_type, comment)
+        currency = (data.get("currency") or "MDL").strip() or "MDL"
+        summary = create_quick_finance(amount, category, fin_type, comment, currency)
         await update.message.reply_text(summary, reply_markup=MAIN_KEYBOARD)
         return
 
