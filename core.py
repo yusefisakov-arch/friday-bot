@@ -128,15 +128,48 @@ def to_decimal(value):
         return None
 
 
+TG_LIMIT = 4000  # лимит сообщения Telegram ~4096, берём с запасом
+
+
+def split_chunks(text, limit=TG_LIMIT):
+    """Режет длинный текст на части ≤ limit, по возможности по переносам строк."""
+    text = text or ""
+    if len(text) <= limit:
+        return [text]
+    chunks = []
+    cur = ""
+    for line in text.split("\n"):
+        while len(line) > limit:
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        if cur and len(cur) + 1 + len(line) > limit:
+            chunks.append(cur)
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
 async def reply_md(message, text, **kwargs):
-    try:
-        await message.reply_text(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
-    except BadRequest:
-        await message.reply_text(text, **kwargs)
+    chunks = split_chunks(text)
+    for i, chunk in enumerate(chunks):
+        kw = kwargs if i == len(chunks) - 1 else {}
+        try:
+            await message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN, **kw)
+        except BadRequest:
+            await message.reply_text(chunk, **kw)
 
 
 async def send_md(bot, chat_id, text, **kwargs):
-    try:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN, **kwargs)
-    except BadRequest:
-        await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+    chunks = split_chunks(text)
+    for i, chunk in enumerate(chunks):
+        kw = kwargs if i == len(chunks) - 1 else {}
+        try:
+            await bot.send_message(chat_id=chat_id, text=chunk, parse_mode=ParseMode.MARKDOWN, **kw)
+        except BadRequest:
+            await bot.send_message(chat_id=chat_id, text=chunk, **kw)
