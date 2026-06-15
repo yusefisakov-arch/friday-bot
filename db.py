@@ -143,6 +143,16 @@ def init_db():
             job TEXT PRIMARY KEY,
             last_run_date TEXT
         )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS goals (
+            id SERIAL PRIMARY KEY,
+            text TEXT NOT NULL,
+            horizon TEXT NOT NULL DEFAULT 'day',
+            period TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            progress TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
         c.execute('''CREATE TABLE IF NOT EXISTS apartment_meters (
             id SERIAL PRIMARY KEY,
             apartment_id INTEGER REFERENCES apartments(id),
@@ -465,6 +475,87 @@ def db_get_finance():
         for cur, d in by_cur.items():
             result.append(f"- {cur}: расходы {d['расход']}, доходы {d['доход']}")
     return "\n".join(result)
+
+
+# ===== Цели и планирование =====
+
+GOAL_HORIZONS = ("day", "week", "month")
+GOAL_TITLES = {"day": "🎯 На день", "week": "📅 На неделю", "month": "🗓 На месяц"}
+
+
+def goal_period_key(horizon, d=None):
+    d = d or today_msk()
+    if horizon == "week":
+        monday = d - timedelta(days=d.weekday())
+        return monday.strftime("%Y-%m-%d")
+    if horizon == "month":
+        return d.strftime("%Y-%m")
+    return d.strftime("%Y-%m-%d")
+
+
+def db_create_goal(text, horizon="day", period=None):
+    horizon = horizon if horizon in GOAL_HORIZONS else "day"
+    period = period or goal_period_key(horizon)
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("INSERT INTO goals (text, horizon, period) VALUES (%s, %s, %s) RETURNING id",
+                  (text, horizon, period))
+        return c.fetchone()[0]
+
+
+def db_update_goal(goal_id, progress=None, status=None, text=None):
+    gid = _task_id_from(goal_id)
+    if gid is None:
+        return "not_found"
+    sets, vals = [], []
+    if progress is not None:
+        sets.append("progress=%s"); vals.append(progress)
+    if status is not None:
+        sets.append("status=%s"); vals.append(status)
+    if text is not None:
+        sets.append("text=%s"); vals.append(text)
+    if not sets:
+        return "no_changes"
+    sets.append("updated_at=now()")
+    vals.append(gid)
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute(f"UPDATE goals SET {', '.join(sets)} WHERE id=%s RETURNING id", vals)
+        return "updated" if c.fetchone() else "not_found"
+
+
+def db_delete_goal(goal_id):
+    gid = _task_id_from(goal_id)
+    if gid is None:
+        return "not_found"
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM goals WHERE id=%s RETURNING id", (gid,))
+        return "deleted" if c.fetchone() else "not_found"
+
+
+def db_get_goals(active_only=True):
+    with db_conn() as conn:
+        c = conn.cursor()
+        q = "SELECT id, text, horizon, progress FROM goals"
+        if active_only:
+            q += " WHERE status='active'"
+        q += " ORDER BY CASE horizon WHEN 'day' THEN 0 WHEN 'week' THEN 1 ELSE 2 END, created_at"
+        c.execute(q)
+        rows = c.fetchall()
+    if not rows:
+        return "Целей пока нет. Поставьте через чат или я предложу утром, сэр."
+    groups = {}
+    for gid, text, horizon, progress in rows:
+        line = f"- #{gid} {text}"
+        if progress:
+            line += f" — прогресс: {progress}"
+        groups.setdefault(horizon, []).append(line)
+    out = []
+    for h in GOAL_HORIZONS:
+        if h in groups:
+            out.append(f"*{GOAL_TITLES[h]}:*\n" + "\n".join(groups[h]))
+    return "\n\n".join(out)
 
 
 APARTMENT_FIELDS = [
@@ -991,14 +1082,32 @@ def db_clear_history():
         c.execute("DELETE FROM conversation_history")
 
 
+SELF_DESTRUCT_PHRASE = "УНИЧТОЖИТЬ ВСЁ НАВСЕГДА"
+_SELF_DESTRUCT_TABLES = [
+    "tasks", "decisions", "finance", "preferences", "reminders", "conversation_history",
+    "apartment_operations", "apartment_balance_checks", "apartment_meters", "apartments",
+    "sop_reminders", "utility_tariffs", "job_runs", "goals",
+]
+
+
+def db_self_destruct():
+    """Полностью и безвозвратно очищает все таблицы (TRUNCATE ... CASCADE), сбрасывает счётчики id.
+    Таблицы остаются (пустые), бот продолжает работать с чистого листа."""
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("TRUNCATE TABLE " + ", ".join(_SELF_DESTRUCT_TABLES) + " RESTART IDENTITY CASCADE")
+
+
 def needs_context(message):
     keywords = ["задач", "список", "что у нас", "покажи", "напомни", "дедлайн",
-                "договор", "решени", "финанс", "потратил", "расход", "брифинг", "план"]
+                "договор", "решени", "финанс", "потратил", "расход", "брифинг",
+                "план", "цел", "недел", "месяц", "сегодня", "достич", "итог"]
     return any(k in message.lower() for k in keywords)
 
 
 def get_db_context():
     tasks = db_get_tasks()
     decisions = db_get_decisions()
-    return f"Задачи:\n{tasks}\n\nДоговорённости:\n{decisions}"
+    goals = db_get_goals()
+    return f"Цели:\n{goals}\n\nЗадачи:\n{tasks}\n\nДоговорённости:\n{decisions}"
 

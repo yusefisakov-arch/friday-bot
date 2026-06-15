@@ -25,6 +25,8 @@ def build_system_static():
 Обращайся к нему "сэр". Говори как доверенный советник — прямо, коротко, без воды, но живо и по-человечески, а не сухо. Всегда подтверждай что зафиксировал.
 Точность важнее скорости: не выдумывай данные. Если чего-то не знаешь или не уверен — проверь через инструменты (get_tasks, get_apartments, get_rent_status, get_finance, get_apartment_report и т.п.) или переспроси сэра, но не угадывай. Если вопрос про конкретные цифры/списки/статусы — сначала возьми реальные данные инструментом, потом отвечай. Если просьба неоднозначна — задай один уточняющий вопрос вместо того, чтобы сделать наугад.
 Приоритеты: финансовые риски → просроченные договорённости → зависшие задачи → хаос в планах.
+
+Планирование и цели — твоя ключевая роль, относись к ней серьёзно. У сэра есть цели на день/неделю/месяц (set_goal, get_goals, update_goal, complete_goal, delete_goal). Помогай не просто записывать, а ДОВОДИТЬ до результата: когда сэр ставит цель — уточни срок (день/неделя/месяц) и при необходимости предложи разбить большую цель на конкретные шаги-задачи (create_task). Регулярно связывай задачи и цели: если задача двигает цель — отметь это. Когда сэр рассказывает, что сделал — обновляй прогресс цели (update_goal). Каждое утро бот показывает цели и помогает спланировать день; в начале недели и месяца — помогает спланировать неделю/месяц и подводит итоги прошлого периода. Будь проактивен: если на сегодня нет целей — предложи поставить 1-3 главные; если цель давно без прогресса — мягко напомни. Не выдумывай цели сам, но активно подталкивай и предлагай формулировки.
 Когда создаёшь задачу с дедлайном — всегда спрашивай: "Напомнить вам за день до дедлайна, сэр?" Если говорит да — ставь напоминание автоматически на 08:00 за день до дедлайна.
 Если при закрытии или изменении задачи/договорённости находится несколько подходящих — переспроси сэра, какую именно он имеет в виду, не выбирай сам.
 При записи финансов уточняй тип (расход или доход), если это не очевидно из контекста.
@@ -414,6 +416,54 @@ def process_message(messages, system):
                 "properties": {"text_part": {"type": "string"}},
                 "required": ["text_part"]
             }
+        },
+        {
+            "name": "set_goal",
+            "description": "Поставить цель на день, неделю или месяц. Используй, когда сэр формулирует цель/намерение ('хочу', 'цель на неделю', 'в этом месяце нужно')",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Формулировка цели"},
+                    "horizon": {"type": "string", "enum": ["day", "week", "month"], "description": "Горизонт: день/неделя/месяц"}
+                },
+                "required": ["text", "horizon"]
+            }
+        },
+        {
+            "name": "get_goals",
+            "description": "Показать активные цели (на день/неделю/месяц) с прогрессом",
+            "input_schema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "update_goal",
+            "description": "Обновить цель по номеру (#id): записать прогресс или поменять формулировку",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "goal_id": {"type": "string", "description": "Номер цели (#id) из get_goals"},
+                    "progress": {"type": "string", "description": "Заметка о прогрессе"},
+                    "text": {"type": "string", "description": "Новая формулировка цели"}
+                },
+                "required": ["goal_id"]
+            }
+        },
+        {
+            "name": "complete_goal",
+            "description": "Отметить цель достигнутой по номеру (#id)",
+            "input_schema": {
+                "type": "object",
+                "properties": {"goal_id": {"type": "string"}},
+                "required": ["goal_id"]
+            }
+        },
+        {
+            "name": "delete_goal",
+            "description": "Удалить цель по номеру (#id) — если она больше не актуальна",
+            "input_schema": {
+                "type": "object",
+                "properties": {"goal_id": {"type": "string"}},
+                "required": ["goal_id"]
+            }
         }
     ]
 
@@ -572,6 +622,22 @@ def process_message(messages, system):
                         result = "Нашлось несколько подходящих напоминаний, уточни у сэра какое убрать:\n" + "\n".join(f"- {t}" for t in items)
                     else:
                         result = "Напоминание не найдено"
+                elif block.name == "set_goal":
+                    gid = db_create_goal(inp["text"], inp.get("horizon", "day"))
+                    result = f"Цель поставлена (#{gid}): {inp['text']}"
+                elif block.name == "get_goals":
+                    result = db_get_goals()
+                elif block.name == "update_goal":
+                    status = db_update_goal(inp["goal_id"], progress=inp.get("progress"), text=inp.get("text"))
+                    result = {"updated": f"Цель #{inp['goal_id']} обновлена",
+                              "no_changes": "Не указано, что обновить",
+                              "not_found": "Цель с таким номером не найдена"}.get(status, "Не удалось обновить")
+                elif block.name == "complete_goal":
+                    status = db_update_goal(inp["goal_id"], status="done")
+                    result = f"Цель #{inp['goal_id']} достигнута 🎉" if status == "updated" else "Цель с таким номером не найдена"
+                elif block.name == "delete_goal":
+                    status = db_delete_goal(inp["goal_id"])
+                    result = f"Цель #{inp['goal_id']} удалена" if status == "deleted" else "Цель с таким номером не найдена"
             except Exception as e:
                 logger.error(f"Tool {block.name} error: {e}")
                 result = f"Ошибка при выполнении {block.name}: {e}. Если задача большая (много квартир/объектов), разбей её на несколько меньших шагов."

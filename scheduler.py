@@ -13,16 +13,35 @@ logger = logging.getLogger(__name__)
 async def send_morning_briefing(bot: Bot):
     tasks = db_get_tasks()
     urgent = db_get_urgent_tasks()
-    text = f"*Доброе утро, сэр*\n\n*Задачи на сегодня:*\n{tasks}"
+    goals = db_get_goals()
+    text = f"*Доброе утро, сэр*\n\n*Цели сейчас:*\n{goals}\n\n*Задачи на сегодня:*\n{tasks}"
     if urgent:
         text += f"\n\n*Срочное (дедлайн сегодня/завтра):*\n{urgent}"
-    text += "\n\nГотов к работе."
+    text += "\n\nКакие 1-3 главные цели на сегодня? С чего начнём, сэр?"
     await send_md(bot, ALLOWED_USER_ID, text)
 
 
 async def send_evening_briefing(bot: Bot):
     tasks = db_get_tasks()
-    text = f"*Вечерний разбор, сэр*\n\n*Открытые задачи:*\n{tasks}\n\nЧто закрыли сегодня? Что переносим?"
+    goals = db_get_goals()
+    text = (f"*Вечерний разбор, сэр*\n\n*Цели:*\n{goals}\n\n*Открытые задачи:*\n{tasks}\n\n"
+            "Как продвинулись по целям сегодня? Что закрыли, что переносим?")
+    await send_md(bot, ALLOWED_USER_ID, text)
+
+
+async def send_weekly_planning(bot: Bot):
+    goals = db_get_goals()
+    text = (f"*Планирование недели, сэр* 📅\n\n*Текущие цели:*\n{goals}\n\n"
+            "Подведём итоги прошлой недели и наметим эту. Какие 3 главные цели на неделю? "
+            "Большие — разобью на конкретные шаги.")
+    await send_md(bot, ALLOWED_USER_ID, text)
+
+
+async def send_monthly_planning(bot: Bot):
+    goals = db_get_goals()
+    text = (f"*Планирование месяца, сэр* 🗓\n\n*Текущие цели:*\n{goals}\n\n"
+            "Новый месяц. Что главное хотим достичь? Назовите цели на месяц — "
+            "я свяжу их с неделями и задачами и буду отслеживать прогресс.")
     await send_md(bot, ALLOWED_USER_ID, text)
 
 
@@ -84,6 +103,18 @@ async def scheduler(bot: Bot):
                 db_prune_history()
             except Exception as e:
                 logger.error(f"History prune error: {e}")
+            # Планирование недели — по понедельникам, один раз за неделю
+            if now.weekday() == 0 and db_claim_daily_job("weekly_plan", goal_period_key("week", now.date())):
+                try:
+                    await send_weekly_planning(bot)
+                except Exception as e:
+                    logger.error(f"Weekly planning error: {e}")
+            # Планирование месяца — 1-го числа, один раз за месяц
+            if now.day == 1 and db_claim_daily_job("monthly_plan", goal_period_key("month", now.date())):
+                try:
+                    await send_monthly_planning(bot)
+                except Exception as e:
+                    logger.error(f"Monthly planning error: {e}")
 
         # Вечерний блок: один раз за день в окне 21:00–23:59.
         if now.hour >= 21 and db_claim_daily_job("evening", today_str):

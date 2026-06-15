@@ -61,12 +61,40 @@ async def memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Пока ничего не запомнено, сэр.")
 
 
+async def selfdestruct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    context.user_data["awaiting_selfdestruct"] = True
+    await update.message.reply_text(
+        "⚠️ ВНИМАНИЕ, сэр.\n\n"
+        "Это БЕЗВОЗВРАТНО сотрёт ВСЕ данные: задачи, цели, финансы, договорённости, "
+        "кассу квартир, справочник квартир, счётчики, историю — всё до нуля. "
+        "Восстановить будет нельзя.\n\n"
+        f"Если действительно уверены — отправьте СЛЕДУЮЩИМ сообщением ровно эту фразу:\n\n{SELF_DESTRUCT_PHRASE}\n\n"
+        "Любое другое сообщение отменит операцию."
+    )
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
 
     user_message = update.message.text
+
+    # --- Подтверждение самоуничтожения (двойная защита: команда + точная фраза) ---
+    if context.user_data.get("awaiting_selfdestruct"):
+        context.user_data["awaiting_selfdestruct"] = False
+        global conversation_history
+        if (user_message or "").strip() == SELF_DESTRUCT_PHRASE:
+            db_self_destruct()
+            conversation_history = []
+            await update.message.reply_text(
+                "Готово, сэр. Все данные стёрты безвозвратно. Чистый лист.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+        else:
+            await update.message.reply_text("Отменено, сэр. Ничего не тронуто.", reply_markup=MAIN_KEYBOARD)
+        return
 
     # --- Быстрая задача (запасной пошаговый сценарий без WebApp) ---
     if user_message == QUICK_TASK_BUTTON:
@@ -210,8 +238,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reply_md(update.message, db_get_apartment_balance())
         return
 
-    global conversation_history
-
     conversation_history.append({"role": "user", "content": user_message})
     if len(conversation_history) > HISTORY_WINDOW:
         conversation_history = conversation_history[-HISTORY_WINDOW:]
@@ -263,6 +289,7 @@ def main():
     app.add_handler(CommandHandler("decisions", decisions_cmd))
     app.add_handler(CommandHandler("finance", finance_cmd))
     app.add_handler(CommandHandler("memory", memory))
+    app.add_handler(CommandHandler("selfdestruct", selfdestruct))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("FRIDAY запущен!")
