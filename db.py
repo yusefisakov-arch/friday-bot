@@ -96,6 +96,7 @@ def init_db():
             counterpart TEXT,
             amount NUMERIC NOT NULL,
             currency TEXT NOT NULL DEFAULT 'MDL',
+            payment_method TEXT NOT NULL DEFAULT 'наличные',
             comment TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
@@ -203,6 +204,7 @@ def init_db():
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS tenant_phone2 TEXT")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS rent_day INTEGER")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS tenant_pay_day INTEGER")
+            c.execute("ALTER TABLE apartment_operations ADD COLUMN IF NOT EXISTS payment_method TEXT NOT NULL DEFAULT 'наличные'")
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -558,7 +560,7 @@ def db_find_apartment(name_part):
     return "found", rows[0]
 
 
-def db_record_apartment_operation(apartment, direction, category, amount, currency="MDL", counterpart=None, op_date=None, comment=None):
+def db_record_apartment_operation(apartment, direction, category, amount, currency="MDL", counterpart=None, op_date=None, comment=None, payment_method="наличные"):
     apartment_id = None
     apartment_address = None
     if apartment:
@@ -571,17 +573,48 @@ def db_record_apartment_operation(apartment, direction, category, amount, curren
     with db_conn() as conn:
         c = conn.cursor()
         c.execute("""INSERT INTO apartment_operations
-                     (apartment_id, op_date, direction, category, counterpart, amount, currency, comment)
-                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                  (apartment_id, op_date or today_msk(), direction, category, counterpart, amount, currency, comment))
+                     (apartment_id, op_date, direction, category, counterpart, amount, currency, comment, payment_method)
+                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                  (apartment_id, op_date or today_msk(), direction, category, counterpart, amount, currency, comment, payment_method or "наличные"))
     return "recorded", apartment_address
+
+
+def db_update_apartment_operation(op_id, **fields):
+    """Отредактировать поля существующей операции кассы. Допустимые поля:
+    direction, category, counterpart, amount, currency, comment, payment_method, op_date."""
+    op_id = _task_id_from(op_id)
+    if op_id is None:
+        return "not_found"
+    allowed = ("direction", "category", "counterpart", "amount", "currency", "comment", "payment_method", "op_date")
+    sets, vals = [], []
+    for f in allowed:
+        if fields.get(f) is not None:
+            sets.append(f"{f}=%s")
+            vals.append(fields[f])
+    if not sets:
+        return "no_changes"
+    vals.append(op_id)
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute(f"UPDATE apartment_operations SET {', '.join(sets)} WHERE id=%s RETURNING id", vals)
+        return "updated" if c.fetchone() else "not_found"
+
+
+def db_delete_apartment_operation(op_id):
+    op_id = _task_id_from(op_id)
+    if op_id is None:
+        return "not_found"
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM apartment_operations WHERE id=%s RETURNING id", (op_id,))
+        return "deleted" if c.fetchone() else "not_found"
 
 
 def db_get_apartment_balance():
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("""SELECT currency, direction, COALESCE(SUM(amount), 0)
-                     FROM apartment_operations GROUP BY currency, direction""")
+        c.execute("""SELECT currency, COALESCE(payment_method, 'наличные'), direction, COALESCE(SUM(amount), 0)
+                     FROM apartment_operations GROUP BY currency, COALESCE(payment_method, 'наличные'), direction""")
         rows = c.fetchall()
         c.execute("""SELECT DISTINCT ON (currency) currency, check_date, difference
                      FROM apartment_balance_checks ORDER BY currency, check_date DESC, id DESC""")
@@ -589,14 +622,21 @@ def db_get_apartment_balance():
     if not rows:
         return "Операций по кассе квартир пока нет."
     balances = {}
-    for currency, direction, total in rows:
-        d = balances.setdefault(currency, {"приход": 0, "расход": 0})
-        d[direction] = total
+    for currency, method, direction, total in rows:
+        cur = balances.setdefault(currency, {"приход": 0, "расход": 0, "methods": {}})
+        cur[direction] += total
+        m = cur["methods"].setdefault(method, {"приход": 0, "расход": 0})
+        m[direction] += total
     checks_map = {currency: (check_date, diff) for currency, check_date, diff in checks}
     result = []
     for currency, d in balances.items():
         balance = d["приход"] - d["расход"]
         line = f"*Касса ({currency}): {balance}*\nприход {d['приход']}, расход {d['расход']}"
+        methods = d["methods"]
+        # Разбивка по способу оплаты, если используется не только наличные
+        if len(methods) > 1 or (methods and "наличные" not in methods):
+            for method, m in methods.items():
+                line += f"\n  • {method}: {m['приход'] - m['расход']}"
         if currency in checks_map:
             check_date, diff = checks_map[currency]
             if diff:
@@ -626,7 +666,7 @@ def db_reconcile_apartment_balance(actual_balance, currency="MDL", comment=None)
 
 
 def db_get_apartment_report(apartment=None, category=None, direction=None, date_from=None, date_to=None):
-    query = """SELECT o.op_date, a.address, o.direction, o.category, o.counterpart, o.amount, o.currency, o.comment
+    query = """SELECT o.id, o.op_date, a.address, o.direction, o.category, o.counterpart, o.amount, o.currency, o.comment, COALESCE(o.payment_method, 'наличные')
                FROM apartment_operations o
                LEFT JOIN apartments a ON a.id = o.apartment_id
                WHERE 1=1"""
@@ -655,9 +695,11 @@ def db_get_apartment_report(apartment=None, category=None, direction=None, date_
         return "Операций по заданным условиям не найдено."
     result = []
     sums = {}
-    for op_date, address, op_dir, op_cat, counterpart, amount, currency, op_comment in rows:
+    for op_id, op_date, address, op_dir, op_cat, counterpart, amount, currency, op_comment, method in rows:
         sign = "+" if op_dir == "приход" else "-"
-        line = f"- {op_date.strftime('%d.%m.%Y')} {address or '(без квартиры)'}: {sign}{amount} {currency} [{op_cat}]"
+        line = f"- #{op_id} {op_date.strftime('%d.%m.%Y')} {address or '(без квартиры)'}: {sign}{amount} {currency} [{op_cat}]"
+        if method and method != "наличные":
+            line += f" ({method})"
         if counterpart:
             line += f" — {counterpart}"
         if op_comment:

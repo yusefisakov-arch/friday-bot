@@ -113,6 +113,17 @@
       <div class="options" data-field="currency">
         <button type="button" data-value="MDL" class="selected">MDL</button>
         <button type="button" data-value="EUR">EUR</button>
+        <button type="button" data-value="USD">USD</button>
+        <button type="button" data-value="USDT">USDT</button>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Способ оплаты</label>
+      <div class="options" data-field="payment_method">
+        <button type="button" data-value="наличные" class="selected">Наличные</button>
+        <button type="button" data-value="карта (укр)">Карта (укр)</button>
+        <button type="button" data-value="карта (молд)">Карта (молд)</button>
       </div>
     </div>
 
@@ -189,7 +200,7 @@
     tg.ready();
     tg.expand();
 
-    var selected = { mode: "operation", direction: "приход", category: "Прочее", counterpart: "Квартирант", currency: "MDL", date: "today" };
+    var selected = { mode: "operation", direction: "приход", category: "Прочее", counterpart: "Квартирант", currency: "MDL", payment_method: "наличные", date: "today" };
 
     var apartmentSelect = document.getElementById("apartment-select");
     fetch("/api/apartments", { headers: { "X-Webapp-Key": WAKEY } }).then(function (r) { return r.json(); }).then(function (apartments) {
@@ -294,6 +305,7 @@
         counterpart: counterpart,
         amount: amount,
         currency: selected.currency,
+        payment_method: selected.payment_method,
         date: date,
         comment: document.getElementById("comment").value.trim()
       }));

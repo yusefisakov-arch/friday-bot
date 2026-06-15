@@ -217,12 +217,13 @@ def create_quick_utilities(apartment, meters=None, record_cash=False):
     return summary
 
 
-def create_quick_apartment_operation(apartment, direction, category, amount, currency="MDL", counterpart=None, op_date=None, comment=None):
-    status, info = db_record_apartment_operation(apartment, direction, category, amount, currency, counterpart, op_date, comment)
+def create_quick_apartment_operation(apartment, direction, category, amount, currency="MDL", counterpart=None, op_date=None, comment=None, payment_method="наличные"):
+    status, info = db_record_apartment_operation(apartment, direction, category, amount, currency, counterpart, op_date, comment, payment_method)
     if status == "recorded":
         sign = "+" if direction == "приход" else "-"
         address_part = f" ({info})" if info else ""
-        summary = f"Записал в кассу квартир{address_part}, сэр: {sign}{amount} {currency} [{category}]"
+        method_part = f" [{payment_method}]" if payment_method and payment_method != "наличные" else ""
+        summary = f"Записал в кассу квартир{address_part}, сэр: {sign}{amount} {currency} [{category}]{method_part}"
         if comment:
             summary += f" ({comment})"
         return summary
@@ -426,10 +427,11 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
         direction = "приход" if data.get("direction") == "приход" else "расход"
         apartment = (data.get("apartment") or "").strip() or None
         currency = (data.get("currency") or "MDL").strip() or "MDL"
+        payment_method = (data.get("payment_method") or "наличные").strip() or "наличные"
         counterpart = (data.get("counterpart") or "").strip() or None
         op_date = resolve_deadline(data.get("date") or "")
         comment = (data.get("comment") or "").strip() or None
-        summary = create_quick_apartment_operation(apartment, direction, category, amount, currency, counterpart, op_date, comment)
+        summary = create_quick_apartment_operation(apartment, direction, category, amount, currency, counterpart, op_date, comment, payment_method)
         await update.message.reply_text(summary, reply_markup=MAIN_KEYBOARD)
         return
 

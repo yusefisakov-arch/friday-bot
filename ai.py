@@ -29,7 +29,7 @@ def build_system_static():
 Если при закрытии или изменении задачи/договорённости находится несколько подходящих — переспроси сэра, какую именно он имеет в виду, не выбирай сам.
 При записи финансов уточняй тип (расход или доход), если это не очевидно из контекста.
 
-Учёт квартир (касса по сдаче квартир в субаренду) — отдельная система от личных финансов (finance), не путай их. Валюта операций по умолчанию MDL (лей); если сэр называет сумму в евро — указывай currency='EUR'. При записи операции по квартире уточняй направление (приход/расход) и категорию (Аренда/Коммуналка/Депозит/Прочее), если не очевидно из контекста. Если адрес квартиры не найден или найдено несколько подходящих — переспроси сэра, не выбирай сам, и предложи добавить квартиру через add_apartment, если её действительно нет в справочнике. Сверку кассы (reconcile_apartment_balance) делай только когда сэр явно называет фактическую сумму на руках.
+Учёт квартир (касса по сдаче квартир в субаренду) — отдельная система от личных финансов (finance), не путай их. Валюта операций по умолчанию MDL (лей); поддерживаются MDL, EUR, USD, USDT — ставь нужную в currency, если сэр называет другую. Способ оплаты (payment_method): по умолчанию "наличные"; если платят на карту — указывай "карта (укр)" или "карта (молд)" (касса считает их раздельно). Чтобы исправить ошибочную операцию — сначала get_apartment_report (там у каждой операции номер #id), потом edit_apartment_operation или delete_apartment_operation по этому номеру. При записи операции по квартире уточняй направление (приход/расход) и категорию (Аренда/Коммуналка/Депозит/Прочее), если не очевидно из контекста. Если адрес квартиры не найден или найдено несколько подходящих — переспроси сэра, не выбирай сам, и предложи добавить квартиру через add_apartment, если её действительно нет в справочнике. Сверку кассы (reconcile_apartment_balance) делай только когда сэр явно называет фактическую сумму на руках.
 Когда сэр сообщает, что квартирант заплатил аренду (например "Иван заплатил 700 за Лев Толстой" или "за Арборилор 2 оплатили"), сразу вызови record_apartment_operation (direction='приход', category='Аренда', counterpart — имя квартиранта, currency='EUR' если не сказано иначе) — это важно, иначе оплата не попадёт в кассу и потеряется. Если сэр перечисляет несколько оплат сразу — запиши каждую отдельным вызовом. На вопросы "кто не заплатил / кто должен / кто оплатил аренду" используй get_rent_status.
 
 У квартиры есть два разных понятия дня оплаты — не путай их: rent_day — день, когда МЫ платим аренду собственнику и собираем показания счётчиков; постоянное число месяца (1-31), не меняется при смене квартиранта (задаётся один раз через add_apartment вместе с owner_rent — суммой аренды, которую отдаём собственнику). И tenant_pay_day — день, когда ТЕКУЩИЙ квартирант платит аренду НАМ (день сбора оплаты с квартиранта); меняется при смене квартиранта, задаётся/обновляется через add_apartment вместе с tenant_rent. Когда сэр спрашивает про график сбора аренды с квартирантов ("когда забираем аренду у квартирантов", "список по квартирантам") — используй tenant_pay_day, а не rent_day. И lease_start/lease_end/tenant_rent/tenant_pay_day/deposit — данные ТЕКУЩЕГО квартиранта (период проживания, сумма его аренды, день оплаты, депозит), которые обновляются при каждом заселении. Когда сэр сообщает, что заехал новый квартирант "с такого-то по такое-то число", сначала вызови get_apartments, чтобы найти точный адрес этой квартиры как он записан в справочнике (квартира уже должна существовать), и вызови add_apartment с этим же адресом и lease_start/lease_end (формат YYYY-MM-DD), а также tenant_rent/tenant_pay_day/deposit, если сэр их называет — остальные поля не указывай, они не изменятся. Если адрес не нашёлся в справочнике — переспроси сэра, не создавай новую квартиру по неточному адресу. Бот сам каждый день в 8:00 проверяет: за день до rent_day (по числу месяца) — напоминает собрать показания счётчиков и сделать просчёт перед встречей; а в последние 10 дней перед lease_end — напоминает спросить квартиранта про продление или выезд (один раз за контракт). Дополнительно есть регулярные ежемесячные напоминания по SOP (sop_reminders) — фиксированные задачи по числам месяца (фактуры, газ, интернет и т.д.), которые бот тоже сам присылает в 8:00. По просьбе сэра показывай список (get_sop_reminders), добавляй (add_sop_reminder) или убирай (remove_sop_reminder) такие напоминания.
@@ -220,12 +220,41 @@ def process_message(messages, system):
                     "direction": {"type": "string", "enum": ["приход", "расход"]},
                     "category": {"type": "string", "description": "Аренда, Коммуналка, Депозит, Прочее и т.п."},
                     "amount": {"type": "number"},
-                    "currency": {"type": "string", "description": "MDL или EUR, по умолчанию MDL"},
+                    "currency": {"type": "string", "enum": ["MDL", "EUR", "USD", "USDT"], "description": "по умолчанию MDL"},
+                    "payment_method": {"type": "string", "enum": ["наличные", "карта (укр)", "карта (молд)"], "description": "Как заплатили: наличные или на карту (украинскую/молдавскую). По умолчанию наличные"},
                     "counterpart": {"type": "string", "description": "Квартирант, Собственник, название провайдера и т.п."},
                     "date": {"type": "string", "description": "YYYY-MM-DD, по умолчанию сегодня"},
                     "comment": {"type": "string"}
                 },
                 "required": ["direction", "category", "amount"]
+            }
+        },
+        {
+            "name": "edit_apartment_operation",
+            "description": "Изменить существующую операцию кассы по её номеру (#id из get_apartment_report). Передавай только те поля, которые нужно поменять",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "op_id": {"type": "string", "description": "Номер операции (#id), узнать через get_apartment_report"},
+                    "direction": {"type": "string", "enum": ["приход", "расход"]},
+                    "category": {"type": "string"},
+                    "amount": {"type": "number"},
+                    "currency": {"type": "string", "enum": ["MDL", "EUR", "USD", "USDT"]},
+                    "payment_method": {"type": "string", "enum": ["наличные", "карта (укр)", "карта (молд)"]},
+                    "counterpart": {"type": "string"},
+                    "date": {"type": "string", "description": "YYYY-MM-DD"},
+                    "comment": {"type": "string"}
+                },
+                "required": ["op_id"]
+            }
+        },
+        {
+            "name": "delete_apartment_operation",
+            "description": "Удалить операцию кассы по её номеру (#id из get_apartment_report)",
+            "input_schema": {
+                "type": "object",
+                "properties": {"op_id": {"type": "string", "description": "Номер операции (#id)"}},
+                "required": ["op_id"]
             }
         },
         {
@@ -470,16 +499,31 @@ def process_message(messages, system):
                 elif block.name == "record_apartment_operation":
                     status, info = db_record_apartment_operation(
                         inp.get("apartment"), inp["direction"], inp["category"], inp["amount"],
-                        inp.get("currency", "MDL"), inp.get("counterpart"), inp.get("date"), inp.get("comment")
+                        inp.get("currency", "MDL"), inp.get("counterpart"), inp.get("date"), inp.get("comment"),
+                        inp.get("payment_method", "наличные")
                     )
                     if status == "recorded":
                         sign = "+" if inp["direction"] == "приход" else "-"
                         address_part = f" ({info})" if info else ""
-                        result = f"Записано в кассу квартир{address_part}: {sign}{inp['amount']} {inp.get('currency', 'MDL')} [{inp['category']}]"
+                        method = inp.get("payment_method", "наличные")
+                        method_part = f" [{method}]" if method and method != "наличные" else ""
+                        result = f"Записано в кассу квартир{address_part}: {sign}{inp['amount']} {inp.get('currency', 'MDL')} [{inp['category']}]{method_part}"
                     elif status == "ambiguous":
                         result = "Нашлось несколько подходящих квартир, уточни у сэра какую он имеет в виду:\n" + "\n".join(f"- {a}" for a in info)
                     else:
                         result = f"Квартира '{info}' не найдена в справочнике. Уточни у сэра адрес или предложи добавить квартиру через add_apartment"
+                elif block.name == "edit_apartment_operation":
+                    status = db_update_apartment_operation(
+                        inp["op_id"], direction=inp.get("direction"), category=inp.get("category"),
+                        counterpart=inp.get("counterpart"), amount=inp.get("amount"), currency=inp.get("currency"),
+                        comment=inp.get("comment"), payment_method=inp.get("payment_method"), op_date=inp.get("date")
+                    )
+                    result = {"updated": f"Операция #{inp['op_id']} обновлена",
+                              "no_changes": "Не указано, что менять",
+                              "not_found": "Операция с таким номером не найдена"}.get(status, "Не удалось обновить")
+                elif block.name == "delete_apartment_operation":
+                    status = db_delete_apartment_operation(inp["op_id"])
+                    result = f"Операция #{inp['op_id']} удалена" if status == "deleted" else "Операция с таким номером не найдена"
                 elif block.name == "get_apartment_balance":
                     result = db_get_apartment_balance()
                 elif block.name == "reconcile_apartment_balance":
