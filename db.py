@@ -23,7 +23,8 @@ def init_db():
             priority TEXT,
             assignee TEXT,
             status TEXT DEFAULT 'Открыта',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            closed_at TIMESTAMP
         )''')
         c.execute('''CREATE TABLE IF NOT EXISTS decisions (
             id SERIAL PRIMARY KEY,
@@ -199,6 +200,7 @@ def init_db():
             logger.warning(f"Миграция apartments lease-полей пропущена: {e}")
         try:
             c.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assignee TEXT")
+            c.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP")
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -338,7 +340,7 @@ def db_close_task(name_part):
             row = c.fetchone()
             if not row:
                 return "not_found", []
-            c.execute("UPDATE tasks SET status='Готово' WHERE id=%s", (task_id,))
+            c.execute("UPDATE tasks SET status='Готово', closed_at=%s WHERE id=%s", (now_msk().replace(tzinfo=None), task_id))
             return "closed", [row[0]]
         c.execute("SELECT id, name FROM tasks WHERE name ILIKE %s AND status != 'Готово'", (f"%{name_part}%",))
         rows = c.fetchall()
@@ -347,7 +349,7 @@ def db_close_task(name_part):
         if len(rows) > 1:
             return "ambiguous", [f"#{tid} {name}" for tid, name in rows]
         task_id, name = rows[0]
-        c.execute("UPDATE tasks SET status='Готово' WHERE id=%s", (task_id,))
+        c.execute("UPDATE tasks SET status='Готово', closed_at=%s WHERE id=%s", (now_msk().replace(tzinfo=None), task_id))
         return "closed", [name]
 
 
@@ -556,6 +558,37 @@ def db_get_goals(active_only=True):
         if h in groups:
             out.append(f"*{GOAL_TITLES[h]}:*\n" + "\n".join(groups[h]))
     return "\n\n".join(out)
+
+
+def db_get_day_activity():
+    """Сводка активности за сегодня (для вечернего разбора-наставничества)."""
+    today = today_msk()
+    today_s = today.strftime("%Y-%m-%d")
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT name FROM tasks WHERE status='Готово' AND closed_at::date=%s ORDER BY closed_at", (today,))
+        closed = [r[0] for r in c.fetchall()]
+        c.execute("SELECT count(*) FROM tasks WHERE created_at::date=%s", (today,))
+        created = c.fetchone()[0]
+        c.execute("SELECT name FROM tasks WHERE status!='Готово' AND deadline=%s", (today_s,))
+        due_today = [r[0] for r in c.fetchall()]
+        c.execute("""SELECT name, deadline FROM tasks WHERE status!='Готово' AND deadline IS NOT NULL
+                     AND deadline < %s ORDER BY deadline""", (today_s,))
+        overdue = c.fetchall()
+        c.execute("""SELECT text, progress FROM goals WHERE status='active'
+                     AND updated_at::date=%s AND progress IS NOT NULL""", (today,))
+        goals_moved = c.fetchall()
+    parts = []
+    parts.append(f"Закрыто задач сегодня: {len(closed)}" + ((" — " + "; ".join(closed)) if closed else ""))
+    parts.append(f"Создано задач сегодня: {created}")
+    parts.append(f"Задачи с дедлайном сегодня (ещё открыты): {len(due_today)}" + ((" — " + "; ".join(due_today)) if due_today else ""))
+    if overdue:
+        parts.append("Просрочено: " + "; ".join(f"{n} (до {d})" for n, d in overdue))
+    else:
+        parts.append("Просроченных задач нет")
+    if goals_moved:
+        parts.append("Движение по целям сегодня: " + "; ".join(f"{t} — {p}" for t, p in goals_moved))
+    return "\n".join(parts)
 
 
 APARTMENT_FIELDS = [

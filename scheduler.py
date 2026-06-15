@@ -6,6 +6,7 @@ from telegram import Bot
 
 from core import *
 from db import *
+from ai import generate_mentor_briefing
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +23,16 @@ async def send_morning_briefing(bot: Bot):
 
 
 async def send_evening_briefing(bot: Bot):
-    tasks = db_get_tasks()
-    goals = db_get_goals()
-    text = (f"*Вечерний разбор, сэр*\n\n*Цели:*\n{goals}\n\n*Открытые задачи:*\n{tasks}\n\n"
-            "Как продвинулись по целям сегодня? Что закрыли, что переносим?")
+    # Наставнический разбор дня — генерируется моделью по реальным данным.
+    try:
+        text = await asyncio.to_thread(generate_mentor_briefing)
+        text = f"*Вечерний разбор, сэр* 🌙\n\n{text}"
+    except Exception as e:
+        logger.error(f"Mentor briefing error, fallback: {e}")
+        tasks = db_get_tasks()
+        goals = db_get_goals()
+        text = (f"*Вечерний разбор, сэр*\n\n*Цели:*\n{goals}\n\n*Открытые задачи:*\n{tasks}\n\n"
+                "Как продвинулись по целям сегодня? Что закрыли, что переносим?")
     await send_md(bot, ALLOWED_USER_ID, text)
 
 

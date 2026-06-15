@@ -6,7 +6,7 @@ from telegram.ext import Application, MessageHandler, CommandHandler, filters, C
 
 from core import *
 from db import *
-from ai import build_system, process_message
+from ai import build_system, process_message, generate_mentor_briefing
 from webapp import (
     run_webapp_server, handle_webapp_data, normalize_deadline,
     create_quick_task, create_quick_finance, create_quick_decision,
@@ -59,6 +59,18 @@ async def memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Что я о вас знаю, сэр:\n{prefs}")
     else:
         await update.message.reply_text("Пока ничего не запомнено, сэр.")
+
+
+async def mentor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    try:
+        text = await asyncio.to_thread(generate_mentor_briefing)
+    except Exception as e:
+        logger.error(f"Mentor on-demand error: {e}")
+        text = "Не удалось собрать разбор, сэр. Попробуйте чуть позже."
+    await reply_md(update.message, text, reply_markup=MAIN_KEYBOARD)
 
 
 async def selfdestruct(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -289,6 +301,7 @@ def main():
     app.add_handler(CommandHandler("decisions", decisions_cmd))
     app.add_handler(CommandHandler("finance", finance_cmd))
     app.add_handler(CommandHandler("memory", memory))
+    app.add_handler(CommandHandler("mentor", mentor))
     app.add_handler(CommandHandler("selfdestruct", selfdestruct))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
