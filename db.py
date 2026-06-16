@@ -24,7 +24,8 @@ def init_db():
             assignee TEXT,
             status TEXT DEFAULT 'Открыта',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            closed_at TIMESTAMP
+            closed_at TIMESTAMP,
+            postpone_count INTEGER NOT NULL DEFAULT 0
         )''')
         c.execute('''CREATE TABLE IF NOT EXISTS decisions (
             id SERIAL PRIMARY KEY,
@@ -144,6 +145,10 @@ def init_db():
             job TEXT PRIMARY KEY,
             last_run_date TEXT
         )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )''')
         c.execute('''CREATE TABLE IF NOT EXISTS goals (
             id SERIAL PRIMARY KEY,
             text TEXT NOT NULL,
@@ -201,6 +206,7 @@ def init_db():
         try:
             c.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assignee TEXT")
             c.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP")
+            c.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS postpone_count INTEGER NOT NULL DEFAULT 0")
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -309,6 +315,59 @@ def db_get_tasks():
     return "\n\n".join(blocks)
 
 
+def _task_flags(priority, postpone_count):
+    fl = []
+    if priority == "Высокий":
+        fl.append("высокий приоритет")
+    if postpone_count and postpone_count >= 3:
+        fl.append(f"откладываешь {postpone_count}×")
+    return fl
+
+
+def db_get_today_tasks():
+    """Фокус-вид: главное на сегодня (цели дня) + просроченное + дедлайн сегодня, с пометками почему важно."""
+    today = today_msk()
+    today_s = today.strftime("%Y-%m-%d")
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""SELECT id, name, deadline, priority, postpone_count FROM tasks
+                     WHERE status!='Готово' AND deadline IS NOT NULL AND deadline <= %s
+                     ORDER BY deadline ASC, created_at""", (today_s,))
+        rows = c.fetchall()
+        c.execute("""SELECT text, progress FROM goals WHERE status='active' AND horizon='day'
+                     ORDER BY created_at""")
+        day_goals = c.fetchall()
+    overdue = [r for r in rows if str(r[2]) < today_s]
+    todays = [r for r in rows if str(r[2]) == today_s]
+
+    def fmt(r, is_overdue):
+        tid, name, deadline, priority, pc = r
+        reasons = _task_flags(priority, pc)
+        if is_overdue:
+            try:
+                days = (today - datetime.strptime(deadline, "%Y-%m-%d").date()).days
+                reasons.insert(0, f"просрочено {days} дн.")
+            except (ValueError, TypeError):
+                pass
+        line = f"- #{tid} {name}"
+        if reasons:
+            line += " — " + ", ".join(reasons)
+        return line
+
+    out = [f"*Сегодня:* {len(todays)} на сегодня, {len(overdue)} просрочено"]
+    if day_goals:
+        gl = "\n".join(f"- {t}" + (f" (прогресс: {p})" if p else "") for t, p in day_goals)
+        out.append(f"\n*🎯 Главное сегодня закрыть:*\n{gl}")
+    if overdue:
+        out.append("\n*🔴 Просрочено:*\n" + "\n".join(fmt(r, True) for r in overdue))
+    if todays:
+        out.append("\n*🟠 На сегодня:*\n" + "\n".join(fmt(r, False) for r in todays))
+    if not overdue and not todays and not day_goals:
+        out.append("\nНа сегодня и просроченных задач нет, сэр. 👍")
+    out.append("\n_Полный список — напишите «все задачи» или /alltasks._")
+    return "\n".join(out)
+
+
 def db_get_urgent_tasks():
     with db_conn() as conn:
         c = conn.cursor()
@@ -380,7 +439,14 @@ def db_update_task(name_part, deadline=None, priority=None, assignee=None):
             return "ambiguous", [f"#{tid} {name}" for tid, name in rows]
         task_id, name = rows[0]
         if deadline is not None:
-            c.execute("UPDATE tasks SET deadline=%s WHERE id=%s", (deadline, task_id))
+            # Если срок двигают на более позднюю дату — это перенос (прокрастинация), считаем.
+            c.execute("SELECT deadline FROM tasks WHERE id=%s", (task_id,))
+            old_deadline = c.fetchone()[0]
+            postponed = bool(old_deadline) and str(deadline) > str(old_deadline)
+            if postponed:
+                c.execute("UPDATE tasks SET deadline=%s, postpone_count=postpone_count+1 WHERE id=%s", (deadline, task_id))
+            else:
+                c.execute("UPDATE tasks SET deadline=%s WHERE id=%s", (deadline, task_id))
         if priority is not None:
             c.execute("UPDATE tasks SET priority=%s WHERE id=%s", (priority, task_id))
         if assignee is not None:
@@ -1054,6 +1120,21 @@ def db_mark_sop_reminder_sent(reminder_id, current_month):
     with db_conn() as conn:
         c = conn.cursor()
         c.execute("UPDATE sop_reminders SET last_sent_month=%s WHERE id=%s", (current_month, reminder_id))
+
+
+def db_set_setting(key, value):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""INSERT INTO settings (key, value) VALUES (%s, %s)
+                     ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value""", (key, str(value)))
+
+
+def db_get_setting(key, default=None):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT value FROM settings WHERE key=%s", (key,))
+        row = c.fetchone()
+    return row[0] if row else default
 
 
 def db_claim_daily_job(job, today_str):

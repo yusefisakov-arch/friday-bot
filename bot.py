@@ -38,6 +38,12 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
+    await reply_md(update.message, db_get_today_tasks())
+
+
+async def alltasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
     await reply_md(update.message, db_get_tasks())
 
 
@@ -73,6 +79,17 @@ async def mentor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Mentor on-demand error: {e}")
         text = "Не удалось собрать разбор, сэр. Попробуйте чуть позже."
     await reply_md(update.message, text, reply_markup=MAIN_KEYBOARD)
+
+
+async def hardmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    new = "off" if db_get_setting("hard_mode", "off") == "on" else "on"
+    db_set_setting("hard_mode", new)
+    if new == "on":
+        await update.message.reply_text("Жёсткий режим ВКЛЮЧЁН, сэр. Буду давить и не давать соскользнуть.")
+    else:
+        await update.message.reply_text("Жёсткий режим выключен, сэр. Возвращаюсь к мягкому тону.")
 
 
 async def selfdestruct(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -237,6 +254,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- Кнопки мониторинга ---
     if user_message == VIEW_TASKS_BUTTON:
+        await reply_md(update.message, db_get_today_tasks())
+        return
+
+    if user_message.strip().lower() in ("все задачи", "всё задачи", "все задания", "полный список задач"):
         await reply_md(update.message, db_get_tasks())
         return
 
@@ -332,10 +353,12 @@ async def post_init(application: Application):
     try:
         await application.bot.set_my_commands([
             BotCommand("mentor", "Разбор дня и движение к целям (наставник)"),
-            BotCommand("tasks", "Список открытых задач"),
+            BotCommand("tasks", "Задачи на сегодня и просроченные"),
+            BotCommand("alltasks", "Полный список задач"),
             BotCommand("finance", "Финансы и итоги за месяц"),
             BotCommand("decisions", "Открытые договорённости"),
             BotCommand("memory", "Что бот о вас запомнил"),
+            BotCommand("hardmode", "Жёсткий режим наставника вкл/выкл"),
             BotCommand("clear", "Очистить историю разговора"),
             BotCommand("start", "Перезапуск и клавиатура"),
             BotCommand("selfdestruct", "⚠️ Стереть все данные безвозвратно"),
@@ -358,10 +381,12 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("tasks", tasks))
+    app.add_handler(CommandHandler("alltasks", alltasks))
     app.add_handler(CommandHandler("decisions", decisions_cmd))
     app.add_handler(CommandHandler("finance", finance_cmd))
     app.add_handler(CommandHandler("memory", memory))
     app.add_handler(CommandHandler("mentor", mentor))
+    app.add_handler(CommandHandler("hardmode", hardmode))
     app.add_handler(CommandHandler("selfdestruct", selfdestruct))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
