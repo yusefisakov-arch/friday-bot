@@ -24,19 +24,30 @@ def collect_due_sop_text():
 
 
 def collect_apartment_reminders_text():
-    """Текст напоминаний по квартирам (сбор аренды/показаний и окончание контрактов) + отметки."""
+    """Пер-квартирные напоминания по данным квартиры (переезжают вместе со сменой жильца):
+    1) в день tenant_pay_day — забрать аренду; 2) за 10 дней до lease_end — про продление;
+    3) за 2 дня до lease_end — взять депозит."""
     now = now_msk()
     today = now.date()
-    tomorrow = today + timedelta(days=1)
     current_month = now.strftime("%Y-%m")
     lines = []
-    for apt_id, address, rent_day, lease_end, end_sent, last_month in db_get_apartments_for_reminders():
-        if rent_day and rent_day == tomorrow.day and last_month != current_month:
-            lines.append(f"- {address}: завтра аренда — фото счётчиков, просчёт, договориться о встрече")
+    for (apt_id, address, tenant_name, tenant_pay_day, lease_end,
+         end_sent, deposit_sent, last_month) in db_get_apartments_for_reminders():
+        who = tenant_name or "квартирант"
+        # 1. День оплаты квартиранта — забрать аренду (раз в месяц)
+        if tenant_pay_day and tenant_pay_day == today.day and last_month != current_month:
+            lines.append(f"- 💶 {address}: сегодня {who} платит — забрать аренду (+ фото счётчиков, просчёт)")
             db_set_collection_reminder_sent(apt_id, current_month)
-        if lease_end and not end_sent and today <= lease_end <= today + timedelta(days=10):
-            lines.append(f"- {address}: контракт до {lease_end.strftime('%d.%m.%Y')} — спросить про продление/выезд")
-            db_set_lease_end_reminder_sent(apt_id)
+        if lease_end:
+            days_left = (lease_end - today).days
+            # 2. За ~10 дней — позвонить про продление/выезд (один раз за контракт)
+            if not end_sent and 0 <= days_left <= 10:
+                lines.append(f"- 📞 {address}: контракт {who} до {lease_end.strftime('%d.%m')} ({days_left} дн.) — позвонить про продление или выезд")
+                db_set_lease_end_reminder_sent(apt_id)
+            # 3. За 2 дня до выезда — взять депозит (один раз за контракт)
+            if not deposit_sent and 0 <= days_left <= 2:
+                lines.append(f"- 🔑 {address}: через {days_left} дн. выезд {who} — взять депозит и показания счётчиков")
+                db_set_deposit_reminder_sent(apt_id)
     return "\n".join(lines)
 
 

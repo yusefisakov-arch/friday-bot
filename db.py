@@ -76,6 +76,7 @@ def init_db():
             lease_start DATE,
             lease_end DATE,
             lease_end_reminder_sent BOOLEAN DEFAULT false,
+            deposit_reminder_sent BOOLEAN DEFAULT false,
             last_collection_reminder_month TEXT,
             utilities_fixed NUMERIC,
             floor TEXT,
@@ -197,6 +198,7 @@ def init_db():
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS lease_start DATE")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS lease_end DATE")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS lease_end_reminder_sent BOOLEAN DEFAULT false")
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS deposit_reminder_sent BOOLEAN DEFAULT false")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS last_collection_reminder_month TEXT")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS utilities_fixed NUMERIC")
             conn.commit()
@@ -693,7 +695,10 @@ def db_add_apartment(address, **fields):
                          {set_clause},
                          lease_end_reminder_sent = CASE
                              WHEN EXCLUDED.lease_end IS NOT NULL AND EXCLUDED.lease_end IS DISTINCT FROM apartments.lease_end
-                             THEN false ELSE apartments.lease_end_reminder_sent END""",
+                             THEN false ELSE apartments.lease_end_reminder_sent END,
+                         deposit_reminder_sent = CASE
+                             WHEN EXCLUDED.lease_end IS NOT NULL AND EXCLUDED.lease_end IS DISTINCT FROM apartments.lease_end
+                             THEN false ELSE apartments.deposit_reminder_sent END""",
                   values)
 
 
@@ -701,8 +706,9 @@ def db_clear_tenant(apartment_id):
     with db_conn() as conn:
         c = conn.cursor()
         c.execute("""UPDATE apartments SET tenant_name=NULL, tenant_phone=NULL, tenant_phone2=NULL,
-                     lease_start=NULL, lease_end=NULL, tenant_rent=NULL, deposit=NULL,
-                     lease_end_reminder_sent=false
+                     tenant_pay_day=NULL, lease_start=NULL, lease_end=NULL, tenant_rent=NULL, deposit=NULL,
+                     lease_end_reminder_sent=false, deposit_reminder_sent=false,
+                     last_collection_reminder_month=NULL
                      WHERE id=%s""", (apartment_id,))
 
 
@@ -1167,7 +1173,8 @@ def db_claim_daily_job(job, today_str):
 def db_get_apartments_for_reminders():
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("""SELECT id, address, rent_day, lease_end, lease_end_reminder_sent, last_collection_reminder_month
+        c.execute("""SELECT id, address, tenant_name, tenant_pay_day, lease_end,
+                            lease_end_reminder_sent, deposit_reminder_sent, last_collection_reminder_month
                      FROM apartments WHERE active""")
         return c.fetchall()
 
@@ -1182,6 +1189,12 @@ def db_set_lease_end_reminder_sent(apartment_id):
     with db_conn() as conn:
         c = conn.cursor()
         c.execute("UPDATE apartments SET lease_end_reminder_sent=true WHERE id=%s", (apartment_id,))
+
+
+def db_set_deposit_reminder_sent(apartment_id):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE apartments SET deposit_reminder_sent=true WHERE id=%s", (apartment_id,))
 
 
 def db_save_message(role, content):
