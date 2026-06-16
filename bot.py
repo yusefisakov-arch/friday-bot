@@ -1,5 +1,6 @@
 """Точка входа FRIDAY: телеграм-обработчики, диалоговая память, запуск сервисов."""
 import asyncio
+import base64
 import logging
 from telegram import Update, Bot, ReplyKeyboardRemove
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes

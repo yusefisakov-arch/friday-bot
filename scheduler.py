@@ -11,15 +11,52 @@ from ai import generate_mentor_briefing
 logger = logging.getLogger(__name__)
 
 
+def collect_due_sop_text():
+    """Текст SOP-напоминаний на сегодня + отметка, что отправлены. Возвращает '' если нет."""
+    now = now_msk()
+    current_month = now.strftime("%Y-%m")
+    due = db_get_due_sop_reminders(now.day, current_month)
+    if not due:
+        return ""
+    for reminder_id, _text in due:
+        db_mark_sop_reminder_sent(reminder_id, current_month)
+    return "\n".join(f"- {text}" for _, text in due)
+
+
+def collect_apartment_reminders_text():
+    """Текст напоминаний по квартирам (сбор аренды/показаний и окончание контрактов) + отметки."""
+    now = now_msk()
+    today = now.date()
+    tomorrow = today + timedelta(days=1)
+    current_month = now.strftime("%Y-%m")
+    lines = []
+    for apt_id, address, rent_day, lease_end, end_sent, last_month in db_get_apartments_for_reminders():
+        if rent_day and rent_day == tomorrow.day and last_month != current_month:
+            lines.append(f"- {address}: завтра аренда — фото счётчиков, просчёт, договориться о встрече")
+            db_set_collection_reminder_sent(apt_id, current_month)
+        if lease_end and not end_sent and today <= lease_end <= today + timedelta(days=10):
+            lines.append(f"- {address}: контракт до {lease_end.strftime('%d.%m.%Y')} — спросить про продление/выезд")
+            db_set_lease_end_reminder_sent(apt_id)
+    return "\n".join(lines)
+
+
 async def send_morning_briefing(bot: Bot):
+    # Всё утреннее — в ОДНОМ сообщении, чтобы не было пачки отдельных уведомлений.
+    goals = db_get_goals()
     tasks = db_get_tasks()
     urgent = db_get_urgent_tasks()
-    goals = db_get_goals()
-    text = f"*Доброе утро, сэр*\n\n*Цели сейчас:*\n{goals}\n\n*Задачи на сегодня:*\n{tasks}"
+    sop = collect_due_sop_text()
+    apartments = collect_apartment_reminders_text()
+
+    parts = ["*Доброе утро, сэр* ☀️", f"\n*Цели:*\n{goals}", f"\n*Задачи:*\n{tasks}"]
     if urgent:
-        text += f"\n\n*Срочное (дедлайн сегодня/завтра):*\n{urgent}"
-    text += "\n\nКакие 1-3 главные цели на сегодня? С чего начнём, сэр?"
-    await send_md(bot, ALLOWED_USER_ID, text)
+        parts.append(f"\n*Срочное (дедлайн сегодня/завтра):*\n{urgent}")
+    if sop:
+        parts.append(f"\n*Сегодня по регламенту:*\n{sop}")
+    if apartments:
+        parts.append(f"\n*Квартиры:*\n{apartments}")
+    parts.append("\nКакие 1-3 главные цели на сегодня, сэр? С чего начнём?")
+    await send_md(bot, ALLOWED_USER_ID, "\n".join(parts))
 
 
 async def send_evening_briefing(bot: Bot):
@@ -52,39 +89,6 @@ async def send_monthly_planning(bot: Bot):
     await send_md(bot, ALLOWED_USER_ID, text)
 
 
-async def send_sop_reminders(bot: Bot):
-    now = now_msk()
-    current_month = now.strftime("%Y-%m")
-    due = db_get_due_sop_reminders(now.day, current_month)
-    if not due:
-        return
-    lines = "\n".join(f"- {text}" for _, text in due)
-    await send_md(bot, ALLOWED_USER_ID, f"*Напоминания по SOP, сэр:*\n{lines}")
-    # Раньше тут ещё создавалась задача-копия на каждое напоминание — это засоряло
-    # список задач дублями. Теперь SOP-напоминание приходит только сообщением.
-    for reminder_id, _text in due:
-        db_mark_sop_reminder_sent(reminder_id, current_month)
-
-
-async def send_apartment_reminders(bot: Bot):
-    now = now_msk()
-    today = now.date()
-    tomorrow = today + timedelta(days=1)
-    current_month = now.strftime("%Y-%m")
-    for apt_id, address, rent_day, lease_end, end_sent, last_month in db_get_apartments_for_reminders():
-        if rent_day and rent_day == tomorrow.day and last_month != current_month:
-            await send_md(
-                bot, ALLOWED_USER_ID,
-                text=f"Сэр, завтра аренда по *{address}*. Попросите у квартиранта фото счётчиков (свет, газ, вода), сделайте просчёт и договоритесь о встрече."
-            )
-            db_set_collection_reminder_sent(apt_id, current_month)
-
-        if lease_end and not end_sent and today <= lease_end <= today + timedelta(days=10):
-            await send_md(
-                bot, ALLOWED_USER_ID,
-                text=f"Сэр, по адресу *{address}* контракт заканчивается *{lease_end.strftime('%d.%m.%Y')}*. Узнайте у квартиранта про продление или выезд."
-            )
-            db_set_lease_end_reminder_sent(apt_id)
 
 
 async def scheduler(bot: Bot):
@@ -93,19 +97,12 @@ async def scheduler(bot: Bot):
         today_str = now.strftime("%Y-%m-%d")
 
         # Утренний блок: один раз за день в окне 8:00–11:59 (переживает рестарты и задержки).
+        # SOP и напоминания по квартирам теперь вшиты в брифинг — одно сообщение вместо пачки.
         if 8 <= now.hour <= 11 and db_claim_daily_job("morning", today_str):
             try:
                 await send_morning_briefing(bot)
             except Exception as e:
                 logger.error(f"Morning briefing error: {e}")
-            try:
-                await send_sop_reminders(bot)
-            except Exception as e:
-                logger.error(f"SOP reminders error: {e}")
-            try:
-                await send_apartment_reminders(bot)
-            except Exception as e:
-                logger.error(f"Apartment reminders error: {e}")
             try:
                 db_prune_history()
             except Exception as e:
