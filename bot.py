@@ -2,7 +2,8 @@
 import asyncio
 import base64
 import logging
-from telegram import Update, Bot, ReplyKeyboardRemove
+import aiohttp
+from telegram import Update, Bot, ReplyKeyboardRemove, BotCommand
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
 from core import *
@@ -251,6 +252,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reply_md(update.message, db_get_apartment_balance())
         return
 
+    await run_text_turn(update, context, user_message)
+
+
+async def run_text_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, user_message: str):
+    """Общий прогон сообщения через ИИ (используется и для текста, и для расшифрованного голоса)."""
+    global conversation_history
     conversation_history.append({"role": "user", "content": user_message})
     if len(conversation_history) > HISTORY_WINDOW:
         conversation_history = conversation_history[-HISTORY_WINDOW:]
@@ -282,7 +289,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Произошла ошибка, сэр. Попробуйте ещё раз.")
 
 
+async def transcribe_groq(audio_bytes):
+    """Распознать речь через Groq (Whisper). Возвращает текст."""
+    form = aiohttp.FormData()
+    form.add_field("file", audio_bytes, filename="voice.ogg", content_type="audio/ogg")
+    form.add_field("model", "whisper-large-v3-turbo")
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "User-Agent": "Mozilla/5.0"}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            data=form, headers=headers, timeout=aiohttp.ClientTimeout(total=120),
+        ) as resp:
+            data = await resp.json()
+            return (data.get("text") or "").strip()
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    if not GROQ_API_KEY:
+        await update.message.reply_text("Распознавание голоса пока не настроено, сэр.")
+        return
+    voice = update.message.voice or update.message.audio
+    try:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        tg_file = await voice.get_file()
+        raw = await tg_file.download_as_bytearray()
+        text = await transcribe_groq(bytes(raw))
+    except Exception as e:
+        logger.error(f"Voice transcription error: {e}")
+        await update.message.reply_text("Не смог распознать голос, сэр. Попробуйте ещё раз.")
+        return
+    if not text:
+        await update.message.reply_text("Пустая запись, сэр.")
+        return
+    await update.message.reply_text(f"🎤 Расслышал: {text}")
+    await run_text_turn(update, context, text)
+
+
 async def post_init(application: Application):
+    # Меню команд (выпадает при вводе "/")
+    try:
+        await application.bot.set_my_commands([
+            BotCommand("mentor", "Разбор дня и движение к целям (наставник)"),
+            BotCommand("tasks", "Список открытых задач"),
+            BotCommand("finance", "Финансы и итоги за месяц"),
+            BotCommand("decisions", "Открытые договорённости"),
+            BotCommand("memory", "Что бот о вас запомнил"),
+            BotCommand("clear", "Очистить историю разговора"),
+            BotCommand("start", "Перезапуск и клавиатура"),
+            BotCommand("selfdestruct", "⚠️ Стереть все данные безвозвратно"),
+        ])
+    except Exception as e:
+        logger.warning(f"set_my_commands пропущено: {e}")
     asyncio.create_task(scheduler(application.bot))
     asyncio.create_task(run_webapp_server())
 
@@ -305,6 +364,7 @@ def main():
     app.add_handler(CommandHandler("mentor", mentor))
     app.add_handler(CommandHandler("selfdestruct", selfdestruct))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("FRIDAY запущен!")
     app.run_polling(drop_pending_updates=True)
