@@ -626,6 +626,21 @@ def db_get_goals(active_only=True):
     return "\n\n".join(out)
 
 
+def db_get_streak():
+    """Сколько дней подряд (заканчивая сегодня/вчера) закрыта хотя бы одна задача."""
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT DISTINCT closed_at::date FROM tasks WHERE closed_at IS NOT NULL")
+        dates = {r[0] for r in c.fetchall()}
+    today = today_msk()
+    d = today if today in dates else today - timedelta(days=1)
+    streak = 0
+    while d in dates:
+        streak += 1
+        d -= timedelta(days=1)
+    return streak
+
+
 def db_get_day_activity():
     """Сводка активности за сегодня (для вечернего разбора-наставничества)."""
     today = today_msk()
@@ -645,6 +660,7 @@ def db_get_day_activity():
                      AND updated_at::date=%s AND progress IS NOT NULL""", (today,))
         goals_moved = c.fetchall()
     parts = []
+    parts.append(f"Серия (дней подряд с закрытыми задачами): {db_get_streak()}")
     parts.append(f"Закрыто задач сегодня: {len(closed)}" + ((" — " + "; ".join(closed)) if closed else ""))
     parts.append(f"Создано задач сегодня: {created}")
     parts.append(f"Задачи с дедлайном сегодня (ещё открыты): {len(due_today)}" + ((" — " + "; ".join(due_today)) if due_today else ""))

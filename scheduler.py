@@ -48,7 +48,9 @@ async def send_morning_briefing(bot: Bot):
     sop = collect_due_sop_text()
     apartments = collect_apartment_reminders_text()
 
-    parts = ["*Доброе утро, сэр* ☀️", f"\n*Цели:*\n{goals}", f"\n*Задачи:*\n{tasks}"]
+    streak = db_get_streak()
+    streak_line = f" 🔥 {streak} дней подряд" if streak >= 2 else ""
+    parts = [f"*Доброе утро, сэр* ☀️{streak_line}", f"\n*Цели:*\n{goals}", f"\n*Задачи:*\n{tasks}"]
     if urgent:
         parts.append(f"\n*Срочное (дедлайн сегодня/завтра):*\n{urgent}")
     if sop:
@@ -70,6 +72,14 @@ async def send_evening_briefing(bot: Bot):
         goals = db_get_goals()
         text = (f"*Вечерний разбор, сэр*\n\n*Цели:*\n{goals}\n\n*Открытые задачи:*\n{tasks}\n\n"
                 "Как продвинулись по целям сегодня? Что закрыли, что переносим?")
+    await send_md(bot, ALLOWED_USER_ID, text)
+
+
+async def send_checkin(bot: Bot, slot):
+    if slot == "mid":
+        text = "Чек-ин, сэр: чем сейчас занят и на чём застрял? Двигаемся по главному на сегодня?"
+    else:
+        text = "Чек-ин, сэр: что уже закрыл из главного? Что осталось до вечера?"
     await send_md(bot, ALLOWED_USER_ID, text)
 
 
@@ -119,6 +129,18 @@ async def scheduler(bot: Bot):
                     await send_monthly_planning(bot)
                 except Exception as e:
                     logger.error(f"Monthly planning error: {e}")
+
+        # Дневные чек-ины (лёгкие): ~13:00 и ~17:00, по разу за день.
+        if now.hour == 13 and db_claim_daily_job("checkin_mid", today_str):
+            try:
+                await send_checkin(bot, "mid")
+            except Exception as e:
+                logger.error(f"Checkin mid error: {e}")
+        if now.hour == 17 and db_claim_daily_job("checkin_eve", today_str):
+            try:
+                await send_checkin(bot, "eve")
+            except Exception as e:
+                logger.error(f"Checkin eve error: {e}")
 
         # Вечерний блок: один раз за день в окне 21:00–23:59.
         if now.hour >= 21 and db_claim_daily_job("evening", today_str):
