@@ -273,7 +273,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reply_md(update.message, db_get_apartment_balance())
         return
 
+    # Триаж пересланных сообщений (разгрузка от переписки)
+    sender = forward_sender(update.message)
+    if sender:
+        user_message = (
+            f"Это ПЕРЕСЛАННОЕ сообщение от: {sender}.\n"
+            f"Текст сообщения:\n{user_message}\n\n"
+            "Сделай триаж в структурном виде: *От кого*, *Хотят* (суть), *Срок* (если есть), "
+            "*Черновик ответа* (готовый текст, который сэр может скопировать), и спроси, создать ли задачу."
+        )
+
     await run_text_turn(update, context, user_message)
+
+
+def forward_sender(message):
+    """Если сообщение переслано — вернуть имя источника, иначе None."""
+    fo = getattr(message, "forward_origin", None)
+    if not fo:
+        return None
+    su = getattr(fo, "sender_user", None)
+    if su:
+        return su.full_name or (f"@{su.username}" if su.username else "контакт")
+    sun = getattr(fo, "sender_user_name", None)
+    if sun:
+        return sun
+    sc = getattr(fo, "sender_chat", None)
+    if sc:
+        return getattr(sc, "title", None) or "чат"
+    ch = getattr(fo, "chat", None)
+    if ch:
+        return getattr(ch, "title", None) or "канал"
+    return "контакт"
 
 
 async def run_text_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, user_message: str):
