@@ -118,10 +118,10 @@ def make_apartments_heatmap(month=None):
     rows = db_get_apartments_board(month)
     if not rows:
         return None
-    cols = 4
+    cols = 3
     n = len(rows)
     nrows = max(1, math.ceil(n / cols))
-    fig, ax = plt.subplots(figsize=(cols * 2.7, nrows * 1.05 + 1.4))
+    fig, ax = plt.subplots(figsize=(cols * 3.6, nrows * 1.35 + 1.8))
     ax.set_xlim(0, cols)
     ax.set_ylim(0, nrows)
     ax.axis("off")
@@ -133,21 +133,21 @@ def make_apartments_heatmap(month=None):
         rect = plt.Rectangle((x + 0.04, y + 0.06), 0.92, 0.88,
                              facecolor=_HEAT_COLORS[code],
                              edgecolor=("#1565C0" if call_due else "#FFFFFF"),
-                             linewidth=(3.5 if call_due else 1))
+                             linewidth=(5 if call_due else 1))
         ax.add_patch(rect)
         txt_color = "#FFFFFF" if code in ("green", "red") else "#111111"
-        addr = address if len(address) <= 22 else address[:21] + "…"
+        addr = address if len(address) <= 26 else address[:25] + "…"
         sub = f"платит {pay_day}-го" if pay_day else "аренду не берём"
         if call_due:
             sub += " · звонить"
-        ax.text(x + 0.5, y + 0.62, addr, ha="center", va="center", fontsize=7.5, color=txt_color)
-        ax.text(x + 0.5, y + 0.34, sub, ha="center", va="center", fontsize=6.8, color=txt_color)
+        ax.text(x + 0.5, y + 0.60, addr, ha="center", va="center", fontsize=13, weight="bold", color=txt_color)
+        ax.text(x + 0.5, y + 0.30, sub, ha="center", va="center", fontsize=11, color=txt_color)
     ax.set_title(
-        f"Аренда — {month}\nзелёный=оплачено · красный=пора забирать · жёлтый=скоро (≤10дн) · синяя рамка=звонить",
-        fontsize=9)
+        f"Аренда — {month}\nзелёный=оплачено · красный=пора забирать · жёлтый=скоро (≤10дн) · рамка=звонить",
+        fontsize=12)
     fig.tight_layout()
     path = os.path.join(tempfile.gettempdir(), f"heat_{uuid.uuid4().hex}.png")
-    fig.savefig(path, dpi=130)
+    fig.savefig(path, dpi=140)
     plt.close(fig)
     return path
 
