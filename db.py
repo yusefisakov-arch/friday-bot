@@ -925,6 +925,40 @@ def db_get_apartment_report(apartment=None, category=None, direction=None, date_
     return "\n".join(result)
 
 
+def db_get_apartments_board(month=None):
+    """Данные для таблицы и тепловой карты: по каждой активной квартире —
+    квартирант, аренда, день оплаты, конец контракта, оплачено ли за месяц."""
+    if month is None:
+        month = today_msk().strftime("%Y-%m")
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT a.address, a.tenant_name, a.tenant_rent, a.tenant_pay_day, a.lease_end,
+                   EXISTS(SELECT 1 FROM apartment_operations o WHERE o.apartment_id = a.id
+                          AND o.direction='приход' AND o.category ILIKE 'аренда'
+                          AND to_char(o.op_date, 'YYYY-MM') = %s) AS paid
+            FROM apartments a
+            WHERE a.active
+            ORDER BY a.tenant_pay_day NULLS LAST, a.address
+        """, (month,))
+        return c.fetchall()
+
+
+def apartment_pay_status(tenant_pay_day, paid, lease_end, today=None):
+    """Возвращает (код_цвета, нужен_звонок). Коды: green/red/yellow/grey/none."""
+    today = today or today_msk()
+    call_due = bool(lease_end) and 0 <= (lease_end - today).days <= 10
+    if not tenant_pay_day:
+        return "none", call_due  # аренду не берём
+    if paid:
+        return "green", call_due
+    if today.day >= tenant_pay_day:
+        return "red", call_due
+    if (tenant_pay_day - today.day) <= 10:
+        return "yellow", call_due
+    return "grey", call_due
+
+
 def db_get_rent_status(month=None):
     """Кто из квартирантов заплатил аренду за месяц, а кто нет (по приходам категории «Аренда»)."""
     if month is None:

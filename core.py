@@ -55,6 +55,7 @@ VIEW_APARTMENT_BALANCE_BUTTON = "🏦 Касса квартир"
 MOVE_IN_BUTTON = "🔑 Заселение"
 MOVE_OUT_BUTTON = "🚪 Выселение"
 UTILITIES_BUTTON = "⚡ Коммуналка"
+MAP_BUTTON = "🔥 Карта аренды"
 
 DEADLINE_KEYBOARD = ReplyKeyboardMarkup([["Сегодня", "Завтра"], ["Нет"]], resize_keyboard=True)
 PRIORITY_KEYBOARD = ReplyKeyboardMarkup([["Высокий", "Средний", "Низкий"], ["Нет"]], resize_keyboard=True)
@@ -72,7 +73,7 @@ if WEBAPP_URL:
             [KeyboardButton(APARTMENT_BUTTON, web_app=WebAppInfo(url=webapp_url("apartments"))), VIEW_APARTMENT_BALANCE_BUTTON],
             [KeyboardButton(MOVE_IN_BUTTON, web_app=WebAppInfo(url=webapp_url("move_in"))),
              KeyboardButton(MOVE_OUT_BUTTON, web_app=WebAppInfo(url=webapp_url("move_out")))],
-            [KeyboardButton(UTILITIES_BUTTON, web_app=WebAppInfo(url=webapp_url("utilities")))],
+            [KeyboardButton(UTILITIES_BUTTON, web_app=WebAppInfo(url=webapp_url("utilities"))), MAP_BUTTON],
         ],
         resize_keyboard=True,
     )
@@ -84,7 +85,7 @@ else:
             [QUICK_DECISION_BUTTON, VIEW_DECISIONS_BUTTON],
             [APARTMENT_BUTTON, VIEW_APARTMENT_BALANCE_BUTTON],
             [MOVE_IN_BUTTON, MOVE_OUT_BUTTON],
-            [UTILITIES_BUTTON],
+            [UTILITIES_BUTTON, MAP_BUTTON],
         ],
         resize_keyboard=True,
     )

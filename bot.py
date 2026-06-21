@@ -8,7 +8,10 @@ from telegram.ext import Application, MessageHandler, CommandHandler, filters, C
 
 from core import *
 from db import *
-from ai import build_system, process_message, generate_mentor_briefing
+from ai import (
+    build_system, process_message, generate_mentor_briefing,
+    make_apartments_heatmap, make_apartments_table,
+)
 from webapp import (
     run_webapp_server, handle_webapp_data, normalize_deadline,
     create_quick_task, create_quick_finance, create_quick_decision,
@@ -67,6 +70,35 @@ async def memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Что я о вас знаю, сэр:\n{prefs}")
     else:
         await update.message.reply_text("Пока ничего не запомнено, сэр.")
+
+
+async def send_apartments_image(update, context, kind):
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+    builder = make_apartments_heatmap if kind == "heat" else make_apartments_table
+    path = await asyncio.to_thread(builder)
+    if not path:
+        await update.message.reply_text("Нет квартир для отображения, сэр.")
+        return
+    try:
+        with open(path, "rb") as f:
+            await update.message.reply_photo(photo=f)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+async def heatmap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    await send_apartments_image(update, context, "heat")
+
+
+async def table_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    await send_apartments_image(update, context, "table")
 
 
 async def mentor(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -273,6 +305,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reply_md(update.message, db_get_apartment_balance())
         return
 
+    if user_message == MAP_BUTTON:
+        await send_apartments_image(update, context, "heat")
+        return
+
+    if user_message.strip().lower() in ("таблица квартир", "таблица", "квартиры таблицей"):
+        await send_apartments_image(update, context, "table")
+        return
+
     # Триаж пересланных сообщений (разгрузка от переписки)
     sender = forward_sender(update.message)
     if sender:
@@ -385,6 +425,8 @@ async def post_init(application: Application):
             BotCommand("mentor", "Разбор дня и движение к целям (наставник)"),
             BotCommand("tasks", "Задачи на сегодня и просроченные"),
             BotCommand("alltasks", "Полный список задач"),
+            BotCommand("map", "Тепловая карта аренды (картинка)"),
+            BotCommand("table", "Таблица квартир (картинка)"),
             BotCommand("finance", "Финансы и итоги за месяц"),
             BotCommand("decisions", "Открытые договорённости"),
             BotCommand("memory", "Что бот о вас запомнил"),
@@ -412,6 +454,8 @@ def main():
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("tasks", tasks))
     app.add_handler(CommandHandler("alltasks", alltasks))
+    app.add_handler(CommandHandler("map", heatmap_cmd))
+    app.add_handler(CommandHandler("table", table_cmd))
     app.add_handler(CommandHandler("decisions", decisions_cmd))
     app.add_handler(CommandHandler("finance", finance_cmd))
     app.add_handler(CommandHandler("memory", memory))

@@ -1,4 +1,5 @@
 """Слой расписания: брифинги, напоминания, ежедневные задачи."""
+import os
 import asyncio
 import logging
 from datetime import timedelta
@@ -6,7 +7,7 @@ from telegram import Bot
 
 from core import *
 from db import *
-from ai import generate_mentor_briefing
+from ai import generate_mentor_briefing, make_apartments_heatmap
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,15 @@ async def send_morning_briefing(bot: Bot):
         parts.append(f"\n*Квартиры:*\n{apartments}")
     parts.append("\nКакие 1-3 главные цели на сегодня, сэр? С чего начнём?")
     await send_md(bot, ALLOWED_USER_ID, "\n".join(parts))
+    # Тепловая карта аренды — отдельной картинкой каждое утро
+    try:
+        path = await asyncio.to_thread(make_apartments_heatmap)
+        if path:
+            with open(path, "rb") as f:
+                await bot.send_photo(chat_id=ALLOWED_USER_ID, photo=f)
+            os.remove(path)
+    except Exception as e:
+        logger.error(f"Morning heatmap error: {e}")
 
 
 async def send_evening_briefing(bot: Bot):

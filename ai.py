@@ -107,6 +107,94 @@ def make_chart(title, chart_type, labels, values):
     return path
 
 
+_HEAT_COLORS = {"green": "#43A047", "red": "#E53935", "yellow": "#FDD835", "grey": "#B0BEC5", "none": "#ECEFF1"}
+_HEAT_STATUS = {"green": "оплачено", "red": "забрать!", "yellow": "скоро", "grey": "рано", "none": "без аренды"}
+
+
+def make_apartments_heatmap(month=None):
+    import math
+    today = today_msk()
+    month = month or today.strftime("%Y-%m")
+    rows = db_get_apartments_board(month)
+    if not rows:
+        return None
+    cols = 4
+    n = len(rows)
+    nrows = max(1, math.ceil(n / cols))
+    fig, ax = plt.subplots(figsize=(cols * 2.7, nrows * 1.05 + 1.4))
+    ax.set_xlim(0, cols)
+    ax.set_ylim(0, nrows)
+    ax.axis("off")
+    for i, (address, tenant_name, tenant_rent, pay_day, lease_end, paid) in enumerate(rows):
+        code, call_due = apartment_pay_status(pay_day, paid, lease_end, today)
+        r, cc = divmod(i, cols)
+        x = cc
+        y = nrows - 1 - r
+        rect = plt.Rectangle((x + 0.04, y + 0.06), 0.92, 0.88,
+                             facecolor=_HEAT_COLORS[code],
+                             edgecolor=("#1565C0" if call_due else "#FFFFFF"),
+                             linewidth=(3.5 if call_due else 1))
+        ax.add_patch(rect)
+        txt_color = "#FFFFFF" if code in ("green", "red") else "#111111"
+        addr = address if len(address) <= 22 else address[:21] + "…"
+        sub = f"платит {pay_day}-го" if pay_day else "аренду не берём"
+        if call_due:
+            sub += " · звонить"
+        ax.text(x + 0.5, y + 0.62, addr, ha="center", va="center", fontsize=7.5, color=txt_color)
+        ax.text(x + 0.5, y + 0.34, sub, ha="center", va="center", fontsize=6.8, color=txt_color)
+    ax.set_title(
+        f"Аренда — {month}\nзелёный=оплачено · красный=пора забирать · жёлтый=скоро (≤10дн) · синяя рамка=звонить",
+        fontsize=9)
+    fig.tight_layout()
+    path = os.path.join(tempfile.gettempdir(), f"heat_{uuid.uuid4().hex}.png")
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+    return path
+
+
+def make_apartments_table(month=None):
+    today = today_msk()
+    month = month or today.strftime("%Y-%m")
+    rows = db_get_apartments_board(month)
+    if not rows:
+        return None
+    headers = ["Адрес", "Квартирант", "Аренда", "Платит", "Контракт до", "Статус"]
+    cell_text, status_codes = [], []
+    for address, tenant_name, tenant_rent, pay_day, lease_end, paid in rows:
+        code, call_due = apartment_pay_status(pay_day, paid, lease_end, today)
+        st = _HEAT_STATUS[code] + (" +звонить" if call_due else "")
+        cell_text.append([
+            address[:26],
+            (tenant_name or "—")[:18],
+            (str(int(tenant_rent)) if tenant_rent is not None else "—"),
+            (str(pay_day) if pay_day else "—"),
+            (lease_end.strftime("%d.%m") if lease_end else "—"),
+            st,
+        ])
+        status_codes.append(code)
+    fig, ax = plt.subplots(figsize=(11, max(2, 0.34 * len(rows) + 1)))
+    ax.axis("off")
+    tbl = ax.table(cellText=cell_text, colLabels=headers, loc="center", cellLoc="left")
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(8)
+    tbl.scale(1, 1.25)
+    # покрасить ячейку статуса
+    for ri, code in enumerate(status_codes, start=1):
+        cell = tbl[ri, 5]
+        cell.set_facecolor(_HEAT_COLORS[code])
+        if code in ("green", "red"):
+            cell.set_text_props(color="#FFFFFF")
+    for ci in range(len(headers)):
+        tbl[0, ci].set_facecolor("#37474F")
+        tbl[0, ci].set_text_props(color="#FFFFFF", weight="bold")
+    ax.set_title(f"Квартиры — {month}", fontsize=11, pad=12)
+    fig.tight_layout()
+    path = os.path.join(tempfile.gettempdir(), f"table_{uuid.uuid4().hex}.png")
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
 def process_message(messages, system):
     tools = [
         {
@@ -350,6 +438,16 @@ def process_message(messages, system):
                 },
                 "required": ["title", "chart_type", "labels", "values"]
             }
+        },
+        {
+            "name": "get_apartments_heatmap",
+            "description": "Прислать тепловую карту аренды картинкой: по каждой квартире цветом — зелёный (оплачено), красный (пора забирать), жёлтый (скоро, ≤10 дней), серый (рано/без аренды), синяя рамка = пора звонить (конец контракта). Используй на запросы 'карта аренды', 'тепловая карта', 'кто заплатил картинкой'",
+            "input_schema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "get_apartments_table",
+            "description": "Прислать таблицу всех квартир картинкой: адрес, квартирант, аренда, день оплаты, конец контракта, статус оплаты. Используй на запросы 'таблица квартир', 'покажи квартиры таблицей'",
+            "input_schema": {"type": "object", "properties": {}}
         },
         {
             "name": "get_utility_tariffs",
@@ -626,6 +724,12 @@ def process_message(messages, system):
                 elif block.name == "generate_chart":
                     chart_path = make_chart(inp["title"], inp["chart_type"], inp["labels"], inp["values"])
                     result = "График построен, будет отправлен сэру отдельным сообщением."
+                elif block.name == "get_apartments_heatmap":
+                    chart_path = make_apartments_heatmap()
+                    result = "Тепловая карта аренды построена, отправлю картинкой." if chart_path else "Нет квартир для карты."
+                elif block.name == "get_apartments_table":
+                    chart_path = make_apartments_table()
+                    result = "Таблица квартир построена, отправлю картинкой." if chart_path else "Нет квартир."
                 elif block.name == "get_utility_tariffs":
                     result = db_get_utility_tariffs()
                 elif block.name == "set_utility_tariff":
