@@ -159,14 +159,25 @@ async def api_apartment_pay(request):
     address = (data.get("address") or "").strip()
     if not address:
         return web.json_response({"error": "no_address"}, status=400)
-    method = (data.get("payment_method") or "наличные").strip() or "наличные"
     counterpart = (data.get("counterpart") or "Квартирант").strip() or "Квартирант"
-    rent_currency = (data.get("rent_currency") or "EUR").strip() or "EUR"
-    rent_amount = _to_num(data.get("rent_amount"))
-    util_amount = _to_num(data.get("util_amount"))
-    result = {"ok": True, "rent": None, "util": None, "util_lines": None}
+    comment = (data.get("comment") or "").strip() or None
+    recorded = []  # человекочитаемые строки записанного
 
-    # счётчики -> расчёт коммуналки (если переданы и сумма не задана вручную)
+    def record(category, amount, currency, method):
+        amount = _to_num(amount)
+        if not amount or amount <= 0:
+            return
+        currency = (currency or "MDL").strip() or "MDL"
+        method = (method or "наличные").strip() or "наличные"
+        db_record_apartment_operation(address, "приход", category, amount, currency, counterpart, None, comment, method)
+        mark = "" if method == "наличные" else f" ({method})"
+        recorded.append(f"{category}: {amount} {currency}{mark}")
+
+    # Аренда — несколько строк (комбинированные валюты/способы)
+    for line in (data.get("rent_lines") or []):
+        record("Аренда", line.get("amount"), line.get("currency"), line.get("method"))
+
+    # Коммуналка: либо из счётчиков (расчёт), либо вручную (тоже можно несколькими строками)
     meters = {}
     for ut, v in (data.get("meters") or {}).items():
         n = _to_num(v)
@@ -175,18 +186,12 @@ async def api_apartment_pay(request):
     if meters:
         readings = [{"utility_type": k, "reading": v} for k, v in meters.items()]
         status, addr, lines, total = db_calculate_utilities(address, readings)
-        if status == "ok":
-            result["util_lines"] = lines
-            if util_amount is None:
-                util_amount = float(total)
+        if status == "ok" and total:
+            record("Коммуналка", float(total), "MDL", data.get("util_method"))
+    for line in (data.get("util_lines") or []):
+        record("Коммуналка", line.get("amount"), line.get("currency"), line.get("method"))
 
-    if rent_amount and rent_amount > 0:
-        db_record_apartment_operation(address, "приход", "Аренда", rent_amount, rent_currency, counterpart, None, None, method)
-        result["rent"] = rent_amount
-    if util_amount and util_amount > 0:
-        db_record_apartment_operation(address, "приход", "Коммуналка", util_amount, "MDL", counterpart, None, None, method)
-        result["util"] = util_amount
-    return web.json_response(result)
+    return web.json_response({"ok": bool(recorded), "recorded": recorded})
 
 
 async def api_apartment_mark(request):

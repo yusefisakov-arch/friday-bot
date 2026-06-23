@@ -78,6 +78,7 @@ def init_db():
             lease_end_reminder_sent BOOLEAN DEFAULT false,
             deposit_reminder_sent BOOLEAN DEFAULT false,
             last_collection_reminder_month TEXT,
+            manual_paid_month TEXT,
             utilities_fixed NUMERIC,
             floor TEXT,
             unit_number TEXT,
@@ -199,6 +200,7 @@ def init_db():
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS lease_end DATE")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS lease_end_reminder_sent BOOLEAN DEFAULT false")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS deposit_reminder_sent BOOLEAN DEFAULT false")
+            c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS manual_paid_month TEXT")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS last_collection_reminder_month TEXT")
             c.execute("ALTER TABLE apartments ADD COLUMN IF NOT EXISTS utilities_fixed NUMERIC")
             conn.commit()
@@ -934,7 +936,7 @@ def db_get_apartments_board(month=None):
         c = conn.cursor()
         c.execute("""
             SELECT a.address, a.tenant_name, a.tenant_rent, a.tenant_pay_day, a.lease_end,
-                   EXISTS(SELECT 1 FROM apartment_operations o WHERE o.apartment_id = a.id
+                   COALESCE(a.manual_paid_month = %s, false) OR EXISTS(SELECT 1 FROM apartment_operations o WHERE o.apartment_id = a.id
                           AND o.direction='приход' AND o.category ILIKE 'аренда'
                           AND to_char(o.op_date, 'YYYY-MM') = %s) AS rent_paid,
                    EXISTS(SELECT 1 FROM apartment_operations o WHERE o.apartment_id = a.id
@@ -943,7 +945,7 @@ def db_get_apartments_board(month=None):
             FROM apartments a
             WHERE a.active
             ORDER BY a.tenant_pay_day NULLS LAST, a.address
-        """, (month, month))
+        """, (month, month, month))
         return c.fetchall()
 
 
@@ -990,30 +992,16 @@ def db_update_apartment_fields(address, fields):
 
 
 def db_set_rent_paid(address, paid):
-    """Ручной переключатель статуса аренды за текущий месяц.
-    paid=True — если оплаты нет, создаёт запись «Аренда» (на сумму аренды).
-    paid=False — удаляет записи аренды за этот месяц (снять отметку/исправить ошибку)."""
+    """Ручная отметка статуса аренды (ТОЛЬКО цвет плитки, без записей в кассу).
+    Ставит/снимает флаг manual_paid_month за текущий месяц."""
     month = today_msk().strftime("%Y-%m")
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT id, tenant_rent FROM apartments WHERE address=%s", (address,))
-        row = c.fetchone()
-        if not row:
+        c.execute("UPDATE apartments SET manual_paid_month=%s WHERE address=%s RETURNING id",
+                  (month if paid else None, address))
+        if not c.fetchone():
             return "not_found"
-        aid, tenant_rent = row
-        if paid:
-            c.execute("""SELECT 1 FROM apartment_operations WHERE apartment_id=%s AND direction='приход'
-                         AND category ILIKE 'аренда' AND to_char(op_date,'YYYY-MM')=%s LIMIT 1""", (aid, month))
-            if not c.fetchone():
-                amt = tenant_rent if tenant_rent is not None else 0
-                c.execute("""INSERT INTO apartment_operations
-                             (apartment_id, op_date, direction, category, counterpart, amount, currency, comment, payment_method)
-                             VALUES (%s, %s, 'приход', 'Аренда', 'Квартирант', %s, 'EUR', 'отмечено вручную', 'наличные')""",
-                          (aid, today_msk(), amt))
-            return "paid"
-        c.execute("""DELETE FROM apartment_operations WHERE apartment_id=%s AND direction='приход'
-                     AND category ILIKE 'аренда' AND to_char(op_date,'YYYY-MM')=%s""", (aid, month))
-        return "unpaid"
+    return "paid" if paid else "unpaid"
 
 
 def db_get_apartment_detail(address, month=None):
@@ -1023,13 +1011,13 @@ def db_get_apartment_detail(address, month=None):
     with db_conn() as conn:
         c = conn.cursor()
         c.execute("""SELECT id, address, owner_name, owner_rent, rent_day, tenant_name, tenant_phone, tenant_phone2,
-                            tenant_rent, tenant_pay_day, deposit, lease_start, lease_end, utilities_fixed, notes
+                            tenant_rent, tenant_pay_day, deposit, lease_start, lease_end, utilities_fixed, notes, manual_paid_month
                      FROM apartments WHERE address=%s""", (address,))
         row = c.fetchone()
         if not row:
             return None
         (aid, address, owner_name, owner_rent, rent_day, tenant_name, tenant_phone, tenant_phone2,
-         tenant_rent, tenant_pay_day, deposit, lease_start, lease_end, utilities_fixed, notes) = row
+         tenant_rent, tenant_pay_day, deposit, lease_start, lease_end, utilities_fixed, notes, manual_paid_month) = row
         c.execute("SELECT utility_type, last_reading FROM apartment_meters WHERE apartment_id=%s", (aid,))
         meters = {ut: float(r) for ut, r in c.fetchall()}
         c.execute("""SELECT category FROM apartment_operations
@@ -1049,7 +1037,7 @@ def db_get_apartment_detail(address, month=None):
         "tenant_rent": num(tenant_rent), "tenant_pay_day": tenant_pay_day, "deposit": num(deposit),
         "lease_start": dt(lease_start), "lease_end": dt(lease_end), "utilities_fixed": num(utilities_fixed),
         "notes": notes, "meters": meters,
-        "rent_paid": any(c.startswith("аренд") for c in cats),
+        "rent_paid": (manual_paid_month == month) or any(c.startswith("аренд") for c in cats),
         "util_paid": any(c.startswith("коммунал") for c in cats),
     }
 

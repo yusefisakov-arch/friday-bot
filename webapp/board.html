@@ -43,6 +43,13 @@
   .btn-mark { background: #FB8C00; color: #fff; margin-top: 0; }
   .status-line { font-size: 13px; margin-bottom: 10px; padding: 8px 10px; border-radius: 8px;
                  background: var(--tg-theme-secondary-bg-color, #f0f0f0); }
+  .payline { display: grid; grid-template-columns: 1.1fr 0.9fr 1.1fr; gap: 6px; margin-bottom: 6px; align-items: center; }
+  .payline input, .payline select { font-size: 15px; padding: 8px; }
+  .addline { background: none; border: 1px dashed var(--tg-theme-hint-color, #aaa); color: var(--tg-theme-link-color, #2481cc);
+             border-radius: 8px; padding: 7px; width: 100%; font-size: 13px; cursor: pointer; margin-bottom: 6px; }
+  textarea { width: 100%; padding: 9px 11px; border-radius: 9px; border: 1px solid var(--tg-theme-hint-color, #ccc);
+             background: var(--tg-theme-secondary-bg-color, #f0f0f0); color: var(--tg-theme-text-color, #000);
+             font-size: 16px; font-family: inherit; min-height: 56px; }
 </style>
 </head>
 <body>
@@ -73,19 +80,20 @@
     <div class="field"><label>Депозит</label><input type="number" id="f-deposit" inputmode="decimal"></div>
     <button class="btn btn-save" id="btn-save">Сохранить данные</button>
 
-    <h3>💶 Приём оплаты (за месяц)</h3>
-    <div class="row2">
-      <div class="field"><label>Аренда</label><input type="number" id="p-rent" inputmode="decimal"></div>
-      <div class="field"><label>Валюта</label>
-        <select id="p-cur"><option>EUR</option><option>USD</option><option>USDT</option><option>MDL</option></select>
-      </div>
-    </div>
-    <div class="field"><label>Способ оплаты</label>
-      <select id="p-method"><option>наличные</option><option>карта (укр)</option><option>карта (молд)</option></select>
-    </div>
-    <h3 style="margin-top:14px">Счётчики (новые показания)</h3>
+    <h3>💶 Аренда (можно разбить на валюты/способы)</h3>
+    <div id="rent-lines"></div>
+    <button class="addline" id="add-rent">+ ещё строка аренды</button>
+
+    <h3 style="margin-top:16px">Коммуналка по счётчикам</h3>
     <div id="meters"></div>
-    <div class="field"><label>Коммуналка вручную (если без счётчиков), MDL</label><input type="number" id="p-util" inputmode="decimal"></div>
+    <div class="field"><label>Способ оплаты коммуналки (по счётчикам)</label>
+      <select id="p-util-method"><option>наличные</option><option>карта (укр)</option><option>карта (молд)</option></select>
+    </div>
+    <h3 style="margin-top:10px">Коммуналка вручную (если без счётчиков)</h3>
+    <div id="util-lines"></div>
+    <button class="addline" id="add-util">+ строка коммуналки</button>
+
+    <div class="field" style="margin-top:16px"><label>Комментарий (к записям)</label><textarea id="p-comment" placeholder="например: евро+леи, картой, за 2 месяца…"></textarea></div>
     <button class="btn btn-pay" id="btn-pay">Записать оплату</button>
     <div style="height:30px"></div>
   </div>
@@ -96,7 +104,33 @@
   var WAKEY = new URLSearchParams(location.search).get("k") || "";
   var H = { headers: { "X-Webapp-Key": WAKEY } };
   var UNITS = { "свет": "кВт·ч", "газ": "м³", "вода": "м³", "горячая вода": "м³", "отопление": "м³" };
+  var CURRENCIES = ["EUR", "USD", "USDT", "MDL"];
+  var METHODS = ["наличные", "карта (укр)", "карта (молд)"];
   var current = null;
+
+  function makeLine(container, amount, currency) {
+    var row = document.createElement("div");
+    row.className = "payline";
+    var inp = document.createElement("input");
+    inp.type = "number"; inp.inputMode = "decimal"; inp.placeholder = "сумма";
+    if (amount !== null && amount !== undefined && amount !== "") inp.value = amount;
+    inp.className = "p-amount";
+    var cur = document.createElement("select"); cur.className = "p-cur";
+    CURRENCIES.forEach(function (c) { var o = document.createElement("option"); o.textContent = c; if (c === currency) o.selected = true; cur.appendChild(o); });
+    var met = document.createElement("select"); met.className = "p-met";
+    METHODS.forEach(function (m) { var o = document.createElement("option"); o.textContent = m; met.appendChild(o); });
+    row.appendChild(inp); row.appendChild(cur); row.appendChild(met);
+    container.appendChild(row);
+  }
+
+  function gatherLines(containerId) {
+    var out = [];
+    document.querySelectorAll("#" + containerId + " .payline").forEach(function (row) {
+      var a = row.querySelector(".p-amount").value;
+      if (a !== "") out.push({ amount: a, currency: row.querySelector(".p-cur").value, method: row.querySelector(".p-met").value });
+    });
+    return out;
+  }
 
   function api(path, opts) {
     opts = opts || {};
@@ -140,7 +174,10 @@
       setVal("f-tenant_phone2", a.tenant_phone2); setVal("f-tenant_rent", a.tenant_rent);
       setVal("f-tenant_pay_day", a.tenant_pay_day); setVal("f-lease_start", a.lease_start);
       setVal("f-lease_end", a.lease_end); setVal("f-deposit", a.deposit);
-      setVal("p-rent", a.tenant_rent); setVal("p-util", "");
+      // строки оплаты: аренда — одна строка с предзаполненной суммой; коммуналка вручную — пусто
+      var rl = document.getElementById("rent-lines"); rl.innerHTML = ""; makeLine(rl, a.tenant_rent, "EUR");
+      document.getElementById("util-lines").innerHTML = "";
+      setVal("p-comment", "");
       // meters
       var mc = document.getElementById("meters"); mc.innerHTML = "";
       Object.keys(UNITS).forEach(function (ut) {
@@ -193,6 +230,9 @@
     }).catch(function () { tg.showAlert("Ошибка сохранения."); });
   };
 
+  document.getElementById("add-rent").onclick = function () { makeLine(document.getElementById("rent-lines"), "", "EUR"); };
+  document.getElementById("add-util").onclick = function () { makeLine(document.getElementById("util-lines"), "", "MDL"); };
+
   document.getElementById("btn-pay").onclick = function () {
     if (!current) return;
     var meters = {};
@@ -202,22 +242,22 @@
     var payload = {
       address: current.address,
       counterpart: val("f-tenant_name") || "Квартирант",
-      rent_amount: val("p-rent"),
-      rent_currency: val("p-cur"),
-      util_amount: val("p-util"),
-      payment_method: val("p-method"),
+      comment: val("p-comment"),
+      rent_lines: gatherLines("rent-lines"),
+      util_lines: gatherLines("util-lines"),
+      util_method: val("p-util-method"),
       meters: meters
     };
     api("/api/apartment/pay", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     }).then(function (r) { return r.json(); }).then(function (res) {
-      var msg = "Записано:";
-      if (res.rent) msg += "\nаренда " + res.rent + " " + val("p-cur");
-      if (res.util) msg += "\nкоммуналка " + res.util + " MDL";
-      if (!res.rent && !res.util) msg = "Ничего не записано — укажите сумму.";
-      tg.showAlert(msg);
-      if (res.rent || res.util) { loadBoard(); closeDetail(); }
+      if (res.ok) {
+        tg.showAlert("Записано:\n" + res.recorded.join("\n"));
+        loadBoard(); closeDetail();
+      } else {
+        tg.showAlert("Ничего не записано — укажите сумму.");
+      }
     }).catch(function () { tg.showAlert("Ошибка записи оплаты."); });
   };
 
