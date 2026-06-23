@@ -989,6 +989,33 @@ def db_update_apartment_fields(address, fields):
         return "updated" if c.fetchone() else "not_found"
 
 
+def db_set_rent_paid(address, paid):
+    """Ручной переключатель статуса аренды за текущий месяц.
+    paid=True — если оплаты нет, создаёт запись «Аренда» (на сумму аренды).
+    paid=False — удаляет записи аренды за этот месяц (снять отметку/исправить ошибку)."""
+    month = today_msk().strftime("%Y-%m")
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT id, tenant_rent FROM apartments WHERE address=%s", (address,))
+        row = c.fetchone()
+        if not row:
+            return "not_found"
+        aid, tenant_rent = row
+        if paid:
+            c.execute("""SELECT 1 FROM apartment_operations WHERE apartment_id=%s AND direction='приход'
+                         AND category ILIKE 'аренда' AND to_char(op_date,'YYYY-MM')=%s LIMIT 1""", (aid, month))
+            if not c.fetchone():
+                amt = tenant_rent if tenant_rent is not None else 0
+                c.execute("""INSERT INTO apartment_operations
+                             (apartment_id, op_date, direction, category, counterpart, amount, currency, comment, payment_method)
+                             VALUES (%s, %s, 'приход', 'Аренда', 'Квартирант', %s, 'EUR', 'отмечено вручную', 'наличные')""",
+                          (aid, today_msk(), amt))
+            return "paid"
+        c.execute("""DELETE FROM apartment_operations WHERE apartment_id=%s AND direction='приход'
+                     AND category ILIKE 'аренда' AND to_char(op_date,'YYYY-MM')=%s""", (aid, month))
+        return "unpaid"
+
+
 def db_get_apartment_detail(address, month=None):
     """Полные данные квартиры для интерактивной панели (JSON-совместимый dict)."""
     if month is None:

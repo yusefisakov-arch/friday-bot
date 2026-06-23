@@ -189,6 +189,17 @@ async def api_apartment_pay(request):
     return web.json_response(result)
 
 
+async def api_apartment_mark(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    address = (data.get("address") or "").strip()
+    if not address:
+        return web.json_response({"error": "no_address"}, status=400)
+    status = db_set_rent_paid(address, bool(data.get("paid")))
+    return web.json_response({"ok": status in ("paid", "unpaid"), "status": status})
+
+
 async def health(request):
     return web.json_response({"status": "ok"})
 
@@ -210,6 +221,7 @@ async def run_webapp_server():
     app.router.add_get("/api/apartment", api_apartment)
     app.router.add_post("/api/apartment/save", api_apartment_save)
     app.router.add_post("/api/apartment/pay", api_apartment_pay)
+    app.router.add_post("/api/apartment/mark", api_apartment_mark)
     app.router.add_get("/health", health)
     runner = web.AppRunner(app)
     await runner.setup()

@@ -40,6 +40,7 @@
          margin-top: 8px; cursor: pointer; }
   .btn-save { background: var(--tg-theme-secondary-bg-color, #e0e0e0); color: var(--tg-theme-text-color, #000); }
   .btn-pay { background: #43A047; color: #fff; }
+  .btn-mark { background: #FB8C00; color: #fff; margin-top: 0; }
   .status-line { font-size: 13px; margin-bottom: 10px; padding: 8px 10px; border-radius: 8px;
                  background: var(--tg-theme-secondary-bg-color, #f0f0f0); }
 </style>
@@ -53,6 +54,7 @@
     <span class="back" id="back">‹ Назад к карте</span>
     <h2 id="ov-title"></h2>
     <div class="status-line" id="ov-status"></div>
+    <button class="btn btn-mark" id="btn-mark"></button>
 
     <h3>Квартирант</h3>
     <div class="field"><label>Имя</label><input type="text" id="f-tenant_name"></div>
@@ -132,6 +134,8 @@
       st.push(a.rent_paid ? "аренда: оплачено ✓" : "аренда: не оплачено");
       st.push(a.util_paid ? "коммуналка: собрана ✓" : "коммуналка: нет");
       document.getElementById("ov-status").textContent = st.join("  ·  ");
+      document.getElementById("btn-mark").textContent =
+        a.rent_paid ? "Снять отметку оплаты аренды" : "✓ Отметить аренду оплаченной";
       setVal("f-tenant_name", a.tenant_name); setVal("f-tenant_phone", a.tenant_phone);
       setVal("f-tenant_phone2", a.tenant_phone2); setVal("f-tenant_rent", a.tenant_rent);
       setVal("f-tenant_pay_day", a.tenant_pay_day); setVal("f-lease_start", a.lease_start);
@@ -154,6 +158,23 @@
 
   function closeDetail() { document.getElementById("overlay").classList.remove("show"); current = null; }
   document.getElementById("back").onclick = closeDetail;
+
+  document.getElementById("btn-mark").onclick = function () {
+    if (!current) return;
+    var willPay = !current.rent_paid;
+    function doMark() {
+      api("/api/apartment/mark", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address: current.address, paid: willPay })
+      }).then(function (r) { return r.json(); }).then(function (res) {
+        if (res.ok) { loadBoard(); openDetail(current.address); }
+        else tg.showAlert("Не удалось изменить статус.");
+      }).catch(function () { tg.showAlert("Ошибка."); });
+    }
+    if (!willPay) {
+      tg.showConfirm("Снять отметку оплаты? Записи аренды за этот месяц будут удалены.", function (ok) { if (ok) doMark(); });
+    } else { doMark(); }
+  };
 
   document.getElementById("btn-save").onclick = function () {
     if (!current) return;
