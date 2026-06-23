@@ -43,6 +43,7 @@
   .btn-mark { background: #FB8C00; color: #fff; margin-top: 0; }
   .btn-wa { background: #25D366; color: #fff; }
   .btn-tg { background: #229ED9; color: #fff; }
+  .btn-viber { background: #7360F2; color: #fff; }
   .btn-call { background: var(--tg-theme-secondary-bg-color, #e0e0e0); color: var(--tg-theme-text-color, #000); }
   #contact .btn { margin-top: 6px; }
   .status-line { font-size: 13px; margin-bottom: 10px; padding: 8px 10px; border-radius: 8px;
@@ -144,35 +145,34 @@
 
   function waLink(phone, text) { return "https://wa.me/" + digitsOnly(phone) + "?text=" + encodeURIComponent(text); }
 
-  function openWA(phone, text) { tg.openLink(waLink(phone, text)); }
-  function openTG(phone, text) {
-    var u = (phone || "").trim().replace(/^@/, "");
-    if (navigator.clipboard) { try { navigator.clipboard.writeText(text); } catch (e) {} }
-    tg.showAlert("Текст скопирован — вставьте в чат Telegram.");
-    tg.openTelegramLink("https://t.me/" + u);
-  }
-  function callPhone(phone) {
+  function openExternal(url) {
+    if (url.indexOf("http") === 0) { tg.openLink(url); return; }
     var a = document.createElement("a");
-    a.href = "tel:" + (phone || "").replace(/\s/g, "");
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    a.href = url; document.body.appendChild(a); a.click(); document.body.removeChild(a);
   }
+  function copyText(t) { if (navigator.clipboard) { try { navigator.clipboard.writeText(t); } catch (e) {} } }
 
   function renderContact(a) {
     var box = document.getElementById("contact");
     box.innerHTML = "";
     var phone = a.tenant_phone || a.tenant_phone2;
     if (!phone) { box.innerHTML = '<div class="status-line">Телефон не указан, сэр.</div>'; return; }
+    var rt = reminderText(a), nt = renewalText(a);
     function btn(cls, label, fn) {
       var b = document.createElement("button"); b.className = "btn " + cls; b.textContent = label; b.onclick = fn; box.appendChild(b);
     }
     if (isTgHandle(phone)) {
-      btn("btn-tg", "Telegram — напомнить про аренду", function () { openTG(phone, reminderText(a)); });
-      btn("btn-tg", "Telegram — продление/выезд", function () { openTG(phone, renewalText(a)); });
-    } else {
-      btn("btn-wa", "WhatsApp — напомнить про аренду", function () { openWA(phone, reminderText(a)); });
-      btn("btn-wa", "WhatsApp — продление/выезд", function () { openWA(phone, renewalText(a)); });
-      btn("btn-call", "📞 Позвонить (" + phone + ")", function () { callPhone(phone); });
+      var u = phone.trim().replace(/^@/, "");
+      btn("btn-tg", "Telegram — напомнить про аренду", function () { copyText(rt); tg.showAlert("Текст скопирован — вставьте в чат."); tg.openTelegramLink("https://t.me/" + u); });
+      btn("btn-tg", "Telegram — продление/выезд", function () { copyText(nt); tg.showAlert("Текст скопирован — вставьте в чат."); tg.openTelegramLink("https://t.me/" + u); });
+      return;
     }
+    var d = digitsOnly(phone);
+    btn("btn-wa", "WhatsApp — напомнить про аренду", function () { openExternal(waLink(phone, rt)); });
+    btn("btn-wa", "WhatsApp — продление/выезд", function () { openExternal(waLink(phone, nt)); });
+    btn("btn-tg", "Telegram (текст скопируется)", function () { copyText(rt); tg.showAlert("Текст скопирован — вставьте в чат."); openExternal("tg://resolve?phone=" + d); });
+    btn("btn-viber", "Viber (текст скопируется)", function () { copyText(rt); tg.showAlert("Текст скопирован — вставьте в чат."); openExternal("viber://chat?number=%2B" + d); });
+    btn("btn-call", "📞 Позвонить (" + phone + ")", function () { openExternal("tel:" + phone.replace(/\s/g, "")); });
   }
 
   function gatherLines(containerId) {
