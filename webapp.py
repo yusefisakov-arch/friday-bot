@@ -86,6 +86,109 @@ async def get_apartments_api(request):
     return web.json_response([address for (address,) in rows])
 
 
+async def api_board(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    items = []
+    for address, tenant_name, tenant_rent, pay_day, lease_end, rent_paid, util_paid in db_get_apartments_board():
+        code, call_due = apartment_pay_status(pay_day, rent_paid, lease_end)
+        items.append({
+            "address": address,
+            "tenant_name": tenant_name,
+            "tenant_pay_day": pay_day,
+            "status": code,
+            "call_due": call_due,
+            "util_paid": util_paid,
+        })
+    return web.json_response(items)
+
+
+async def api_apartment(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    address = (request.query.get("address") or "").strip()
+    detail = db_get_apartment_detail(address)
+    if not detail:
+        return web.json_response({"error": "not_found"}, status=404)
+    return web.json_response(detail)
+
+
+def _to_num(v):
+    try:
+        return float(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(v):
+    try:
+        return int(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def api_apartment_save(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    address = (data.get("address") or "").strip()
+    if not address:
+        return web.json_response({"error": "no_address"}, status=400)
+    f = data.get("fields") or {}
+    fields = {}
+    for k in ("tenant_name", "tenant_phone", "tenant_phone2", "owner_name", "notes"):
+        if k in f:
+            fields[k] = (f.get(k) or "").strip() or None
+    for k in ("tenant_rent", "deposit", "owner_rent", "utilities_fixed"):
+        if k in f:
+            fields[k] = _to_num(f.get(k))
+    for k in ("tenant_pay_day", "rent_day"):
+        if k in f:
+            fields[k] = _to_int(f.get(k))
+    for k in ("lease_start", "lease_end"):
+        if k in f:
+            fields[k] = (f.get(k) or "").strip() or None
+    status = db_update_apartment_fields(address, fields)
+    return web.json_response({"ok": status == "updated", "status": status})
+
+
+async def api_apartment_pay(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    address = (data.get("address") or "").strip()
+    if not address:
+        return web.json_response({"error": "no_address"}, status=400)
+    method = (data.get("payment_method") or "наличные").strip() or "наличные"
+    counterpart = (data.get("counterpart") or "Квартирант").strip() or "Квартирант"
+    rent_currency = (data.get("rent_currency") or "EUR").strip() or "EUR"
+    rent_amount = _to_num(data.get("rent_amount"))
+    util_amount = _to_num(data.get("util_amount"))
+    result = {"ok": True, "rent": None, "util": None, "util_lines": None}
+
+    # счётчики -> расчёт коммуналки (если переданы и сумма не задана вручную)
+    meters = {}
+    for ut, v in (data.get("meters") or {}).items():
+        n = _to_num(v)
+        if n is not None:
+            meters[ut] = n
+    if meters:
+        readings = [{"utility_type": k, "reading": v} for k, v in meters.items()]
+        status, addr, lines, total = db_calculate_utilities(address, readings)
+        if status == "ok":
+            result["util_lines"] = lines
+            if util_amount is None:
+                util_amount = float(total)
+
+    if rent_amount and rent_amount > 0:
+        db_record_apartment_operation(address, "приход", "Аренда", rent_amount, rent_currency, counterpart, None, None, method)
+        result["rent"] = rent_amount
+    if util_amount and util_amount > 0:
+        db_record_apartment_operation(address, "приход", "Коммуналка", util_amount, "MDL", counterpart, None, None, method)
+        result["util"] = util_amount
+    return web.json_response(result)
+
+
 async def health(request):
     return web.json_response({"status": "ok"})
 
@@ -99,9 +202,14 @@ async def run_webapp_server():
     app.router.add_get("/move_in", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "move_in.html")))
     app.router.add_get("/move_out", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "move_out.html")))
     app.router.add_get("/utilities", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "utilities.html")))
+    app.router.add_get("/board", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "board.html")))
     app.router.add_get("/", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "form.html")))
     app.router.add_get("/api/staff", get_staff)
     app.router.add_get("/api/apartments", get_apartments_api)
+    app.router.add_get("/api/board", api_board)
+    app.router.add_get("/api/apartment", api_apartment)
+    app.router.add_post("/api/apartment/save", api_apartment_save)
+    app.router.add_post("/api/apartment/pay", api_apartment_pay)
     app.router.add_get("/health", health)
     runner = web.AppRunner(app)
     await runner.setup()

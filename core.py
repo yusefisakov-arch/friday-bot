@@ -73,7 +73,8 @@ if WEBAPP_URL:
             [KeyboardButton(APARTMENT_BUTTON, web_app=WebAppInfo(url=webapp_url("apartments"))), VIEW_APARTMENT_BALANCE_BUTTON],
             [KeyboardButton(MOVE_IN_BUTTON, web_app=WebAppInfo(url=webapp_url("move_in"))),
              KeyboardButton(MOVE_OUT_BUTTON, web_app=WebAppInfo(url=webapp_url("move_out")))],
-            [KeyboardButton(UTILITIES_BUTTON, web_app=WebAppInfo(url=webapp_url("utilities"))), MAP_BUTTON],
+            [KeyboardButton(UTILITIES_BUTTON, web_app=WebAppInfo(url=webapp_url("utilities"))),
+             KeyboardButton(MAP_BUTTON, web_app=WebAppInfo(url=webapp_url("board")))],
         ],
         resize_keyboard=True,
     )

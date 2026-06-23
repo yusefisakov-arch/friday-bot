@@ -936,11 +936,14 @@ def db_get_apartments_board(month=None):
             SELECT a.address, a.tenant_name, a.tenant_rent, a.tenant_pay_day, a.lease_end,
                    EXISTS(SELECT 1 FROM apartment_operations o WHERE o.apartment_id = a.id
                           AND o.direction='приход' AND o.category ILIKE 'аренда'
-                          AND to_char(o.op_date, 'YYYY-MM') = %s) AS paid
+                          AND to_char(o.op_date, 'YYYY-MM') = %s) AS rent_paid,
+                   EXISTS(SELECT 1 FROM apartment_operations o WHERE o.apartment_id = a.id
+                          AND o.direction='приход' AND o.category ILIKE 'коммунал%%'
+                          AND to_char(o.op_date, 'YYYY-MM') = %s) AS util_paid
             FROM apartments a
             WHERE a.active
             ORDER BY a.tenant_pay_day NULLS LAST, a.address
-        """, (month,))
+        """, (month, month))
         return c.fetchall()
 
 
@@ -957,6 +960,71 @@ def apartment_pay_status(tenant_pay_day, paid, lease_end, today=None):
     if (tenant_pay_day - today.day) <= 10:
         return "yellow", call_due
     return "grey", call_due
+
+
+_EDITABLE_APT_FIELDS = {
+    "tenant_name", "tenant_phone", "tenant_phone2", "tenant_rent", "tenant_pay_day",
+    "deposit", "lease_start", "lease_end", "owner_name", "owner_rent", "rent_day",
+    "utilities_fixed", "notes",
+}
+
+
+def db_update_apartment_fields(address, fields):
+    """Прямое обновление разрешённых полей квартиры (для панели редактирования). Можно ставить и NULL."""
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in _EDITABLE_APT_FIELDS:
+            sets.append(f"{k}=%s")
+            vals.append(v)
+    if not sets:
+        return "no_changes"
+    # сброс флагов напоминаний, если поменяли дату окончания контракта
+    if "lease_end" in fields:
+        sets.append("lease_end_reminder_sent=false")
+        sets.append("deposit_reminder_sent=false")
+    vals.append(address)
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute(f"UPDATE apartments SET {', '.join(sets)} WHERE address=%s RETURNING id", vals)
+        return "updated" if c.fetchone() else "not_found"
+
+
+def db_get_apartment_detail(address, month=None):
+    """Полные данные квартиры для интерактивной панели (JSON-совместимый dict)."""
+    if month is None:
+        month = today_msk().strftime("%Y-%m")
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""SELECT id, address, owner_name, owner_rent, rent_day, tenant_name, tenant_phone, tenant_phone2,
+                            tenant_rent, tenant_pay_day, deposit, lease_start, lease_end, utilities_fixed, notes
+                     FROM apartments WHERE address=%s""", (address,))
+        row = c.fetchone()
+        if not row:
+            return None
+        (aid, address, owner_name, owner_rent, rent_day, tenant_name, tenant_phone, tenant_phone2,
+         tenant_rent, tenant_pay_day, deposit, lease_start, lease_end, utilities_fixed, notes) = row
+        c.execute("SELECT utility_type, last_reading FROM apartment_meters WHERE apartment_id=%s", (aid,))
+        meters = {ut: float(r) for ut, r in c.fetchall()}
+        c.execute("""SELECT category FROM apartment_operations
+                     WHERE apartment_id=%s AND direction='приход' AND to_char(op_date,'YYYY-MM')=%s""",
+                  (aid, month))
+        cats = [r[0].lower() for r in c.fetchall()]
+
+    def num(x):
+        return float(x) if x is not None else None
+
+    def dt(x):
+        return x.strftime("%Y-%m-%d") if x else None
+
+    return {
+        "address": address, "owner_name": owner_name, "owner_rent": num(owner_rent), "rent_day": rent_day,
+        "tenant_name": tenant_name, "tenant_phone": tenant_phone, "tenant_phone2": tenant_phone2,
+        "tenant_rent": num(tenant_rent), "tenant_pay_day": tenant_pay_day, "deposit": num(deposit),
+        "lease_start": dt(lease_start), "lease_end": dt(lease_end), "utilities_fixed": num(utilities_fixed),
+        "notes": notes, "meters": meters,
+        "rent_paid": any(c.startswith("аренд") for c in cats),
+        "util_paid": any(c.startswith("коммунал") for c in cats),
+    }
 
 
 def db_get_rent_status(month=None):

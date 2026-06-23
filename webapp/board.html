@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Карта аренды</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 12px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: var(--tg-theme-bg-color, #fff); color: var(--tg-theme-text-color, #000); }
+  h2 { margin: 0 0 4px; font-size: 18px; }
+  .legend { font-size: 11px; color: var(--tg-theme-hint-color, #888); margin-bottom: 12px; }
+  #grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .tile { border-radius: 12px; padding: 10px; min-height: 76px; cursor: pointer; color: #fff;
+          display: flex; flex-direction: column; justify-content: center; border: 3px solid transparent; }
+  .tile .addr { font-weight: 700; font-size: 13px; line-height: 1.15; }
+  .tile .sub { font-size: 11px; opacity: 0.95; margin-top: 3px; }
+  .tile .komm { font-size: 10px; margin-top: 3px; }
+  .green { background: #43A047; }
+  .red { background: #E53935; }
+  .yellow { background: #FDD835; color: #111; }
+  .grey { background: #B0BEC5; color: #111; }
+  .none { background: #ECEFF1; color: #555; }
+  .call { border-color: #1565C0 !important; }
+
+  #overlay { position: fixed; inset: 0; background: var(--tg-theme-bg-color, #fff); overflow-y: auto;
+             padding: 16px; display: none; }
+  #overlay.show { display: block; }
+  .back { color: var(--tg-theme-link-color, #2481cc); font-size: 15px; margin-bottom: 12px; display: inline-block; cursor: pointer; }
+  .field { margin-bottom: 12px; }
+  label { display: block; font-size: 12px; font-weight: 600; color: var(--tg-theme-hint-color, #999);
+          text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 5px; }
+  input, select { width: 100%; padding: 9px 11px; border-radius: 9px; border: 1px solid var(--tg-theme-hint-color, #ccc);
+                  background: var(--tg-theme-secondary-bg-color, #f0f0f0); color: var(--tg-theme-text-color, #000);
+                  font-size: 16px; font-family: inherit; }
+  h3 { font-size: 13px; text-transform: uppercase; color: var(--tg-theme-hint-color, #999); margin: 20px 0 8px; letter-spacing: 0.03em; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .btn { width: 100%; padding: 13px; border: none; border-radius: 10px; font-size: 16px; font-weight: 600;
+         margin-top: 8px; cursor: pointer; }
+  .btn-save { background: var(--tg-theme-secondary-bg-color, #e0e0e0); color: var(--tg-theme-text-color, #000); }
+  .btn-pay { background: #43A047; color: #fff; }
+  .status-line { font-size: 13px; margin-bottom: 10px; padding: 8px 10px; border-radius: 8px;
+                 background: var(--tg-theme-secondary-bg-color, #f0f0f0); }
+</style>
+</head>
+<body>
+  <h2>Карта аренды</h2>
+  <div class="legend">🟢 оплачено · 🔴 пора забирать · 🟡 скоро · ⚪ рано/нет аренды · синяя рамка = звонить</div>
+  <div id="grid">Загрузка…</div>
+
+  <div id="overlay">
+    <span class="back" id="back">‹ Назад к карте</span>
+    <h2 id="ov-title"></h2>
+    <div class="status-line" id="ov-status"></div>
+
+    <h3>Квартирант</h3>
+    <div class="field"><label>Имя</label><input type="text" id="f-tenant_name"></div>
+    <div class="row2">
+      <div class="field"><label>Телефон 1</label><input type="text" id="f-tenant_phone"></div>
+      <div class="field"><label>Телефон 2</label><input type="text" id="f-tenant_phone2"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>Аренда</label><input type="number" id="f-tenant_rent" inputmode="decimal"></div>
+      <div class="field"><label>Платит (число)</label><input type="number" id="f-tenant_pay_day" inputmode="numeric"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>Заезд</label><input type="date" id="f-lease_start"></div>
+      <div class="field"><label>Выезд</label><input type="date" id="f-lease_end"></div>
+    </div>
+    <div class="field"><label>Депозит</label><input type="number" id="f-deposit" inputmode="decimal"></div>
+    <button class="btn btn-save" id="btn-save">Сохранить данные</button>
+
+    <h3>💶 Приём оплаты (за месяц)</h3>
+    <div class="row2">
+      <div class="field"><label>Аренда</label><input type="number" id="p-rent" inputmode="decimal"></div>
+      <div class="field"><label>Валюта</label>
+        <select id="p-cur"><option>EUR</option><option>USD</option><option>USDT</option><option>MDL</option></select>
+      </div>
+    </div>
+    <div class="field"><label>Способ оплаты</label>
+      <select id="p-method"><option>наличные</option><option>карта (укр)</option><option>карта (молд)</option></select>
+    </div>
+    <h3 style="margin-top:14px">Счётчики (новые показания)</h3>
+    <div id="meters"></div>
+    <div class="field"><label>Коммуналка вручную (если без счётчиков), MDL</label><input type="number" id="p-util" inputmode="decimal"></div>
+    <button class="btn btn-pay" id="btn-pay">Записать оплату</button>
+    <div style="height:30px"></div>
+  </div>
+
+<script>
+  var tg = window.Telegram.WebApp;
+  tg.ready(); tg.expand();
+  var WAKEY = new URLSearchParams(location.search).get("k") || "";
+  var H = { headers: { "X-Webapp-Key": WAKEY } };
+  var UNITS = { "свет": "кВт·ч", "газ": "м³", "вода": "м³", "горячая вода": "м³", "отопление": "м³" };
+  var current = null;
+
+  function api(path, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({ "X-Webapp-Key": WAKEY }, opts.headers || {});
+    return fetch(path, opts);
+  }
+
+  function loadBoard() {
+    api("/api/board").then(function (r) { return r.json(); }).then(function (items) {
+      var g = document.getElementById("grid");
+      g.innerHTML = "";
+      items.forEach(function (it) {
+        var d = document.createElement("div");
+        d.className = "tile " + it.status + (it.call_due ? " call" : "");
+        var sub = it.tenant_pay_day ? ("платит " + it.tenant_pay_day + "-го") : "аренду не берём";
+        if (it.call_due) sub += " · звонить";
+        d.innerHTML = '<div class="addr">' + esc(it.address) + '</div><div class="sub">' + sub + '</div>' +
+                      (it.util_paid ? '<div class="komm">комм. собрана ✓</div>' : '');
+        d.onclick = function () { openDetail(it.address); };
+        g.appendChild(d);
+      });
+      if (!items.length) g.textContent = "Квартир нет.";
+    }).catch(function () { document.getElementById("grid").textContent = "Ошибка загрузки."; });
+  }
+
+  function esc(s) { var p = document.createElement("span"); p.textContent = s || ""; return p.innerHTML; }
+  function val(id) { return document.getElementById(id).value; }
+  function setVal(id, v) { document.getElementById(id).value = (v === null || v === undefined) ? "" : v; }
+
+  function openDetail(address) {
+    api("/api/apartment?address=" + encodeURIComponent(address)).then(function (r) { return r.json(); }).then(function (a) {
+      current = a;
+      document.getElementById("ov-title").textContent = a.address;
+      var st = [];
+      st.push(a.rent_paid ? "аренда: оплачено ✓" : "аренда: не оплачено");
+      st.push(a.util_paid ? "коммуналка: собрана ✓" : "коммуналка: нет");
+      document.getElementById("ov-status").textContent = st.join("  ·  ");
+      setVal("f-tenant_name", a.tenant_name); setVal("f-tenant_phone", a.tenant_phone);
+      setVal("f-tenant_phone2", a.tenant_phone2); setVal("f-tenant_rent", a.tenant_rent);
+      setVal("f-tenant_pay_day", a.tenant_pay_day); setVal("f-lease_start", a.lease_start);
+      setVal("f-lease_end", a.lease_end); setVal("f-deposit", a.deposit);
+      setVal("p-rent", a.tenant_rent); setVal("p-util", "");
+      // meters
+      var mc = document.getElementById("meters"); mc.innerHTML = "";
+      Object.keys(UNITS).forEach(function (ut) {
+        var last = (a.meters && a.meters[ut] !== undefined) ? a.meters[ut] : null;
+        var f = document.createElement("div"); f.className = "field";
+        f.innerHTML = '<label>' + ut + ' (' + UNITS[ut] + ')</label>' +
+          '<input type="number" inputmode="decimal" data-ut="' + ut + '" placeholder="' +
+          (last !== null ? "последнее: " + last : "нет данных") + '">';
+        mc.appendChild(f);
+      });
+      document.getElementById("overlay").classList.add("show");
+      window.scrollTo(0, 0);
+    });
+  }
+
+  function closeDetail() { document.getElementById("overlay").classList.remove("show"); current = null; }
+  document.getElementById("back").onclick = closeDetail;
+
+  document.getElementById("btn-save").onclick = function () {
+    if (!current) return;
+    var fields = {
+      tenant_name: val("f-tenant_name"), tenant_phone: val("f-tenant_phone"),
+      tenant_phone2: val("f-tenant_phone2"), tenant_rent: val("f-tenant_rent"),
+      tenant_pay_day: val("f-tenant_pay_day"), lease_start: val("f-lease_start"),
+      lease_end: val("f-lease_end"), deposit: val("f-deposit")
+    };
+    api("/api/apartment/save", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ address: current.address, fields: fields })
+    }).then(function (r) { return r.json(); }).then(function (res) {
+      tg.showAlert(res.ok ? "Данные сохранены." : "Не удалось сохранить.");
+      if (res.ok) loadBoard();
+    }).catch(function () { tg.showAlert("Ошибка сохранения."); });
+  };
+
+  document.getElementById("btn-pay").onclick = function () {
+    if (!current) return;
+    var meters = {};
+    document.querySelectorAll('#meters input').forEach(function (i) {
+      if (i.value !== "") meters[i.dataset.ut] = i.value;
+    });
+    var payload = {
+      address: current.address,
+      counterpart: val("f-tenant_name") || "Квартирант",
+      rent_amount: val("p-rent"),
+      rent_currency: val("p-cur"),
+      util_amount: val("p-util"),
+      payment_method: val("p-method"),
+      meters: meters
+    };
+    api("/api/apartment/pay", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).then(function (r) { return r.json(); }).then(function (res) {
+      var msg = "Записано:";
+      if (res.rent) msg += "\nаренда " + res.rent + " " + val("p-cur");
+      if (res.util) msg += "\nкоммуналка " + res.util + " MDL";
+      if (!res.rent && !res.util) msg = "Ничего не записано — укажите сумму.";
+      tg.showAlert(msg);
+      if (res.rent || res.util) { loadBoard(); closeDetail(); }
+    }).catch(function () { tg.showAlert("Ошибка записи оплаты."); });
+  };
+
+  loadBoard();
+</script>
+</body>
+</html>

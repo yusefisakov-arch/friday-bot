@@ -125,8 +125,8 @@ def make_apartments_heatmap(month=None):
     ax.set_xlim(0, cols)
     ax.set_ylim(0, nrows)
     ax.axis("off")
-    for i, (address, tenant_name, tenant_rent, pay_day, lease_end, paid) in enumerate(rows):
-        code, call_due = apartment_pay_status(pay_day, paid, lease_end, today)
+    for i, (address, tenant_name, tenant_rent, pay_day, lease_end, rent_paid, util_paid) in enumerate(rows):
+        code, call_due = apartment_pay_status(pay_day, rent_paid, lease_end, today)
         r, cc = divmod(i, cols)
         x = cc
         y = nrows - 1 - r
@@ -140,8 +140,10 @@ def make_apartments_heatmap(month=None):
         sub = f"платит {pay_day}-го" if pay_day else "аренду не берём"
         if call_due:
             sub += " · звонить"
-        ax.text(x + 0.5, y + 0.60, addr, ha="center", va="center", fontsize=13, weight="bold", color=txt_color)
-        ax.text(x + 0.5, y + 0.30, sub, ha="center", va="center", fontsize=11, color=txt_color)
+        ax.text(x + 0.5, y + 0.62, addr, ha="center", va="center", fontsize=13, weight="bold", color=txt_color)
+        ax.text(x + 0.5, y + 0.34, sub, ha="center", va="center", fontsize=11, color=txt_color)
+        if util_paid:
+            ax.text(x + 0.5, y + 0.13, "комм. собрана ✓", ha="center", va="center", fontsize=8.5, color=txt_color)
     ax.set_title(
         f"Аренда — {month}\nзелёный=оплачено · красный=пора забирать · жёлтый=скоро (≤10дн) · рамка=звонить",
         fontsize=12)
@@ -160,9 +162,9 @@ def make_apartments_table(month=None):
         return None
     headers = ["Адрес", "Квартирант", "Аренда", "Платит", "Контракт до", "Статус"]
     cell_text, status_codes = [], []
-    for address, tenant_name, tenant_rent, pay_day, lease_end, paid in rows:
-        code, call_due = apartment_pay_status(pay_day, paid, lease_end, today)
-        st = _HEAT_STATUS[code] + (" +звонить" if call_due else "")
+    for address, tenant_name, tenant_rent, pay_day, lease_end, rent_paid, util_paid in rows:
+        code, call_due = apartment_pay_status(pay_day, rent_paid, lease_end, today)
+        st = _HEAT_STATUS[code] + (" +звонить" if call_due else "") + (" +комм" if util_paid else "")
         cell_text.append([
             address[:26],
             (tenant_name or "—")[:18],
