@@ -146,9 +146,8 @@
   function waLink(phone, text) { return "https://wa.me/" + digitsOnly(phone) + "?text=" + encodeURIComponent(text); }
 
   function openExternal(url) {
-    if (url.indexOf("http") === 0) { tg.openLink(url); return; }
-    var a = document.createElement("a");
-    a.href = url; document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    try { tg.openLink(url); }
+    catch (e) { try { window.location.href = url; } catch (e2) {} }
   }
   function copyText(t) { if (navigator.clipboard) { try { navigator.clipboard.writeText(t); } catch (e) {} } }
 
@@ -173,6 +172,7 @@
     btn("btn-tg", "Telegram (текст скопируется)", function () { copyText(rt); tg.showAlert("Текст скопирован — вставьте в чат."); openExternal("tg://resolve?phone=" + d); });
     btn("btn-viber", "Viber (текст скопируется)", function () { copyText(rt); tg.showAlert("Текст скопирован — вставьте в чат."); openExternal("viber://chat?number=%2B" + d); });
     btn("btn-call", "📞 Позвонить (" + phone + ")", function () { openExternal("tel:" + phone.replace(/\s/g, "")); });
+    btn("btn-call", "📋 Скопировать номер", function () { copyText(phone); tg.showAlert("Номер скопирован: " + phone); });
   }
 
   function gatherLines(containerId) {
