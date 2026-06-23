@@ -139,7 +139,7 @@ def make_apartments_heatmap(month=None):
         addr = address if len(address) <= 26 else address[:25] + "…"
         sub = f"платит {pay_day}-го" if pay_day else "аренду не берём"
         if call_due:
-            sub += " · звонить"
+            sub += " · звонить" + (f" до {lease_end.strftime('%d.%m')}" if lease_end else "")
         ax.text(x + 0.5, y + 0.62, addr, ha="center", va="center", fontsize=13, weight="bold", color=txt_color)
         ax.text(x + 0.5, y + 0.34, sub, ha="center", va="center", fontsize=11, color=txt_color)
         if util_paid:

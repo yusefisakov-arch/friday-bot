@@ -198,7 +198,7 @@
         var d = document.createElement("div");
         d.className = "tile " + it.status + (it.call_due ? " call" : "");
         var sub = it.tenant_pay_day ? ("платит " + it.tenant_pay_day + "-го") : "аренду не берём";
-        if (it.call_due) sub += " · звонить";
+        if (it.call_due) sub += " · звонить" + (it.lease_end ? (" до " + it.lease_end.slice(8, 10) + "." + it.lease_end.slice(5, 7)) : "");
         d.innerHTML = '<div class="addr">' + esc(it.address) + '</div><div class="sub">' + sub + '</div>' +
                       (it.util_paid ? '<div class="komm">комм. собрана ✓</div>' : '');
         d.onclick = function () { openDetail(it.address); };

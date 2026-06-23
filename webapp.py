@@ -96,6 +96,7 @@ async def api_board(request):
             "address": address,
             "tenant_name": tenant_name,
             "tenant_pay_day": pay_day,
+            "lease_end": lease_end.strftime("%Y-%m-%d") if lease_end else None,
             "status": code,
             "call_due": call_due,
             "util_paid": util_paid,
