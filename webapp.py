@@ -110,6 +110,79 @@ async def api_tenants(request):
     return web.json_response(db_get_tenants_contacts())
 
 
+# ===== Brain map (карты) =====
+
+async def api_maps(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    return web.json_response(db_get_maps())
+
+
+async def api_maps_create(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    title = (data.get("title") or "").strip()
+    if not title:
+        return web.json_response({"error": "no_title"}, status=400)
+    return web.json_response({"id": db_create_map(title)})
+
+
+async def api_maps_rename(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    db_rename_map(data.get("id"), (data.get("title") or "").strip())
+    return web.json_response({"ok": True})
+
+
+async def api_maps_delete(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    db_delete_map(data.get("id"))
+    return web.json_response({"ok": True})
+
+
+async def api_map(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    m = db_get_map(request.query.get("id"))
+    if not m:
+        return web.json_response({"error": "not_found"}, status=404)
+    return web.json_response(m)
+
+
+async def api_node_add(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    title = (data.get("title") or "").strip()
+    if not title or not data.get("map_id"):
+        return web.json_response({"error": "bad_request"}, status=400)
+    return web.json_response({"id": db_add_map_node(data.get("map_id"), data.get("parent_id"), title)})
+
+
+async def api_node_update(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    title = data.get("title")
+    note = data.get("note")
+    db_update_map_node(data.get("id"),
+                       title=(title.strip() if isinstance(title, str) else None),
+                       note=(note if isinstance(note, str) else None))
+    return web.json_response({"ok": True})
+
+
+async def api_node_delete(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    db_delete_map_node(data.get("id"))
+    return web.json_response({"ok": True})
+
+
 async def api_overview(request):
     if not is_webapp_request_allowed(request):
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -258,6 +331,14 @@ async def run_webapp_server():
     app.router.add_get("/api/overview", api_overview)
     app.router.add_get("/api/text", api_text)
     app.router.add_get("/api/tenants", api_tenants)
+    app.router.add_get("/api/maps", api_maps)
+    app.router.add_post("/api/maps/create", api_maps_create)
+    app.router.add_post("/api/maps/rename", api_maps_rename)
+    app.router.add_post("/api/maps/delete", api_maps_delete)
+    app.router.add_get("/api/map", api_map)
+    app.router.add_post("/api/map/node/add", api_node_add)
+    app.router.add_post("/api/map/node/update", api_node_update)
+    app.router.add_post("/api/map/node/delete", api_node_delete)
     app.router.add_get("/api/apartment", api_apartment)
     app.router.add_post("/api/apartment/save", api_apartment_save)
     app.router.add_post("/api/apartment/pay", api_apartment_pay)

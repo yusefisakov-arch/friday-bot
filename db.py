@@ -161,6 +161,19 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS maps (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS map_nodes (
+            id SERIAL PRIMARY KEY,
+            map_id INTEGER NOT NULL REFERENCES maps(id) ON DELETE CASCADE,
+            parent_id INTEGER REFERENCES map_nodes(id) ON DELETE CASCADE,
+            title TEXT NOT NULL,
+            note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
         c.execute('''CREATE TABLE IF NOT EXISTS apartment_meters (
             id SERIAL PRIMARY KEY,
             apartment_id INTEGER REFERENCES apartments(id),
@@ -1002,6 +1015,82 @@ def db_set_rent_paid(address, paid):
         if not c.fetchone():
             return "not_found"
     return "paid" if paid else "unpaid"
+
+
+# ===== Brain map: карты-проекты (центр → блоки → задачи → атомы) =====
+
+def db_create_map(title):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("INSERT INTO maps (title) VALUES (%s) RETURNING id", (title,))
+        return c.fetchone()[0]
+
+
+def db_get_maps():
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""SELECT m.id, m.title, count(n.id)
+                     FROM maps m LEFT JOIN map_nodes n ON n.map_id = m.id
+                     GROUP BY m.id, m.title ORDER BY m.created_at""")
+        return [{"id": i, "title": t, "nodes": n} for i, t, n in c.fetchall()]
+
+
+def db_rename_map(map_id, title):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE maps SET title=%s WHERE id=%s RETURNING id", (title, _task_id_from(map_id)))
+        return "ok" if c.fetchone() else "not_found"
+
+
+def db_delete_map(map_id):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM maps WHERE id=%s RETURNING id", (_task_id_from(map_id),))
+        return "ok" if c.fetchone() else "not_found"
+
+
+def db_get_map(map_id):
+    mid = _task_id_from(map_id)
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT id, title FROM maps WHERE id=%s", (mid,))
+        row = c.fetchone()
+        if not row:
+            return None
+        c.execute("""SELECT id, parent_id, title, note FROM map_nodes
+                     WHERE map_id=%s ORDER BY created_at""", (mid,))
+        nodes = [{"id": i, "parent_id": p, "title": t, "note": nt} for i, p, t, nt in c.fetchall()]
+    return {"id": row[0], "title": row[1], "nodes": nodes}
+
+
+def db_add_map_node(map_id, parent_id, title):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("INSERT INTO map_nodes (map_id, parent_id, title) VALUES (%s, %s, %s) RETURNING id",
+                  (_task_id_from(map_id), _task_id_from(parent_id) if parent_id else None, title))
+        return c.fetchone()[0]
+
+
+def db_update_map_node(node_id, title=None, note=None):
+    sets, vals = [], []
+    if title is not None:
+        sets.append("title=%s"); vals.append(title)
+    if note is not None:
+        sets.append("note=%s"); vals.append(note)
+    if not sets:
+        return "no_changes"
+    vals.append(_task_id_from(node_id))
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute(f"UPDATE map_nodes SET {', '.join(sets)} WHERE id=%s RETURNING id", vals)
+        return "ok" if c.fetchone() else "not_found"
+
+
+def db_delete_map_node(node_id):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM map_nodes WHERE id=%s RETURNING id", (_task_id_from(node_id),))
+        return "ok" if c.fetchone() else "not_found"
 
 
 def db_get_overview():
