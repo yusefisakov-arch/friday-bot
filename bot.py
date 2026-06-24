@@ -101,6 +101,24 @@ async def table_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_apartments_image(update, context, "table")
 
 
+async def appcmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    if not WEBAPP_URL:
+        await update.message.reply_text("WEBAPP_URL не настроен, сэр.")
+        return
+    url = f"{WEBAPP_URL}/app#k={WEBAPP_SECRET}"
+    await update.message.reply_text(
+        "Ваш командный центр FRIDAY 🧠\n\n"
+        f"{url}\n\n"
+        "Как установить на телефон:\n"
+        "1. Откройте ссылку → «Открыть в Safari/Chrome» (не во встроенном браузере).\n"
+        "2. Меню браузера → «На экран Домой» / «Установить приложение».\n"
+        "Дальше открывается как обычное приложение, вход уже сохранён.",
+        disable_web_page_preview=True,
+    )
+
+
 async def mentor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
@@ -422,6 +440,7 @@ async def post_init(application: Application):
     # Меню команд (выпадает при вводе "/")
     try:
         await application.bot.set_my_commands([
+            BotCommand("app", "🧠 Командный центр (приложение)"),
             BotCommand("mentor", "Разбор дня и движение к целям (наставник)"),
             BotCommand("tasks", "Задачи на сегодня и просроченные"),
             BotCommand("alltasks", "Полный список задач"),
@@ -459,6 +478,7 @@ def main():
     app.add_handler(CommandHandler("decisions", decisions_cmd))
     app.add_handler(CommandHandler("finance", finance_cmd))
     app.add_handler(CommandHandler("memory", memory))
+    app.add_handler(CommandHandler("app", appcmd))
     app.add_handler(CommandHandler("mentor", mentor))
     app.add_handler(CommandHandler("hardmode", hardmode))
     app.add_handler(CommandHandler("selfdestruct", selfdestruct))

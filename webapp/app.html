@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-512.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>FRIDAY</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; padding: 18px 14px 40px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: #0f1115; color: #e8eaed; min-height: 100vh; }
+  .brain { text-align: center; margin: 8px 0 22px; }
+  .brain .logo { font-size: 30px; font-weight: 800; letter-spacing: 0.5px; }
+  .brain .logo span { color: #7c5cff; }
+  .brain .sub { font-size: 13px; color: #8b90a0; margin-top: 4px; }
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .card { background: #1a1d27; border-radius: 16px; padding: 16px; cursor: pointer; border: 1px solid #262a38;
+          display: flex; flex-direction: column; gap: 6px; min-height: 104px; transition: transform .05s; }
+  .card:active { transform: scale(0.97); }
+  .card .ico { font-size: 24px; }
+  .card .name { font-size: 14px; font-weight: 700; }
+  .card .metric { font-size: 13px; color: #b6bccb; line-height: 1.35; }
+  .card.alert { border-color: #E5393580; }
+  .card .metric b.red { color: #ff6b6b; }
+  .card .metric b.green { color: #51cf66; }
+  .card .metric b.amber { color: #ffd43b; }
+  .card.soon { opacity: 0.5; }
+  .section-title { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #6b7080; margin: 22px 4px 10px; }
+  .hint { text-align: center; color: #8b90a0; font-size: 14px; margin-top: 40px; line-height: 1.5; }
+
+  .ovl { position: fixed; inset: 0; background: #0f1115; overflow-y: auto; padding: 18px 16px; display: none; }
+  .ovl.show { display: block; }
+  .back { color: #7c5cff; font-size: 15px; margin-bottom: 14px; display: inline-block; cursor: pointer; }
+  .ovl h2 { font-size: 19px; margin: 0 0 14px; }
+  pre.txt { white-space: pre-wrap; word-wrap: break-word; font-family: inherit; font-size: 15px; line-height: 1.5; color: #d6dae4; margin: 0; }
+</style>
+</head>
+<body>
+  <div id="auth-needed" style="display:none" class="hint">
+    Откройте приложение по ссылке из бота (команда /app),<br>чтобы войти.
+  </div>
+
+  <div id="app" style="display:none">
+    <div class="brain">
+      <div class="logo">🧠 FRI<span>DAY</span></div>
+      <div class="sub">командный центр</div>
+    </div>
+    <div class="grid" id="grid"></div>
+
+    <div class="section-title">Проекты</div>
+    <div class="grid" id="projects"></div>
+  </div>
+
+  <div id="ovl" class="ovl">
+    <span class="back" id="ovl-back">‹ Назад</span>
+    <h2 id="ovl-title"></h2>
+    <pre class="txt" id="ovl-text">Загрузка…</pre>
+  </div>
+
+<script>
+  // ---- авторизация: ключ из #k=... сохраняем, дальше берём из localStorage ----
+  (function () {
+    var m = location.hash.match(/k=([^&]+)/);
+    if (m) { try { localStorage.setItem("fkey", decodeURIComponent(m[1])); } catch (e) {} history.replaceState(null, "", "/app"); }
+  })();
+  var KEY = "";
+  try { KEY = localStorage.getItem("fkey") || ""; } catch (e) {}
+
+  if (!KEY) { document.getElementById("auth-needed").style.display = "block"; }
+  else {
+    document.getElementById("app").style.display = "block";
+    if ("serviceWorker" in navigator) { navigator.serviceWorker.register("/sw.js").catch(function () {}); }
+    load();
+  }
+
+  function api(path) { return fetch(path, { headers: { "X-Webapp-Key": KEY } }).then(function (r) { return r.json(); }); }
+
+  function card(ico, name, metricHtml, onclick, cls) {
+    var d = document.createElement("div");
+    d.className = "card" + (cls ? " " + cls : "");
+    d.innerHTML = '<div class="ico">' + ico + '</div><div class="name">' + name + '</div><div class="metric">' + metricHtml + '</div>';
+    if (onclick) d.onclick = onclick;
+    return d;
+  }
+
+  function showText(title, kind) {
+    document.getElementById("ovl-title").textContent = title;
+    document.getElementById("ovl-text").textContent = "Загрузка…";
+    document.getElementById("ovl").classList.add("show");
+    window.scrollTo(0, 0);
+    api("/api/text?kind=" + kind).then(function (r) {
+      document.getElementById("ovl-text").textContent = (r.text || "").replace(/\*/g, "") || "Пусто.";
+    });
+  }
+  document.getElementById("ovl-back").onclick = function () { document.getElementById("ovl").classList.remove("show"); };
+
+  function load() {
+    api("/api/overview").then(function (o) {
+      var g = document.getElementById("grid"); g.innerHTML = "";
+
+      g.appendChild(card("🎯", "Цели",
+        "день <b>" + o.goals.day + "</b> · неделя " + o.goals.week + " · месяц " + o.goals.month,
+        function () { showText("🎯 Цели", "goals"); }));
+
+      var tm = "сегодня <b>" + o.tasks.today + "</b>" + (o.tasks.overdue ? " · просрочено <b class='red'>" + o.tasks.overdue + "</b>" : " · просрочено 0");
+      g.appendChild(card("✅", "Задачи", tm, function () { showText("✅ Задачи", "tasks"); }, o.tasks.overdue ? "alert" : ""));
+
+      var am = "не оплачено <b class='" + (o.apartments.unpaid ? "red" : "green") + "'>" + o.apartments.unpaid + "</b>" + (o.apartments.call ? " · звонить <b class='amber'>" + o.apartments.call + "</b>" : "");
+      g.appendChild(card("🏠", "Квартиры", am, function () { location.href = "/board?k=" + encodeURIComponent(KEY); }, o.apartments.unpaid ? "alert" : ""));
+
+      var fin = Object.keys(o.finance).map(function (cur) {
+        var d = o.finance[cur]; return cur + ": +" + (d["доход"] || 0) + " / -" + (d["расход"] || 0);
+      }).join("<br>") || "нет операций";
+      g.appendChild(card("💰", "Финансы (мес.)", fin, function () { showText("💰 Финансы", "finance"); }));
+
+      g.appendChild(card("🔥", "Дисциплина", "серия <b class='green'>" + o.discipline.streak + "</b> дн.", function () { showText("🔥 Цели и прогресс", "goals"); }));
+
+      g.appendChild(card("🤝", "Люди", o.decisions.open + " договорённостей", function () { showText("🤝 Договорённости", "decisions"); }));
+
+      var p = document.getElementById("projects"); p.innerHTML = "";
+      p.appendChild(card("🏠", "Квартиры", o.apartments.total + " шт.", function () { location.href = "/board?k=" + encodeURIComponent(KEY); }));
+      ["🏨 Отели", "🍽 Общепит", "🪙 Крипто"].forEach(function (t) {
+        var parts = t.split(" ");
+        p.appendChild(card(parts[0], parts[1], "скоро", function () { document.getElementById("ovl-title").textContent = parts[1]; document.getElementById("ovl-text").textContent = "Модуль появится позже — скажи боту, что вести по этому проекту."; document.getElementById("ovl").classList.add("show"); }, "soon"));
+      });
+    }).catch(function () {
+      document.getElementById("grid").innerHTML = '<div class="hint">Ошибка загрузки. Проверь ключ (открой через /app в боте).</div>';
+    });
+  }
+</script>
+</body>
+</html>

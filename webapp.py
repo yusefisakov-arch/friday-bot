@@ -110,6 +110,27 @@ async def api_tenants(request):
     return web.json_response(db_get_tenants_contacts())
 
 
+async def api_overview(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    return web.json_response(db_get_overview())
+
+
+_TEXT_VIEWS = {
+    "tasks": db_get_today_tasks,
+    "goals": db_get_goals,
+    "finance": db_get_finance,
+    "decisions": db_get_decisions,
+}
+
+
+async def api_text(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    fn = _TEXT_VIEWS.get(request.query.get("kind", ""))
+    return web.json_response({"text": fn() if fn else ""})
+
+
 async def api_apartment(request):
     if not is_webapp_request_allowed(request):
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -226,10 +247,16 @@ async def run_webapp_server():
     app.router.add_get("/move_out", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "move_out.html")))
     app.router.add_get("/utilities", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "utilities.html")))
     app.router.add_get("/board", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "board.html")))
+    app.router.add_get("/app", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "app.html")))
+    app.router.add_get("/manifest.webmanifest", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "manifest.webmanifest")))
+    app.router.add_get("/sw.js", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "sw.js")))
+    app.router.add_get("/icon-512.png", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "icon-512.png")))
     app.router.add_get("/", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "form.html")))
     app.router.add_get("/api/staff", get_staff)
     app.router.add_get("/api/apartments", get_apartments_api)
     app.router.add_get("/api/board", api_board)
+    app.router.add_get("/api/overview", api_overview)
+    app.router.add_get("/api/text", api_text)
     app.router.add_get("/api/tenants", api_tenants)
     app.router.add_get("/api/apartment", api_apartment)
     app.router.add_post("/api/apartment/save", api_apartment_save)

@@ -1004,6 +1004,47 @@ def db_set_rent_paid(address, paid):
     return "paid" if paid else "unpaid"
 
 
+def db_get_overview():
+    """Сводка для хаба brain map (живые цифры по доменам)."""
+    today = today_msk()
+    today_s = today.strftime("%Y-%m-%d")
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT count(*) FROM tasks WHERE status!='Готово'")
+        open_tasks = c.fetchone()[0]
+        c.execute("SELECT count(*) FROM tasks WHERE status!='Готово' AND deadline=%s", (today_s,))
+        today_tasks = c.fetchone()[0]
+        c.execute("SELECT count(*) FROM tasks WHERE status!='Готово' AND deadline IS NOT NULL AND deadline<%s", (today_s,))
+        overdue = c.fetchone()[0]
+        c.execute("SELECT horizon, count(*) FROM goals WHERE status='active' GROUP BY horizon")
+        g = dict(c.fetchall())
+        c.execute("SELECT count(*) FROM decisions WHERE status='Открыта'")
+        decisions = c.fetchone()[0]
+        month_start = today.replace(day=1)
+        c.execute("SELECT type, currency, COALESCE(SUM(amount),0) FROM finance WHERE date>=%s GROUP BY type, currency", (month_start,))
+        fin = c.fetchall()
+    unpaid = call = 0
+    board = db_get_apartments_board()
+    for address, tn, tr, pd, le, rent_paid, util_paid in board:
+        code, cd = apartment_pay_status(pd, rent_paid, le)
+        if code in ("red", "yellow"):
+            unpaid += 1
+        if cd:
+            call += 1
+    by_cur = {}
+    for t, cur, total in fin:
+        cur = cur or "MDL"
+        by_cur.setdefault(cur, {"расход": 0, "доход": 0})[t] = float(total)
+    return {
+        "tasks": {"open": open_tasks, "today": today_tasks, "overdue": overdue},
+        "goals": {"day": g.get("day", 0), "week": g.get("week", 0), "month": g.get("month", 0)},
+        "apartments": {"total": len(board), "unpaid": unpaid, "call": call},
+        "finance": by_cur,
+        "discipline": {"streak": db_get_streak()},
+        "decisions": {"open": decisions},
+    }
+
+
 def db_get_tenants_contacts():
     """Список квартирантов с телефоном/телеграмом — для массовой рассылки."""
     with db_conn() as conn:
