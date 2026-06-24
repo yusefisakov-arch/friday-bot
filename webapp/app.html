@@ -28,7 +28,7 @@
   #graph { position: fixed; inset: 0; width: 100%; height: 100%; background:
            radial-gradient(circle at 50% 45%, #161922 0%, #0f1115 70%); touch-action: none; display: block; }
   .gnode { cursor: pointer; }
-  .gnode text { font-size: 13px; font-weight: 600; fill: #e8eaed; paint-order: stroke; stroke: #0f1115; stroke-width: 3px; }
+  .gnode text { pointer-events: none; }
   .map-top { position: fixed; top: 0; left: 0; right: 0; z-index: 5; display: flex; align-items: center; gap: 12px;
              padding: calc(env(safe-area-inset-top,0px) + 12px) 16px 12px; background: linear-gradient(#0f1115ee, #0f111500); }
   .fab { position: fixed; right: 18px; bottom: calc(env(safe-area-inset-bottom,0px) + 20px); background: #7c5cff; color: #fff;
@@ -161,52 +161,61 @@
   function renderGraph(m) {
     var byParent = {};
     m.nodes.forEach(function (n) { var k = n.parent_id || "root"; (byParent[k] = byParent[k] || []).push(n); });
-    var leaf = {};
-    function countLeaf(id) { var ch = byParent[id] || []; if (!ch.length) { leaf[id] = 1; return 1; } var s = 0; ch.forEach(function (c) { s += countLeaf(c.id); }); leaf[id] = s; return s; }
-    var tops = byParent["root"] || []; var total = 0; tops.forEach(function (t) { total += countLeaf(t.id); }); if (!total) total = 1;
-    var pos = {}, col = {}, RING = 175;
-    var ang = -Math.PI / 2;
-    function place(node, depth, ac, span, color) {
-      pos[node.id] = { x: depth * RING * Math.cos(ac), y: depth * RING * Math.sin(ac) }; col[node.id] = color;
-      var ch = byParent[node.id] || []; if (!ch.length) return;
-      var tot = 0; ch.forEach(function (c) { tot += leaf[c.id]; }); if (!tot) tot = 1;
-      var start = ac - span / 2;
-      ch.forEach(function (c) { var cs = span * (leaf[c.id] / tot); place(c, depth + 1, start + cs / 2, cs, color); start += cs; });
+    var pos = {}, col = {}, dep = {};
+    function radius(d) { return d === 1 ? 250 : 250 + (d - 1) * 200; }
+    function place(node, depth, ac, sector, color) {
+      pos[node.id] = { x: radius(depth) * Math.cos(ac), y: radius(depth) * Math.sin(ac) }; col[node.id] = color; dep[node.id] = depth;
+      var ch = byParent[node.id] || []; var n = ch.length; if (!n) return;
+      var step = sector / n, start = ac - sector / 2 + step / 2;
+      ch.forEach(function (c, i) { place(c, depth + 1, start + i * step, step * 0.85, color); });
     }
-    tops.forEach(function (t, i) { var slice = 2 * Math.PI * (leaf[t.id] / total); place(t, 1, ang + slice / 2, slice, PALETTE[i % PALETTE.length]); ang += slice; });
+    var tops = byParent["root"] || [], N = tops.length || 1;
+    tops.forEach(function (t, i) {
+      var ac = -Math.PI / 2 + i * (2 * Math.PI / N);
+      place(t, 1, ac, (2 * Math.PI / N) * 0.8, PALETTE[i % PALETTE.length]);
+    });
 
     gview.innerHTML = "";
-    // рёбра
+    // рёбра — мягкие кривые, цвет ветки
     m.nodes.forEach(function (n) {
-      var p = n.parent_id ? pos[n.parent_id] : { x: 0, y: 0 };
-      var ln = document.createElementNS(SVGNS, "line");
-      ln.setAttribute("x1", p.x); ln.setAttribute("y1", p.y); ln.setAttribute("x2", pos[n.id].x); ln.setAttribute("y2", pos[n.id].y);
-      ln.setAttribute("stroke", col[n.id]); ln.setAttribute("stroke-width", "3"); ln.setAttribute("stroke-opacity", "0.65");
-      gview.appendChild(ln);
+      var p = n.parent_id ? pos[n.parent_id] : { x: 0, y: 0 }, c = pos[n.id];
+      var dx = c.x - p.x, dy = c.y - p.y, len = Math.hypot(dx, dy) || 1, off = len * 0.14;
+      var cxp = (p.x + c.x) / 2 + (-dy / len) * off, cyp = (p.y + c.y) / 2 + (dx / len) * off;
+      var path = document.createElementNS(SVGNS, "path");
+      path.setAttribute("d", "M" + p.x + "," + p.y + " Q" + cxp + "," + cyp + " " + c.x + "," + c.y);
+      path.setAttribute("fill", "none"); path.setAttribute("stroke", col[n.id]); path.setAttribute("stroke-width", "3"); path.setAttribute("stroke-opacity", "0.5");
+      gview.appendChild(path);
     });
     // центр (проект)
-    addNodeEl(0, 0, 30, "#ffffff", m.title, "#0f1115", function () {
+    addRectNode(0, 0, 0, "#ffffff", "#0f1115", m.title, function () {
       openSheet(m.title, [
         { label: "➕ Добавить блок", fn: function () { addNode(null); } },
         { label: "✏️ Переименовать проект", fn: function () { openInput("Название проекта", m.title, false, function (v) { if (v) post("/api/maps/rename", { id: m.id, title: v }).then(function () { openMap(m.id); }); }); } },
         { label: "🗑 Удалить карту", danger: true, fn: function () { openInput("Удалить карту? Напишите УДАЛИТЬ", "", false, function (v) { if (v === "УДАЛИТЬ") post("/api/maps/delete", { id: m.id }).then(showMaps); }); } }
       ]);
     }, true);
-    // узлы
+    // узлы — прямоугольники, цвет ветки
     m.nodes.forEach(function (n) {
-      addNodeEl(pos[n.id].x, pos[n.id].y, 15, col[n.id], n.title + (n.note ? "  📝" : ""), null, function () { nodeSheet(n); }, false);
+      addRectNode(pos[n.id].x, pos[n.id].y, dep[n.id], col[n.id], "#ffffff", n.title + (n.note ? "  📝" : ""), function () { nodeSheet(n); }, false);
     });
   }
 
-  function addNodeEl(x, y, r, fill, label, textFill, onTap, isCenter) {
+  function addRectNode(x, y, depth, fill, textFill, label, onTap, isCenter) {
+    var sz = isCenter ? { h: 54, fs: 16, max: 180 }
+      : depth === 1 ? { h: 48, fs: 15, max: 168 }
+      : depth === 2 ? { h: 40, fs: 13.5, max: 156 }
+      : { h: 34, fs: 12.5, max: 146 };
+    var label2 = label.length > 30 ? label.slice(0, 29) + "…" : label;
+    var w = Math.max(66, Math.min(sz.max, label2.length * sz.fs * 0.62 + 28));
     var g = document.createElementNS(SVGNS, "g"); g.setAttribute("class", "gnode"); g.setAttribute("transform", "translate(" + x + "," + y + ")");
-    var c = document.createElementNS(SVGNS, "circle"); c.setAttribute("r", r); c.setAttribute("fill", fill);
-    c.setAttribute("stroke", "#0f1115"); c.setAttribute("stroke-width", isCenter ? 4 : 2); g.appendChild(c);
+    var r = document.createElementNS(SVGNS, "rect");
+    r.setAttribute("x", -w / 2); r.setAttribute("y", -sz.h / 2); r.setAttribute("width", w); r.setAttribute("height", sz.h);
+    r.setAttribute("rx", 14); r.setAttribute("fill", fill); r.setAttribute("stroke", "#0f1115"); r.setAttribute("stroke-width", isCenter ? 4 : 2);
+    g.appendChild(r);
     var t = document.createElementNS(SVGNS, "text");
-    if (isCenter) { t.setAttribute("text-anchor", "middle"); t.setAttribute("y", 5); t.setAttribute("fill", textFill || "#0f1115"); t.style.fontWeight = "800"; }
-    else if (x < 0) { t.setAttribute("text-anchor", "end"); t.setAttribute("x", -r - 6); t.setAttribute("y", 5); }
-    else { t.setAttribute("text-anchor", "start"); t.setAttribute("x", r + 6); t.setAttribute("y", 5); }
-    t.textContent = label.length > 26 ? label.slice(0, 25) + "…" : label;
+    t.setAttribute("text-anchor", "middle"); t.setAttribute("dominant-baseline", "central"); t.setAttribute("fill", textFill);
+    t.setAttribute("font-size", sz.fs); t.setAttribute("font-weight", isCenter ? "800" : "700");
+    t.textContent = label2;
     g.appendChild(t);
     g.addEventListener("click", function () { if (!gMoved) onTap(); });
     gview.appendChild(g);
