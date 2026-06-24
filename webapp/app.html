@@ -218,22 +218,48 @@
     });
   }
 
+  function wrapLabel(label, cpl, maxLines) {
+    var words = label.split(/\s+/), lines = [], cur = "";
+    words.forEach(function (word) {
+      while (word.length > cpl) { if (cur) { lines.push(cur); cur = ""; } lines.push(word.slice(0, cpl - 1) + "…"); word = ""; }
+      if (!word) return;
+      var t = cur ? cur + " " + word : word;
+      if (t.length <= cpl) cur = t; else { if (cur) lines.push(cur); cur = word; }
+    });
+    if (cur) lines.push(cur);
+    if (lines.length > maxLines) { lines = lines.slice(0, maxLines); var last = lines[maxLines - 1]; lines[maxLines - 1] = last.replace(/…?$/, "").slice(0, cpl - 1) + "…"; }
+    return lines.length ? lines : [""];
+  }
   function addRectNode(x, y, depth, fill, textFill, label, onTap, isCenter) {
-    var sz = isCenter ? { h: 56, fs: 17, max: 190 }
-      : depth === 1 ? { h: 42, fs: 13.5, max: 160 }
-      : depth === 2 ? { h: 36, fs: 12.5, max: 150 }
-      : { h: 30, fs: 11.5, max: 140 };
-    var label2 = label.length > 30 ? label.slice(0, 29) + "…" : label;
-    var w = Math.max(66, Math.min(sz.max, label2.length * sz.fs * 0.62 + 28));
+    var sz = isCenter ? { h: 56, fs: 17, max: 200 }
+      : depth === 1 ? { h: 42, fs: 13.5, max: 170 }
+      : depth === 2 ? { h: 36, fs: 12.5, max: 158 }
+      : { h: 30, fs: 11.5, max: 148 };
+    var charW = sz.fs * 0.58, padX = 22, padY = 14;
+    var cpl = Math.max(8, Math.floor((sz.max - padX) / charW));
+    var lines = wrapLabel(label, cpl, 3);
+    var longest = lines.reduce(function (a, l) { return Math.max(a, l.length); }, 0);
+    var w = Math.max(66, Math.min(sz.max, longest * charW + padX));
+    var lineH = sz.fs * 1.18;
+    var h = Math.max(sz.h, lines.length * lineH + padY);
     var g = document.createElementNS(SVGNS, "g"); g.setAttribute("class", "gnode"); g.setAttribute("transform", "translate(" + x + "," + y + ")");
+    var hit = document.createElementNS(SVGNS, "rect");  // увеличенная прозрачная зона нажатия
+    hit.setAttribute("x", -w / 2 - 10); hit.setAttribute("y", -h / 2 - 10); hit.setAttribute("width", w + 20); hit.setAttribute("height", h + 20);
+    hit.setAttribute("fill", "transparent");
+    g.appendChild(hit);
     var r = document.createElementNS(SVGNS, "rect");
-    r.setAttribute("x", -w / 2); r.setAttribute("y", -sz.h / 2); r.setAttribute("width", w); r.setAttribute("height", sz.h);
+    r.setAttribute("x", -w / 2); r.setAttribute("y", -h / 2); r.setAttribute("width", w); r.setAttribute("height", h);
     r.setAttribute("rx", 14); r.setAttribute("fill", fill); r.setAttribute("stroke", "#0f1115"); r.setAttribute("stroke-width", isCenter ? 4 : 2);
     g.appendChild(r);
     var t = document.createElementNS(SVGNS, "text");
-    t.setAttribute("text-anchor", "middle"); t.setAttribute("dominant-baseline", "central"); t.setAttribute("fill", textFill);
+    t.setAttribute("text-anchor", "middle"); t.setAttribute("fill", textFill);
     t.setAttribute("font-size", sz.fs); t.setAttribute("font-weight", isCenter ? "800" : "700");
-    t.textContent = label2;
+    var y0 = -((lines.length - 1) / 2) * lineH;
+    lines.forEach(function (ln, i) {
+      var ts = document.createElementNS(SVGNS, "tspan");
+      ts.setAttribute("x", 0); ts.setAttribute("y", y0 + i * lineH); ts.setAttribute("dominant-baseline", "central");
+      ts.textContent = ln; t.appendChild(ts);
+    });
     g.appendChild(t);
     g.__tap = onTap;
     g.addEventListener("click", function () { if (!gMoved) onTap(); });  // десктоп
@@ -279,7 +305,7 @@
     e.preventDefault();
     if (e.touches.length === 1 && dragging) {
       var dx = e.touches[0].clientX - sX, dy = e.touches[0].clientY - sY;
-      if (Math.abs(dx) + Math.abs(dy) > 8) gMoved = true;
+      if (Math.abs(dx) + Math.abs(dy) > 14) gMoved = true;
       view.tx = sTx + dx; view.ty = sTy + dy; applyView();
     } else if (e.touches.length === 2 && pinch) {
       gMoved = true; var ns = clamp(pinch.s * (tDist(e.touches) / pinch.d), 0.25, 3.5);
@@ -296,7 +322,7 @@
   }, { passive: false });
   svg.addEventListener("wheel", function (e) { e.preventDefault(); var ns = clamp(view.s * (e.deltaY < 0 ? 1.12 : 0.89), 0.25, 3.5); view.tx = e.clientX - ((e.clientX - view.tx) / view.s) * ns; view.ty = e.clientY - ((e.clientY - view.ty) / view.s) * ns; view.s = ns; applyView(); }, { passive: false });
   svg.addEventListener("mousedown", function (e) { dragging = true; gMoved = false; sX = e.clientX; sY = e.clientY; sTx = view.tx; sTy = view.ty; });
-  window.addEventListener("mousemove", function (e) { if (!dragging) return; var dx = e.clientX - sX, dy = e.clientY - sY; if (Math.abs(dx) + Math.abs(dy) > 8) gMoved = true; view.tx = sTx + dx; view.ty = sTy + dy; applyView(); });
+  window.addEventListener("mousemove", function (e) { if (!dragging) return; var dx = e.clientX - sX, dy = e.clientY - sY; if (Math.abs(dx) + Math.abs(dy) > 14) gMoved = true; view.tx = sTx + dx; view.ty = sTy + dy; applyView(); });
   window.addEventListener("mouseup", function () { dragging = false; });
 
   // ---- start ----
