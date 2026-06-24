@@ -1004,6 +1004,16 @@ def db_set_rent_paid(address, paid):
     return "paid" if paid else "unpaid"
 
 
+def db_get_tenants_contacts():
+    """Список квартирантов с телефоном/телеграмом — для массовой рассылки."""
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("""SELECT address, tenant_name, tenant_phone FROM apartments
+                     WHERE active AND tenant_name IS NOT NULL AND tenant_phone IS NOT NULL
+                     ORDER BY address""")
+        return [{"address": a, "tenant_name": t, "tenant_phone": p} for a, t, p in c.fetchall()]
+
+
 def db_get_apartment_detail(address, month=None):
     """Полные данные квартиры для интерактивной панели (JSON-совместимый dict)."""
     if month is None:

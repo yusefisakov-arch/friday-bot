@@ -24,9 +24,9 @@
   .none { background: #ECEFF1; color: #555; }
   .call { border-color: #1565C0 !important; }
 
-  #overlay { position: fixed; inset: 0; background: var(--tg-theme-bg-color, #fff); overflow-y: auto;
-             padding: 16px; display: none; }
-  #overlay.show { display: block; }
+  .ovl { position: fixed; inset: 0; background: var(--tg-theme-bg-color, #fff); overflow-y: auto;
+         padding: 16px; display: none; }
+  .ovl.show { display: block; }
   .back { color: var(--tg-theme-link-color, #2481cc); font-size: 15px; margin-bottom: 12px; display: inline-block; cursor: pointer; }
   .field { margin-bottom: 12px; }
   label { display: block; font-size: 12px; font-weight: 600; color: var(--tg-theme-hint-color, #999);
@@ -60,9 +60,19 @@
 <body>
   <h2>Карта аренды</h2>
   <div class="legend">🟢 оплачено · 🔴 пора забирать · 🟡 скоро · ⚪ рано/нет аренды · синяя рамка = звонить</div>
+  <button class="btn btn-pay" id="btn-bcast" style="margin-bottom:12px">📨 Написать всем: собрать платёжки</button>
   <div id="grid">Загрузка…</div>
 
-  <div id="overlay">
+  <div id="bcast" class="ovl">
+    <span class="back" id="bcast-back">‹ Назад к карте</span>
+    <h2>📨 Сообщение всем квартирантам</h2>
+    <div class="field"><label>Текст (можно изменить)</label><textarea id="bcast-text"></textarea></div>
+    <p class="legend">Тапни WhatsApp у каждого — откроется чат с этим текстом. Идёшь по списку сверху вниз.</p>
+    <div id="bcast-list"></div>
+    <div style="height:30px"></div>
+  </div>
+
+  <div id="overlay" class="ovl">
     <span class="back" id="back">‹ Назад к карте</span>
     <h2 id="ov-title"></h2>
     <div class="status-line" id="ov-status"></div>
@@ -166,13 +176,10 @@
       btn("btn-tg", "Telegram — продление/выезд", function () { copyText(nt); tg.showAlert("Текст скопирован — вставьте в чат."); tg.openTelegramLink("https://t.me/" + u); });
       return;
     }
-    var d = digitsOnly(phone);
     btn("btn-wa", "WhatsApp — напомнить про аренду", function () { openExternal(waLink(phone, rt)); });
     btn("btn-wa", "WhatsApp — продление/выезд", function () { openExternal(waLink(phone, nt)); });
-    btn("btn-tg", "Telegram (текст скопируется)", function () { copyText(rt); tg.showAlert("Текст скопирован — вставьте в чат."); openExternal("tg://resolve?phone=" + d); });
-    btn("btn-viber", "Viber (текст скопируется)", function () { copyText(rt); tg.showAlert("Текст скопирован — вставьте в чат."); openExternal("viber://chat?number=%2B" + d); });
     btn("btn-call", "📞 Позвонить (" + phone + ")", function () { openExternal("tel:" + phone.replace(/\s/g, "")); });
-    btn("btn-call", "📋 Скопировать номер", function () { copyText(phone); tg.showAlert("Номер скопирован: " + phone); });
+    btn("btn-call", "📋 Скопировать номер (для Viber/Telegram)", function () { copyText(phone); tg.showAlert("Номер скопирован: " + phone); });
   }
 
   function gatherLines(containerId) {
@@ -312,6 +319,35 @@
         tg.showAlert("Ничего не записано — укажите сумму.");
       }
     }).catch(function () { tg.showAlert("Ошибка записи оплаты."); });
+  };
+
+  // ===== Массовая рассылка «соберите платёжки» =====
+  function bcastText() { return document.getElementById("bcast-text").value; }
+  document.getElementById("bcast-back").onclick = function () { document.getElementById("bcast").classList.remove("show"); };
+  document.getElementById("btn-bcast").onclick = function () {
+    document.getElementById("bcast-text").value =
+      "Здравствуйте! Сегодня приеду забрать платёжки — пожалуйста, соберите все квитанции к моему приезду. Спасибо!";
+    api("/api/tenants").then(function (r) { return r.json(); }).then(function (list) {
+      var box = document.getElementById("bcast-list"); box.innerHTML = "";
+      list.forEach(function (t) {
+        var wrap = document.createElement("div"); wrap.style.marginBottom = "12px";
+        var title = document.createElement("div"); title.style.fontWeight = "700"; title.style.fontSize = "14px";
+        title.textContent = (t.tenant_name || "—") + " — " + t.address; wrap.appendChild(title);
+        var phone = t.tenant_phone;
+        function b(cls, label, fn) { var x = document.createElement("button"); x.className = "btn " + cls; x.textContent = label; x.onclick = fn; x.style.marginTop = "4px"; wrap.appendChild(x); }
+        if (isTgHandle(phone)) {
+          var u = phone.trim().replace(/^@/, "");
+          b("btn-tg", "Telegram (текст скопируется)", function () { copyText(bcastText()); tg.showAlert("Текст скопирован — вставьте."); tg.openTelegramLink("https://t.me/" + u); });
+        } else {
+          b("btn-wa", "WhatsApp — " + phone, function () { openExternal(waLink(phone, bcastText())); });
+          b("btn-call", "копировать номер", function () { copyText(phone); tg.showAlert("Номер: " + phone); });
+        }
+        box.appendChild(wrap);
+      });
+      if (!list.length) box.textContent = "Нет контактов с телефоном.";
+    });
+    window.scrollTo(0, 0);
+    document.getElementById("bcast").classList.add("show");
   };
 
   loadBoard();

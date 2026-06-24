@@ -104,6 +104,12 @@ async def api_board(request):
     return web.json_response(items)
 
 
+async def api_tenants(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    return web.json_response(db_get_tenants_contacts())
+
+
 async def api_apartment(request):
     if not is_webapp_request_allowed(request):
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -224,6 +230,7 @@ async def run_webapp_server():
     app.router.add_get("/api/staff", get_staff)
     app.router.add_get("/api/apartments", get_apartments_api)
     app.router.add_get("/api/board", api_board)
+    app.router.add_get("/api/tenants", api_tenants)
     app.router.add_get("/api/apartment", api_apartment)
     app.router.add_post("/api/apartment/save", api_apartment_save)
     app.router.add_post("/api/apartment/pay", api_apartment_pay)
