@@ -1,6 +1,6 @@
 {
-  "name": "FRIDAY — командный центр",
-  "short_name": "FRIDAY",
+  "name": "brain map",
+  "short_name": "brain map",
   "start_url": "/app",
   "scope": "/",
   "display": "standalone",

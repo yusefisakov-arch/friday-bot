@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#0f1115">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/icon-512.png">
@@ -11,8 +11,9 @@
 <title>brain map</title>
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  body { margin: 0; padding: calc(env(safe-area-inset-top,0px) + 18px) 14px calc(env(safe-area-inset-bottom,0px) + 90px);
-         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f1115; color: #e8eaed; min-height: 100vh; }
+  html, body { margin: 0; height: 100%; overscroll-behavior: none; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f1115; color: #e8eaed; }
+  .pad { padding: calc(env(safe-area-inset-top,0px) + 18px) 14px calc(env(safe-area-inset-bottom,0px) + 90px); }
   .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
   .logo { font-size: 22px; font-weight: 800; } .logo span { color: #7c5cff; }
   .back { color: #7c5cff; font-size: 16px; cursor: pointer; }
@@ -23,75 +24,64 @@
   .map-card .t { font-size: 16px; font-weight: 700; } .map-card .s { font-size: 12px; color: #8b90a0; margin-top: 3px; }
   .map-card .more { font-size: 22px; color: #8b90a0; padding: 0 6px; }
 
-  .center-node { background: #7c5cff; border-radius: 16px; padding: 16px; text-align: center; font-size: 18px; font-weight: 800;
-                 color: #fff; cursor: pointer; box-shadow: 0 0 22px #7c5cff44; margin-bottom: 6px; }
-  .center-node .add { font-size: 12px; font-weight: 600; opacity: .85; margin-top: 4px; }
-
-  #tree { margin-top: 6px; }
-  .branch { margin-left: 14px; border-left: 2px solid #2a2f40; padding-left: 12px; position: relative; }
-  .branch::before { content: ""; position: absolute; left: -2px; top: 22px; width: 12px; height: 2px; background: #2a2f40; }
-  .node-row { background: #1a1d27; border: 1px solid #262a38; border-radius: 12px; padding: 11px 13px; margin: 8px 0;
-              display: flex; align-items: center; gap: 8px; cursor: pointer; }
-  .node-title { font-size: 14px; font-weight: 600; flex: 1; }
-  .note-dot { font-size: 12px; opacity: .8; }
-  .children { } .empty { color: #6b7080; font-size: 13px; margin: 8px 0 0 4px; }
-
+  /* граф на весь экран */
+  #graph { position: fixed; inset: 0; width: 100%; height: 100%; background:
+           radial-gradient(circle at 50% 45%, #161922 0%, #0f1115 70%); touch-action: none; display: block; }
+  .gnode { cursor: pointer; }
+  .gnode text { font-size: 13px; font-weight: 600; fill: #e8eaed; paint-order: stroke; stroke: #0f1115; stroke-width: 3px; }
+  .map-top { position: fixed; top: 0; left: 0; right: 0; z-index: 5; display: flex; align-items: center; gap: 12px;
+             padding: calc(env(safe-area-inset-top,0px) + 12px) 16px 12px; background: linear-gradient(#0f1115ee, #0f111500); }
   .fab { position: fixed; right: 18px; bottom: calc(env(safe-area-inset-bottom,0px) + 20px); background: #7c5cff; color: #fff;
-         border: none; border-radius: 30px; padding: 14px 20px; font-size: 16px; font-weight: 700; box-shadow: 0 4px 16px #0008; cursor: pointer; }
+         border: none; border-radius: 30px; padding: 14px 20px; font-size: 16px; font-weight: 700; box-shadow: 0 4px 16px #0008; cursor: pointer; z-index: 5; }
+  .hintbar { position: fixed; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom,0px) + 20px); text-align: center;
+             color: #5a6072; font-size: 11px; z-index: 4; pointer-events: none; }
 
-  .modal-bg, .sheet-bg { position: fixed; inset: 0; background: #000a; display: none; z-index: 10; align-items: center; justify-content: center; }
+  .modal-bg, .sheet-bg { position: fixed; inset: 0; background: #000a; display: none; z-index: 20; align-items: center; justify-content: center; }
   .modal-bg.show, .sheet-bg.show { display: flex; }
   .modal { background: #1a1d27; border-radius: 16px; padding: 18px; width: 88%; max-width: 420px; }
   .modal h3 { margin: 0 0 12px; font-size: 16px; }
-  .modal input, .modal textarea { width: 100%; padding: 11px; border-radius: 10px; border: 1px solid #333; background: #0f1115;
-                                  color: #e8eaed; font-size: 16px; font-family: inherit; }
+  .modal input, .modal textarea { width: 100%; padding: 11px; border-radius: 10px; border: 1px solid #333; background: #0f1115; color: #e8eaed; font-size: 16px; font-family: inherit; }
   .modal textarea { min-height: 90px; }
   .modal-btns { display: flex; gap: 8px; margin-top: 14px; }
   .modal-btns button { flex: 1; padding: 12px; border: none; border-radius: 10px; font-size: 15px; font-weight: 700; cursor: pointer; }
   .b-ok { background: #7c5cff; color: #fff; } .b-cancel { background: #2a2f40; color: #e8eaed; }
-  .sheet { position: fixed; left: 0; right: 0; bottom: 0; background: #1a1d27; border-radius: 18px 18px 0 0; padding: 12px 14px calc(env(safe-area-inset-bottom,0px) + 16px); z-index: 11; }
   .sheet-bg { align-items: flex-end; }
+  .sheet { background: #1a1d27; border-radius: 18px 18px 0 0; padding: 12px 14px calc(env(safe-area-inset-bottom,0px) + 16px); width: 100%; }
   .sheet h4 { margin: 6px 6px 12px; font-size: 14px; color: #aab0c0; }
   .sheet button { width: 100%; text-align: left; padding: 14px; background: none; border: none; color: #e8eaed; font-size: 16px; border-radius: 10px; cursor: pointer; }
   .sheet button.danger { color: #ff6b6b; }
 </style>
 </head>
 <body>
-  <div id="auth-needed" style="display:none" class="hint">
-    Вставьте ключ из бота (команда /app):
+  <div id="auth-needed" class="pad" style="display:none">
+    <div class="hint">Вставьте ключ из бота (команда /app):</div>
     <div style="margin-top:14px; display:flex; gap:8px; max-width:420px; margin:14px auto 0;">
-      <input id="key-input" placeholder="ключ или ссылка из бота"
-             style="flex:1; padding:11px; border-radius:10px; border:1px solid #333; background:#1a1d27; color:#e8eaed; font-size:15px;">
+      <input id="key-input" placeholder="ключ или ссылка из бота" style="flex:1; padding:11px; border-radius:10px; border:1px solid #333; background:#1a1d27; color:#e8eaed; font-size:15px;">
       <button id="key-save" style="padding:11px 16px; border:none; border-radius:10px; background:#7c5cff; color:#fff; font-weight:700;">Войти</button>
     </div>
   </div>
 
-  <div id="app" style="display:none">
-    <div id="maps-screen">
-      <div class="topbar"><div class="logo">🧠 brain<span>map</span></div></div>
-      <div id="maps-list"></div>
-      <button class="fab" id="new-map">+ Новая карта</button>
-    </div>
-
-    <div id="map-screen" style="display:none">
-      <div class="topbar"><span class="back" id="map-back">‹ Все карты</span></div>
-      <div class="center-node" id="center-node"></div>
-      <div id="tree"></div>
-      <button class="fab" id="add-block">+ блок</button>
-    </div>
+  <div id="maps-screen" class="pad" style="display:none">
+    <div class="topbar"><div class="logo">🧠 brain<span>map</span></div></div>
+    <div id="maps-list"></div>
+    <button class="fab" id="new-map">+ Новая карта</button>
   </div>
 
-  <div class="modal-bg" id="modal-bg">
-    <div class="modal">
-      <h3 id="modal-title"></h3>
-      <div id="modal-field"></div>
-      <div class="modal-btns"><button class="b-cancel" id="modal-cancel">Отмена</button><button class="b-ok" id="modal-ok">ОК</button></div>
-    </div>
+  <div id="map-screen" style="display:none">
+    <svg id="graph"><g id="gview"></g></svg>
+    <div class="map-top"><span class="back" id="map-back">‹ Карты</span><span id="map-name" style="font-weight:700"></span></div>
+    <div class="hintbar">тяни — двигать · щипок — зум · тап по узлу — действия</div>
+    <button class="fab" id="add-block">+ блок</button>
   </div>
 
+  <div class="modal-bg" id="modal-bg"><div class="modal"><h3 id="modal-title"></h3><div id="modal-field"></div>
+    <div class="modal-btns"><button class="b-cancel" id="modal-cancel">Отмена</button><button class="b-ok" id="modal-ok">ОК</button></div></div></div>
   <div class="sheet-bg" id="sheet-bg"><div class="sheet" id="sheet"></div></div>
 
 <script>
+  var SVGNS = "http://www.w3.org/2000/svg";
+  var PALETTE = ["#7c5cff", "#22b8cf", "#ff922b", "#51cf66", "#ff6b6b", "#fcc419", "#cc5de8", "#20c997", "#ff8787", "#74c0fc"];
+
   // ---- auth ----
   function extractKey(s) { if (!s) return ""; var m = s.match(/[?#&]?k=([^&\s]+)/); return m ? decodeURIComponent(m[1]) : s.trim(); }
   (function () {
@@ -100,43 +90,31 @@
     if (inc) { try { localStorage.setItem("fkey", inc); } catch (e) {} history.replaceState(null, "", "/app"); }
   })();
   var KEY = ""; try { KEY = localStorage.getItem("fkey") || ""; } catch (e) {}
-  document.getElementById("key-save").onclick = function () {
-    var k = extractKey(document.getElementById("key-input").value); if (!k) return;
-    try { localStorage.setItem("fkey", k); } catch (e) {} location.href = "/app";
-  };
+  document.getElementById("key-save").onclick = function () { var k = extractKey(document.getElementById("key-input").value); if (!k) return; try { localStorage.setItem("fkey", k); } catch (e) {} location.href = "/app"; };
 
   function esc(s) { var p = document.createElement("span"); p.textContent = s || ""; return p.innerHTML; }
   function api(path, opts) { opts = opts || {}; opts.headers = Object.assign({ "X-Webapp-Key": KEY, "Content-Type": "application/json" }, opts.headers || {}); return fetch(path, opts).then(function (r) { return r.json(); }); }
   function post(path, body) { return api(path, { method: "POST", body: JSON.stringify(body) }); }
 
-  // ---- modal (input/textarea) ----
+  // ---- modal & sheet ----
   function openInput(title, value, multiline, cb) {
     document.getElementById("modal-title").textContent = title;
     var f = document.getElementById("modal-field");
     f.innerHTML = multiline ? '<textarea id="modal-input"></textarea>' : '<input id="modal-input">';
     var inp = document.getElementById("modal-input"); inp.value = value || "";
-    document.getElementById("modal-bg").classList.add("show");
-    setTimeout(function () { inp.focus(); }, 50);
-    document.getElementById("modal-ok").onclick = function () {
-      var v = inp.value.trim(); document.getElementById("modal-bg").classList.remove("show"); cb(v);
-    };
+    document.getElementById("modal-bg").classList.add("show"); setTimeout(function () { inp.focus(); }, 50);
+    document.getElementById("modal-ok").onclick = function () { var v = inp.value.trim(); document.getElementById("modal-bg").classList.remove("show"); cb(v); };
   }
   document.getElementById("modal-cancel").onclick = function () { document.getElementById("modal-bg").classList.remove("show"); };
   document.getElementById("modal-bg").onclick = function (e) { if (e.target === this) this.classList.remove("show"); };
-
-  // ---- sheet (actions) ----
   function openSheet(title, actions) {
     var s = document.getElementById("sheet"); s.innerHTML = "<h4>" + esc(title) + "</h4>";
-    actions.forEach(function (a) {
-      var b = document.createElement("button"); b.textContent = a.label; if (a.danger) b.className = "danger";
-      b.onclick = function () { document.getElementById("sheet-bg").classList.remove("show"); a.fn(); };
-      s.appendChild(b);
-    });
+    actions.forEach(function (a) { var b = document.createElement("button"); b.textContent = a.label; if (a.danger) b.className = "danger"; b.onclick = function () { document.getElementById("sheet-bg").classList.remove("show"); a.fn(); }; s.appendChild(b); });
     document.getElementById("sheet-bg").classList.add("show");
   }
   document.getElementById("sheet-bg").onclick = function (e) { if (e.target === this) this.classList.remove("show"); };
 
-  // ---- screens ----
+  // ---- maps list ----
   function showMaps() {
     document.getElementById("map-screen").style.display = "none";
     document.getElementById("maps-screen").style.display = "block";
@@ -145,8 +123,8 @@
       if (!list.length) box.innerHTML = '<div class="hint">Пока нет карт.<br>Создай первую — разложи проект на части.</div>';
       list.forEach(function (m) {
         var d = document.createElement("div"); d.className = "map-card";
-        d.innerHTML = '<div><div class="t">' + esc(m.title) + '</div><div class="s">' + m.nodes + ' элементов</div></div><div class="more">⋯</div>';
-        d.querySelector("div").onclick = function () { openMap(m.id); };
+        d.innerHTML = '<div class="info"><div class="t">' + esc(m.title) + '</div><div class="s">' + m.nodes + ' элементов</div></div><div class="more">⋯</div>';
+        d.querySelector(".info").onclick = function () { openMap(m.id); };
         d.querySelector(".more").onclick = function (e) {
           e.stopPropagation();
           openSheet(m.title, [
@@ -159,73 +137,120 @@
       });
     });
   }
-  document.getElementById("new-map").onclick = function () {
-    openInput("Новая карта (название проекта)", "", false, function (v) { if (v) post("/api/maps/create", { title: v }).then(function (r) { openMap(r.id); }); });
-  };
+  document.getElementById("new-map").onclick = function () { openInput("Новая карта (название проекта)", "", false, function (v) { if (v) post("/api/maps/create", { title: v }).then(function (r) { openMap(r.id); }); }); };
 
-  var currentMap = null;
+  // ---- graph view ----
+  var svg = document.getElementById("graph"), gview = document.getElementById("gview");
+  var view = { tx: 0, ty: 0, s: 1 }, currentMap = null, lastMapId = null;
+  function applyView() { gview.setAttribute("transform", "translate(" + view.tx + "," + view.ty + ") scale(" + view.s + ")"); }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
   function openMap(id) {
     api("/api/map?id=" + id).then(function (m) {
       currentMap = m;
       document.getElementById("maps-screen").style.display = "none";
       document.getElementById("map-screen").style.display = "block";
-      var center = document.getElementById("center-node");
-      center.innerHTML = esc(m.title) + '<div class="add">нажми для действий</div>';
-      center.onclick = function () {
-        openSheet(m.title, [
-          { label: "➕ Добавить блок", fn: function () { addNode(null); } },
-          { label: "✏️ Переименовать проект", fn: function () { openInput("Название проекта", m.title, false, function (v) { if (v) post("/api/maps/rename", { id: m.id, title: v }).then(function () { openMap(m.id); }); }); } },
-          { label: "🗑 Удалить карту", danger: true, fn: function () { openInput("Удалить карту? Напишите УДАЛИТЬ", "", false, function (v) { if (v === "УДАЛИТЬ") post("/api/maps/delete", { id: m.id }).then(showMaps); }); } }
-        ]);
-      };
-      renderTree(m);
-      window.scrollTo(0, 0);
+      document.getElementById("map-name").textContent = m.title;
+      if (lastMapId !== id) { view = { tx: window.innerWidth / 2, ty: window.innerHeight / 2, s: 1 }; lastMapId = id; }
+      renderGraph(m); applyView();
     });
   }
   document.getElementById("map-back").onclick = showMaps;
   document.getElementById("add-block").onclick = function () { addNode(null); };
 
-  function renderTree(m) {
+  function renderGraph(m) {
     var byParent = {};
-    m.nodes.forEach(function (n) { (byParent[n.parent_id || "root"] = byParent[n.parent_id || "root"] || []).push(n); });
-    var tree = document.getElementById("tree"); tree.innerHTML = "";
-    function rec(parentKey, container) {
-      (byParent[parentKey] || []).forEach(function (node) {
-        var wrap = document.createElement("div"); wrap.className = "branch";
-        var row = document.createElement("div"); row.className = "node-row";
-        row.innerHTML = '<span class="node-title">' + esc(node.title) + '</span>' + (node.note ? '<span class="note-dot">📝</span>' : '');
-        row.onclick = function () { nodeSheet(node); };
-        wrap.appendChild(row);
-        var kids = document.createElement("div"); kids.className = "children";
-        rec(node.id, kids); wrap.appendChild(kids);
-        container.appendChild(wrap);
-      });
+    m.nodes.forEach(function (n) { var k = n.parent_id || "root"; (byParent[k] = byParent[k] || []).push(n); });
+    var leaf = {};
+    function countLeaf(id) { var ch = byParent[id] || []; if (!ch.length) { leaf[id] = 1; return 1; } var s = 0; ch.forEach(function (c) { s += countLeaf(c.id); }); leaf[id] = s; return s; }
+    var tops = byParent["root"] || []; var total = 0; tops.forEach(function (t) { total += countLeaf(t.id); }); if (!total) total = 1;
+    var pos = {}, col = {}, RING = 175;
+    var ang = -Math.PI / 2;
+    function place(node, depth, ac, span, color) {
+      pos[node.id] = { x: depth * RING * Math.cos(ac), y: depth * RING * Math.sin(ac) }; col[node.id] = color;
+      var ch = byParent[node.id] || []; if (!ch.length) return;
+      var tot = 0; ch.forEach(function (c) { tot += leaf[c.id]; }); if (!tot) tot = 1;
+      var start = ac - span / 2;
+      ch.forEach(function (c) { var cs = span * (leaf[c.id] / tot); place(c, depth + 1, start + cs / 2, cs, color); start += cs; });
     }
-    if (!(byParent["root"] || []).length) { tree.innerHTML = '<div class="empty">Пусто. Жми «+ блок», чтобы разложить проект.</div>'; return; }
-    rec("root", tree);
-  }
+    tops.forEach(function (t, i) { var slice = 2 * Math.PI * (leaf[t.id] / total); place(t, 1, ang + slice / 2, slice, PALETTE[i % PALETTE.length]); ang += slice; });
 
-  function addNode(parentId) {
-    openInput(parentId ? "Добавить пункт" : "Добавить блок", "", false, function (v) {
-      if (v) post("/api/map/node/add", { map_id: currentMap.id, parent_id: parentId, title: v }).then(function () { openMap(currentMap.id); });
+    gview.innerHTML = "";
+    // рёбра
+    m.nodes.forEach(function (n) {
+      var p = n.parent_id ? pos[n.parent_id] : { x: 0, y: 0 };
+      var ln = document.createElementNS(SVGNS, "line");
+      ln.setAttribute("x1", p.x); ln.setAttribute("y1", p.y); ln.setAttribute("x2", pos[n.id].x); ln.setAttribute("y2", pos[n.id].y);
+      ln.setAttribute("stroke", col[n.id]); ln.setAttribute("stroke-width", "3"); ln.setAttribute("stroke-opacity", "0.65");
+      gview.appendChild(ln);
+    });
+    // центр (проект)
+    addNodeEl(0, 0, 30, "#ffffff", m.title, "#0f1115", function () {
+      openSheet(m.title, [
+        { label: "➕ Добавить блок", fn: function () { addNode(null); } },
+        { label: "✏️ Переименовать проект", fn: function () { openInput("Название проекта", m.title, false, function (v) { if (v) post("/api/maps/rename", { id: m.id, title: v }).then(function () { openMap(m.id); }); }); } },
+        { label: "🗑 Удалить карту", danger: true, fn: function () { openInput("Удалить карту? Напишите УДАЛИТЬ", "", false, function (v) { if (v === "УДАЛИТЬ") post("/api/maps/delete", { id: m.id }).then(showMaps); }); } }
+      ]);
+    }, true);
+    // узлы
+    m.nodes.forEach(function (n) {
+      addNodeEl(pos[n.id].x, pos[n.id].y, 15, col[n.id], n.title + (n.note ? "  📝" : ""), null, function () { nodeSheet(n); }, false);
     });
   }
-  function nodeSheet(node) {
-    openSheet(node.title, [
-      { label: "➕ Добавить ниже", fn: function () { addNode(node.id); } },
-      { label: "✏️ Переименовать", fn: function () { openInput("Название", node.title, false, function (v) { if (v) post("/api/map/node/update", { id: node.id, title: v }).then(function () { openMap(currentMap.id); }); }); } },
-      { label: "📝 Заметка" + (node.note ? " ✓" : ""), fn: function () { openInput("Заметка", node.note || "", true, function (v) { post("/api/map/node/update", { id: node.id, note: v }).then(function () { openMap(currentMap.id); }); }); } },
-      { label: "🗑 Удалить", danger: true, fn: function () { openInput("Удалить «" + node.title + "» и всё внутри? Напишите УДАЛИТЬ", "", false, function (v) { if (v === "УДАЛИТЬ") post("/api/map/node/delete", { id: node.id }).then(function () { openMap(currentMap.id); }); }); } }
+
+  function addNodeEl(x, y, r, fill, label, textFill, onTap, isCenter) {
+    var g = document.createElementNS(SVGNS, "g"); g.setAttribute("class", "gnode"); g.setAttribute("transform", "translate(" + x + "," + y + ")");
+    var c = document.createElementNS(SVGNS, "circle"); c.setAttribute("r", r); c.setAttribute("fill", fill);
+    c.setAttribute("stroke", "#0f1115"); c.setAttribute("stroke-width", isCenter ? 4 : 2); g.appendChild(c);
+    var t = document.createElementNS(SVGNS, "text");
+    if (isCenter) { t.setAttribute("text-anchor", "middle"); t.setAttribute("y", 5); t.setAttribute("fill", textFill || "#0f1115"); t.style.fontWeight = "800"; }
+    else if (x < 0) { t.setAttribute("text-anchor", "end"); t.setAttribute("x", -r - 6); t.setAttribute("y", 5); }
+    else { t.setAttribute("text-anchor", "start"); t.setAttribute("x", r + 6); t.setAttribute("y", 5); }
+    t.textContent = label.length > 26 ? label.slice(0, 25) + "…" : label;
+    g.appendChild(t);
+    g.addEventListener("click", function () { if (!gMoved) onTap(); });
+    gview.appendChild(g);
+  }
+
+  function addNode(parentId) { openInput(parentId ? "Добавить пункт" : "Добавить блок", "", false, function (v) { if (v) post("/api/map/node/add", { map_id: currentMap.id, parent_id: parentId, title: v }).then(function () { openMap(currentMap.id); }); }); }
+  function nodeSheet(n) {
+    openSheet(n.title, [
+      { label: "➕ Добавить ниже", fn: function () { addNode(n.id); } },
+      { label: "✏️ Переименовать", fn: function () { openInput("Название", n.title, false, function (v) { if (v) post("/api/map/node/update", { id: n.id, title: v }).then(function () { openMap(currentMap.id); }); }); } },
+      { label: "📝 Заметка" + (n.note ? " ✓" : ""), fn: function () { openInput("Заметка", n.note || "", true, function (v) { post("/api/map/node/update", { id: n.id, note: v }).then(function () { openMap(currentMap.id); }); }); } },
+      { label: "🗑 Удалить", danger: true, fn: function () { openInput("Удалить «" + n.title + "» и всё внутри? Напишите УДАЛИТЬ", "", false, function (v) { if (v === "УДАЛИТЬ") post("/api/map/node/delete", { id: n.id }).then(function () { openMap(currentMap.id); }); }); } }
     ]);
   }
 
+  // ---- pan & zoom ----
+  var gMoved = false, dragging = false, sX, sY, sTx, sTy, pinch = null;
+  function tDist(t) { var dx = t[0].clientX - t[1].clientX, dy = t[0].clientY - t[1].clientY; return Math.hypot(dx, dy); }
+  function tMid(t) { return { x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 }; }
+  svg.addEventListener("touchstart", function (e) {
+    if (e.touches.length === 1) { dragging = true; gMoved = false; sX = e.touches[0].clientX; sY = e.touches[0].clientY; sTx = view.tx; sTy = view.ty; }
+    else if (e.touches.length === 2) { dragging = false; pinch = { d: tDist(e.touches), s: view.s, tx: view.tx, ty: view.ty }; var mm = tMid(e.touches); pinch.mx = mm.x; pinch.my = mm.y; }
+  }, { passive: false });
+  svg.addEventListener("touchmove", function (e) {
+    e.preventDefault();
+    if (e.touches.length === 1 && dragging) {
+      var dx = e.touches[0].clientX - sX, dy = e.touches[0].clientY - sY;
+      if (Math.abs(dx) + Math.abs(dy) > 8) gMoved = true;
+      view.tx = sTx + dx; view.ty = sTy + dy; applyView();
+    } else if (e.touches.length === 2 && pinch) {
+      gMoved = true; var ns = clamp(pinch.s * (tDist(e.touches) / pinch.d), 0.25, 3.5);
+      view.tx = pinch.mx - ((pinch.mx - pinch.tx) / pinch.s) * ns;
+      view.ty = pinch.my - ((pinch.my - pinch.ty) / pinch.s) * ns; view.s = ns; applyView();
+    }
+  }, { passive: false });
+  svg.addEventListener("touchend", function (e) { if (e.touches.length === 0) { dragging = false; pinch = null; } });
+  svg.addEventListener("wheel", function (e) { e.preventDefault(); var ns = clamp(view.s * (e.deltaY < 0 ? 1.12 : 0.89), 0.25, 3.5); view.tx = e.clientX - ((e.clientX - view.tx) / view.s) * ns; view.ty = e.clientY - ((e.clientY - view.ty) / view.s) * ns; view.s = ns; applyView(); }, { passive: false });
+  svg.addEventListener("mousedown", function (e) { dragging = true; gMoved = false; sX = e.clientX; sY = e.clientY; sTx = view.tx; sTy = view.ty; });
+  window.addEventListener("mousemove", function (e) { if (!dragging) return; var dx = e.clientX - sX, dy = e.clientY - sY; if (Math.abs(dx) + Math.abs(dy) > 8) gMoved = true; view.tx = sTx + dx; view.ty = sTy + dy; applyView(); });
+  window.addEventListener("mouseup", function () { dragging = false; });
+
   // ---- start ----
   if (!KEY) { document.getElementById("auth-needed").style.display = "block"; }
-  else {
-    document.getElementById("app").style.display = "block";
-    if ("serviceWorker" in navigator) { navigator.serviceWorker.register("/sw.js").catch(function () {}); }
-    showMaps();
-  }
+  else { if ("serviceWorker" in navigator) { navigator.serviceWorker.register("/sw.js").catch(function () {}); } showMaps(); }
 </script>
 </body>
 </html>
