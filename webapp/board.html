@@ -142,7 +142,8 @@
   }
 
   function digitsOnly(p) { return (p || "").replace(/[^0-9]/g, ""); }
-  function isTgHandle(p) { return (p || "").trim().charAt(0) === "@"; }
+  function isTgHandle(p) { return (p || "").indexOf("@") >= 0; }
+  function tgUser(p) { var m = (p || "").match(/@([A-Za-z0-9_]+)/); return m ? m[1] : ""; }
 
   function reminderText(a) {
     var n = a.tenant_name ? (", " + a.tenant_name) : "";
@@ -171,7 +172,7 @@
       var b = document.createElement("button"); b.className = "btn " + cls; b.textContent = label; b.onclick = fn; box.appendChild(b);
     }
     if (isTgHandle(phone)) {
-      var u = phone.trim().replace(/^@/, "");
+      var u = tgUser(phone);
       btn("btn-tg", "Telegram — напомнить про аренду", function () { copyText(rt); tg.showAlert("Текст скопирован — вставьте в чат."); tg.openTelegramLink("https://t.me/" + u); });
       btn("btn-tg", "Telegram — продление/выезд", function () { copyText(nt); tg.showAlert("Текст скопирован — вставьте в чат."); tg.openTelegramLink("https://t.me/" + u); });
       return;
@@ -336,7 +337,7 @@
         var phone = t.tenant_phone;
         function b(cls, label, fn) { var x = document.createElement("button"); x.className = "btn " + cls; x.textContent = label; x.onclick = fn; x.style.marginTop = "4px"; wrap.appendChild(x); }
         if (isTgHandle(phone)) {
-          var u = phone.trim().replace(/^@/, "");
+          var u = tgUser(phone);
           b("btn-tg", "Telegram (текст скопируется)", function () { copyText(bcastText()); tg.showAlert("Текст скопирован — вставьте."); tg.openTelegramLink("https://t.me/" + u); });
         } else {
           b("btn-wa", "WhatsApp — " + phone, function () { openExternal(waLink(phone, bcastText())); });
