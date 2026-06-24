@@ -197,7 +197,7 @@
     // рёбра — плавные кривые, цвет ветки
     m.nodes.forEach(function (n) {
       var p = n.parent_id ? pos[n.parent_id] : graphRoot, c = pos[n.id];
-      var dx = c.x - p.x, dy = c.y - p.y, len = Math.hypot(dx, dy) || 1, off = len * 0.16;
+      var dx = c.x - p.x, dy = c.y - p.y, len = Math.hypot(dx, dy) || 1, off = len * 0.08;
       var mxp = (p.x + c.x) / 2 + (-dy / len) * off, myp = (p.y + c.y) / 2 + (dx / len) * off;
       var path = document.createElementNS(SVGNS, "path");
       path.setAttribute("d", "M" + p.x + "," + p.y + " Q" + mxp + "," + myp + " " + c.x + "," + c.y);
@@ -219,10 +219,10 @@
   }
 
   function addRectNode(x, y, depth, fill, textFill, label, onTap, isCenter) {
-    var sz = isCenter ? { h: 54, fs: 16, max: 180 }
-      : depth === 1 ? { h: 48, fs: 15, max: 168 }
-      : depth === 2 ? { h: 40, fs: 13.5, max: 156 }
-      : { h: 34, fs: 12.5, max: 146 };
+    var sz = isCenter ? { h: 56, fs: 17, max: 190 }
+      : depth === 1 ? { h: 42, fs: 13.5, max: 160 }
+      : depth === 2 ? { h: 36, fs: 12.5, max: 150 }
+      : { h: 30, fs: 11.5, max: 140 };
     var label2 = label.length > 30 ? label.slice(0, 29) + "…" : label;
     var w = Math.max(66, Math.min(sz.max, label2.length * sz.fs * 0.62 + 28));
     var g = document.createElementNS(SVGNS, "g"); g.setAttribute("class", "gnode"); g.setAttribute("transform", "translate(" + x + "," + y + ")");
