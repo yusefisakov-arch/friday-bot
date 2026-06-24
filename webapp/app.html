@@ -153,7 +153,7 @@
       document.getElementById("map-screen").style.display = "block";
       document.getElementById("map-name").textContent = m.title;
       renderGraph(m);
-      if (lastMapId !== id) { view = { tx: 80, ty: window.innerHeight / 2 - graphRoot.y, s: 1 }; lastMapId = id; }
+      if (lastMapId !== id) { view = { tx: window.innerWidth / 2, ty: window.innerHeight / 2, s: 1 }; lastMapId = id; }
       applyView();
     });
   }
@@ -163,26 +163,36 @@
   function renderGraph(m) {
     var byParent = {};
     m.nodes.forEach(function (n) { var k = n.parent_id || "root"; (byParent[k] = byParent[k] || []).push(n); });
-    // аккуратное дерево слева-направо: уровень = столбец (X), братья — столбиком (Y)
-    var COL = 220, ROW = 64, pos = {}, col = {}, dep = {}, ny = { v: 0 };
-    function layout(node, depth, color) {
-      dep[node.id] = depth; col[node.id] = color;
-      var ch = byParent[node.id] || [], x = depth * COL;
-      if (!ch.length) { pos[node.id] = { x: x, y: ny.v }; ny.v += ROW; return; }
-      ch.forEach(function (c) { layout(c, depth + 1, color); });
-      pos[node.id] = { x: x, y: (pos[ch[0].id].y + pos[ch[ch.length - 1].id].y) / 2 };
-    }
-    var tops = byParent["root"] || [];
-    tops.forEach(function (t, i) { layout(t, 1, PALETTE[i % PALETTE.length]); });
-    graphRoot = { x: 0, y: tops.length ? (pos[tops[0].id].y + pos[tops[tops.length - 1].id].y) / 2 : 0 };
-    pos.__root = graphRoot;
+    // радиальное дерево: ветки расходятся в разные стороны от центра,
+    // внутри каждой ветки — аккуратное под-дерево, растущее наружу
+    var COL = 165, ROW = 60, R0 = 205, pos = {}, col = {}, dep = {};
+    var tops = byParent["root"] || [], N = tops.length || 1;
+    tops.forEach(function (t, i) {
+      var theta = -Math.PI / 2 + i * (2 * Math.PI / N);
+      var dir = { x: Math.cos(theta), y: Math.sin(theta) }, perp = { x: -Math.sin(theta), y: Math.cos(theta) };
+      var local = {}, vc = { v: 0 }, color = PALETTE[i % PALETTE.length];
+      function layoutLocal(node, depth) {
+        dep[node.id] = depth; col[node.id] = color;
+        var ch = byParent[node.id] || [], u = R0 + (depth - 1) * COL, v;
+        if (!ch.length) { v = vc.v; vc.v += ROW; }
+        else { ch.forEach(function (c) { layoutLocal(c, depth + 1); }); v = (local[ch[0].id].v + local[ch[ch.length - 1].id].v) / 2; }
+        local[node.id] = { u: u, v: v };
+      }
+      layoutLocal(t, 1);
+      var vs = []; for (var k in local) vs.push(local[k].v);
+      var vmid = (Math.min.apply(null, vs) + Math.max.apply(null, vs)) / 2;
+      for (var id in local) { var o = local[id], vv = o.v - vmid; pos[id] = { x: o.u * dir.x + vv * perp.x, y: o.u * dir.y + vv * perp.y }; }
+    });
+    graphRoot = { x: 0, y: 0 };
 
     gview.innerHTML = "";
-    // рёбра — плавные горизонтальные кривые, цвет ветки
+    // рёбра — плавные кривые, цвет ветки
     m.nodes.forEach(function (n) {
-      var p = n.parent_id ? pos[n.parent_id] : graphRoot, c = pos[n.id], dx = c.x - p.x;
+      var p = n.parent_id ? pos[n.parent_id] : graphRoot, c = pos[n.id];
+      var dx = c.x - p.x, dy = c.y - p.y, len = Math.hypot(dx, dy) || 1, off = len * 0.16;
+      var mxp = (p.x + c.x) / 2 + (-dy / len) * off, myp = (p.y + c.y) / 2 + (dx / len) * off;
       var path = document.createElementNS(SVGNS, "path");
-      path.setAttribute("d", "M" + p.x + "," + p.y + " C" + (p.x + dx * 0.5) + "," + p.y + " " + (c.x - dx * 0.5) + "," + c.y + " " + c.x + "," + c.y);
+      path.setAttribute("d", "M" + p.x + "," + p.y + " Q" + mxp + "," + myp + " " + c.x + "," + c.y);
       path.setAttribute("fill", "none"); path.setAttribute("stroke", col[n.id]); path.setAttribute("stroke-width", "2.5"); path.setAttribute("stroke-opacity", "0.6");
       gview.appendChild(path);
     });
