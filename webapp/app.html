@@ -130,7 +130,7 @@
           openSheet(m.title, [
             { label: "Открыть", fn: function () { openMap(m.id); } },
             { label: "Переименовать", fn: function () { openInput("Название карты", m.title, false, function (v) { if (v) post("/api/maps/rename", { id: m.id, title: v }).then(showMaps); }); } },
-            { label: "Удалить карту", danger: true, fn: function () { openInput("Удалить «" + m.title + "»? Напишите УДАЛИТЬ", "", false, function (v) { if (v === "УДАЛИТЬ") post("/api/maps/delete", { id: m.id }).then(showMaps); }); } }
+            { label: "Удалить карту", danger: true, fn: function () { post("/api/maps/delete", { id: m.id }).then(showMaps); } }
           ]);
         };
         box.appendChild(d);
@@ -156,13 +156,13 @@
     });
   }
   document.getElementById("map-back").onclick = showMaps;
-  document.getElementById("add-block").onclick = function () { addNode(null); };
+  document.getElementById("add-block").onclick = function () { addNode(null, 1); };
 
   function renderGraph(m) {
     var byParent = {};
     m.nodes.forEach(function (n) { var k = n.parent_id || "root"; (byParent[k] = byParent[k] || []).push(n); });
     var pos = {}, col = {}, dep = {};
-    function radius(d) { return d === 1 ? 250 : 250 + (d - 1) * 200; }
+    function radius(d) { return 190 + (d - 1) * 150; }
     function place(node, depth, ac, sector, color) {
       pos[node.id] = { x: radius(depth) * Math.cos(ac), y: radius(depth) * Math.sin(ac) }; col[node.id] = color; dep[node.id] = depth;
       var ch = byParent[node.id] || []; var n = ch.length; if (!n) return;
@@ -189,14 +189,14 @@
     // центр (проект)
     addRectNode(0, 0, 0, "#ffffff", "#0f1115", m.title, function () {
       openSheet(m.title, [
-        { label: "➕ Добавить блок", fn: function () { addNode(null); } },
+        { label: "➕ Добавить блок", fn: function () { addNode(null, 1); } },
         { label: "✏️ Переименовать проект", fn: function () { openInput("Название проекта", m.title, false, function (v) { if (v) post("/api/maps/rename", { id: m.id, title: v }).then(function () { openMap(m.id); }); }); } },
-        { label: "🗑 Удалить карту", danger: true, fn: function () { openInput("Удалить карту? Напишите УДАЛИТЬ", "", false, function (v) { if (v === "УДАЛИТЬ") post("/api/maps/delete", { id: m.id }).then(showMaps); }); } }
+        { label: "🗑 Удалить карту", danger: true, fn: function () { post("/api/maps/delete", { id: m.id }).then(showMaps); } }
       ]);
     }, true);
     // узлы — прямоугольники, цвет ветки
     m.nodes.forEach(function (n) {
-      addRectNode(pos[n.id].x, pos[n.id].y, dep[n.id], col[n.id], "#ffffff", n.title + (n.note ? "  📝" : ""), function () { nodeSheet(n); }, false);
+      addRectNode(pos[n.id].x, pos[n.id].y, dep[n.id], col[n.id], "#ffffff", n.title + (n.note ? "  📝" : ""), function () { nodeSheet(n, dep[n.id]); }, false);
     });
   }
 
@@ -217,17 +217,23 @@
     t.setAttribute("font-size", sz.fs); t.setAttribute("font-weight", isCenter ? "800" : "700");
     t.textContent = label2;
     g.appendChild(t);
-    g.addEventListener("click", function () { if (!gMoved) onTap(); });
+    g.__tap = onTap;
+    g.addEventListener("click", function () { if (!gMoved) onTap(); });  // десктоп
     gview.appendChild(g);
   }
 
-  function addNode(parentId) { openInput(parentId ? "Добавить пункт" : "Добавить блок", "", false, function (v) { if (v) post("/api/map/node/add", { map_id: currentMap.id, parent_id: parentId, title: v }).then(function () { openMap(currentMap.id); }); }); }
-  function nodeSheet(n) {
+  function lvl(d) { return d <= 1 ? "блок" : d === 2 ? "подблок" : d === 3 ? "задачу" : "подзадачу"; }
+  function addNode(parentId, childDepth) {
+    openInput("Добавить " + lvl(childDepth), "", false, function (v) {
+      if (v) post("/api/map/node/add", { map_id: currentMap.id, parent_id: parentId, title: v }).then(function () { openMap(currentMap.id); });
+    });
+  }
+  function nodeSheet(n, depth) {
     openSheet(n.title, [
-      { label: "➕ Добавить ниже", fn: function () { addNode(n.id); } },
+      { label: "➕ Добавить " + lvl(depth + 1), fn: function () { addNode(n.id, depth + 1); } },
       { label: "✏️ Переименовать", fn: function () { openInput("Название", n.title, false, function (v) { if (v) post("/api/map/node/update", { id: n.id, title: v }).then(function () { openMap(currentMap.id); }); }); } },
       { label: "📝 Заметка" + (n.note ? " ✓" : ""), fn: function () { openInput("Заметка", n.note || "", true, function (v) { post("/api/map/node/update", { id: n.id, note: v }).then(function () { openMap(currentMap.id); }); }); } },
-      { label: "🗑 Удалить", danger: true, fn: function () { openInput("Удалить «" + n.title + "» и всё внутри? Напишите УДАЛИТЬ", "", false, function (v) { if (v === "УДАЛИТЬ") post("/api/map/node/delete", { id: n.id }).then(function () { openMap(currentMap.id); }); }); } }
+      { label: "🗑 Удалить", danger: true, fn: function () { post("/api/map/node/delete", { id: n.id }).then(function () { openMap(currentMap.id); }); } }
     ]);
   }
 
@@ -251,7 +257,13 @@
       view.ty = pinch.my - ((pinch.my - pinch.ty) / pinch.s) * ns; view.s = ns; applyView();
     }
   }, { passive: false });
-  svg.addEventListener("touchend", function (e) { if (e.touches.length === 0) { dragging = false; pinch = null; } });
+  svg.addEventListener("touchend", function (e) {
+    if (!gMoved && e.changedTouches.length === 1) {
+      var t = e.changedTouches[0], el = document.elementFromPoint(t.clientX, t.clientY);
+      while (el && el !== svg) { if (el.__tap) { e.preventDefault(); el.__tap(); break; } el = el.parentNode; }
+    }
+    if (e.touches.length === 0) { dragging = false; pinch = null; }
+  }, { passive: false });
   svg.addEventListener("wheel", function (e) { e.preventDefault(); var ns = clamp(view.s * (e.deltaY < 0 ? 1.12 : 0.89), 0.25, 3.5); view.tx = e.clientX - ((e.clientX - view.tx) / view.s) * ns; view.ty = e.clientY - ((e.clientY - view.ty) / view.s) * ns; view.s = ns; applyView(); }, { passive: false });
   svg.addEventListener("mousedown", function (e) { dragging = true; gMoved = false; sX = e.clientX; sY = e.clientY; sTx = view.tx; sTy = view.ty; });
   window.addEventListener("mousemove", function (e) { if (!dragging) return; var dx = e.clientX - sX, dy = e.clientY - sY; if (Math.abs(dx) + Math.abs(dy) > 8) gMoved = true; view.tx = sTx + dx; view.ty = sTy + dy; applyView(); });
