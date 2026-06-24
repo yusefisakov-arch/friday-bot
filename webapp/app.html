@@ -173,10 +173,8 @@
       var item = { node: t, color: PALETTE[i % PALETTE.length] };
       if (t.side && sideIdx[t.side] !== undefined) buckets[sideIdx[t.side]].push(item); else deferred.push(item);
     });
-    deferred.forEach(function (it) {
-      var mi = 0; for (var k = 1; k < 4; k++) if (buckets[k].length < buckets[mi].length) mi = k;
-      buckets[mi].push(it);
-    });
+    // по умолчанию блоки идут вправо; сторону можно поменять вручную
+    deferred.forEach(function (it) { buckets[0].push(it); });
     buckets.forEach(function (items, si) {
       if (!items.length) return;
       var dir = { x: sides[si].d[0], y: sides[si].d[1] }, perp = { x: sides[si].p[0], y: sides[si].p[1] };
