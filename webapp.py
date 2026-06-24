@@ -169,9 +169,11 @@ async def api_node_update(request):
     data = await request.json()
     title = data.get("title")
     note = data.get("note")
+    side = data.get("side")
     db_update_map_node(data.get("id"),
                        title=(title.strip() if isinstance(title, str) else None),
-                       note=(note if isinstance(note, str) else None))
+                       note=(note if isinstance(note, str) else None),
+                       side=(side if isinstance(side, str) else None))
     return web.json_response({"ok": True})
 
 

@@ -163,22 +163,32 @@
   function renderGraph(m) {
     var byParent = {};
     m.nodes.forEach(function (n) { var k = n.parent_id || "root"; (byParent[k] = byParent[k] || []).push(n); });
-    // радиальное дерево: ветки расходятся в разные стороны от центра,
-    // внутри каждой ветки — аккуратное под-дерево, растущее наружу
-    var COL = 165, ROW = 60, R0 = 205, pos = {}, col = {}, dep = {};
-    var tops = byParent["root"] || [], N = tops.length || 1;
+    // 4 стороны (право/лево/верх/низ): блоки распределяются по сторонам по очереди,
+    // каждая ветка растёт наружу в свою сторону, братья — поперёк
+    var COL = 165, ROW = 58, R0 = 200, pos = {}, col = {}, dep = {};
+    var tops = byParent["root"] || [];
+    var sides = [{ d: [1, 0], p: [0, 1] }, { d: [-1, 0], p: [0, -1] }, { d: [0, -1], p: [1, 0] }, { d: [0, 1], p: [-1, 0] }];
+    var buckets = [[], [], [], []], sideIdx = { right: 0, left: 1, up: 2, down: 3 }, deferred = [];
     tops.forEach(function (t, i) {
-      var theta = -Math.PI / 2 + i * (2 * Math.PI / N);
-      var dir = { x: Math.cos(theta), y: Math.sin(theta) }, perp = { x: -Math.sin(theta), y: Math.cos(theta) };
-      var local = {}, vc = { v: 0 }, color = PALETTE[i % PALETTE.length];
-      function layoutLocal(node, depth) {
+      var item = { node: t, color: PALETTE[i % PALETTE.length] };
+      if (t.side && sideIdx[t.side] !== undefined) buckets[sideIdx[t.side]].push(item); else deferred.push(item);
+    });
+    deferred.forEach(function (it) {
+      var mi = 0; for (var k = 1; k < 4; k++) if (buckets[k].length < buckets[mi].length) mi = k;
+      buckets[mi].push(it);
+    });
+    buckets.forEach(function (items, si) {
+      if (!items.length) return;
+      var dir = { x: sides[si].d[0], y: sides[si].d[1] }, perp = { x: sides[si].p[0], y: sides[si].p[1] };
+      var local = {}, vc = { v: 0 };
+      function layoutLocal(node, depth, color) {
         dep[node.id] = depth; col[node.id] = color;
         var ch = byParent[node.id] || [], u = R0 + (depth - 1) * COL, v;
         if (!ch.length) { v = vc.v; vc.v += ROW; }
-        else { ch.forEach(function (c) { layoutLocal(c, depth + 1); }); v = (local[ch[0].id].v + local[ch[ch.length - 1].id].v) / 2; }
+        else { ch.forEach(function (c) { layoutLocal(c, depth + 1, color); }); v = (local[ch[0].id].v + local[ch[ch.length - 1].id].v) / 2; }
         local[node.id] = { u: u, v: v };
       }
-      layoutLocal(t, 1);
+      items.forEach(function (it) { layoutLocal(it.node, 1, it.color); vc.v += ROW; });
       var vs = []; for (var k in local) vs.push(local[k].v);
       var vmid = (Math.min.apply(null, vs) + Math.max.apply(null, vs)) / 2;
       for (var id in local) { var o = local[id], vv = o.v - vmid; pos[id] = { x: o.u * dir.x + vv * perp.x, y: o.u * dir.y + vv * perp.y }; }
@@ -238,13 +248,25 @@
       if (v) post("/api/map/node/add", { map_id: currentMap.id, parent_id: parentId, title: v }).then(function () { openMap(currentMap.id); });
     });
   }
+  function setSide(id, side) { post("/api/map/node/update", { id: id, side: side }).then(function () { openMap(currentMap.id); }); }
+  function sideSheet(n) {
+    openSheet("Сторона: " + n.title, [
+      { label: "➡️ Вправо" + (n.side === "right" ? " ✓" : ""), fn: function () { setSide(n.id, "right"); } },
+      { label: "⬅️ Влево" + (n.side === "left" ? " ✓" : ""), fn: function () { setSide(n.id, "left"); } },
+      { label: "⬆️ Вверх" + (n.side === "up" ? " ✓" : ""), fn: function () { setSide(n.id, "up"); } },
+      { label: "⬇️ Вниз" + (n.side === "down" ? " ✓" : ""), fn: function () { setSide(n.id, "down"); } },
+      { label: "♻️ Авто" + (!n.side ? " ✓" : ""), fn: function () { setSide(n.id, ""); } }
+    ]);
+  }
   function nodeSheet(n, depth) {
-    openSheet(n.title, [
+    var actions = [
       { label: "➕ Добавить " + lvl(depth + 1), fn: function () { addNode(n.id, depth + 1); } },
       { label: "✏️ Переименовать", fn: function () { openInput("Название", n.title, false, function (v) { if (v) post("/api/map/node/update", { id: n.id, title: v }).then(function () { openMap(currentMap.id); }); }); } },
-      { label: "📝 Заметка" + (n.note ? " ✓" : ""), fn: function () { openInput("Заметка", n.note || "", true, function (v) { post("/api/map/node/update", { id: n.id, note: v }).then(function () { openMap(currentMap.id); }); }); } },
-      { label: "🗑 Удалить", danger: true, fn: function () { post("/api/map/node/delete", { id: n.id }).then(function () { openMap(currentMap.id); }); } }
-    ]);
+      { label: "📝 Заметка" + (n.note ? " ✓" : ""), fn: function () { openInput("Заметка", n.note || "", true, function (v) { post("/api/map/node/update", { id: n.id, note: v }).then(function () { openMap(currentMap.id); }); }); } }
+    ];
+    if (depth === 1) actions.push({ label: "📍 Сторона", fn: function () { sideSheet(n); } });
+    actions.push({ label: "🗑 Удалить", danger: true, fn: function () { post("/api/map/node/delete", { id: n.id }).then(function () { openMap(currentMap.id); }); } });
+    openSheet(n.title, actions);
   }
 
   // ---- pan & zoom ----

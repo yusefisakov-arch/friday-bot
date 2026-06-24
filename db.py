@@ -172,8 +172,13 @@ def init_db():
             parent_id INTEGER REFERENCES map_nodes(id) ON DELETE CASCADE,
             title TEXT NOT NULL,
             note TEXT,
+            side TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
+        try:
+            c.execute("ALTER TABLE map_nodes ADD COLUMN IF NOT EXISTS side TEXT")
+        except Exception:
+            pass
         c.execute('''CREATE TABLE IF NOT EXISTS apartment_meters (
             id SERIAL PRIMARY KEY,
             apartment_id INTEGER REFERENCES apartments(id),
@@ -1057,9 +1062,9 @@ def db_get_map(map_id):
         row = c.fetchone()
         if not row:
             return None
-        c.execute("""SELECT id, parent_id, title, note FROM map_nodes
+        c.execute("""SELECT id, parent_id, title, note, side FROM map_nodes
                      WHERE map_id=%s ORDER BY created_at""", (mid,))
-        nodes = [{"id": i, "parent_id": p, "title": t, "note": nt} for i, p, t, nt in c.fetchall()]
+        nodes = [{"id": i, "parent_id": p, "title": t, "note": nt, "side": sd} for i, p, t, nt, sd in c.fetchall()]
     return {"id": row[0], "title": row[1], "nodes": nodes}
 
 
@@ -1071,12 +1076,14 @@ def db_add_map_node(map_id, parent_id, title):
         return c.fetchone()[0]
 
 
-def db_update_map_node(node_id, title=None, note=None):
+def db_update_map_node(node_id, title=None, note=None, side=None):
     sets, vals = [], []
     if title is not None:
         sets.append("title=%s"); vals.append(title)
     if note is not None:
         sets.append("note=%s"); vals.append(note)
+    if side is not None:
+        sets.append("side=%s"); vals.append(side or None)  # "" -> авто (NULL)
     if not sets:
         return "no_changes"
     vals.append(_task_id_from(node_id))
