@@ -41,7 +41,12 @@
 </head>
 <body>
   <div id="auth-needed" style="display:none" class="hint">
-    Откройте приложение по ссылке из бота (команда /app),<br>чтобы войти.
+    Вставьте ключ из бота (команда /app), чтобы войти:
+    <div style="margin-top:14px; display:flex; gap:8px; max-width:420px; margin-left:auto; margin-right:auto;">
+      <input id="key-input" placeholder="ключ или ссылка из бота"
+             style="flex:1; padding:11px; border-radius:10px; border:1px solid #333; background:#1a1d27; color:#e8eaed; font-size:15px;">
+      <button id="key-save" style="padding:11px 16px; border:none; border-radius:10px; background:#7c5cff; color:#fff; font-weight:700; font-size:15px;">Войти</button>
+    </div>
   </div>
 
   <div id="app" style="display:none">
@@ -62,13 +67,26 @@
   </div>
 
 <script>
-  // ---- авторизация: ключ из #k=... сохраняем, дальше берём из localStorage ----
+  // ---- авторизация: ключ из ?k= или #k=, сохраняем, дальше берём из localStorage ----
+  function extractKey(s) {
+    if (!s) return "";
+    var m = s.match(/[?#&]?k=([^&\s]+)/);
+    return m ? decodeURIComponent(m[1]) : s.trim();
+  }
   (function () {
-    var m = location.hash.match(/k=([^&]+)/);
-    if (m) { try { localStorage.setItem("fkey", decodeURIComponent(m[1])); } catch (e) {} history.replaceState(null, "", "/app"); }
+    var incoming = new URLSearchParams(location.search).get("k");
+    if (!incoming) { var m = location.hash.match(/k=([^&]+)/); if (m) incoming = decodeURIComponent(m[1]); }
+    if (incoming) { try { localStorage.setItem("fkey", incoming); } catch (e) {} history.replaceState(null, "", "/app"); }
   })();
   var KEY = "";
   try { KEY = localStorage.getItem("fkey") || ""; } catch (e) {}
+
+  document.getElementById("key-save").onclick = function () {
+    var k = extractKey(document.getElementById("key-input").value);
+    if (!k) return;
+    try { localStorage.setItem("fkey", k); } catch (e) {}
+    location.href = "/app";
+  };
 
   if (!KEY) { document.getElementById("auth-needed").style.display = "block"; }
   else {

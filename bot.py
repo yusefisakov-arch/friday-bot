@@ -107,14 +107,15 @@ async def appcmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not WEBAPP_URL:
         await update.message.reply_text("WEBAPP_URL не настроен, сэр.")
         return
-    url = f"{WEBAPP_URL}/app#k={WEBAPP_SECRET}"
+    url = f"{WEBAPP_URL}/app?k={WEBAPP_SECRET}"
     await update.message.reply_text(
         "Ваш командный центр FRIDAY 🧠\n\n"
         f"{url}\n\n"
         "Как установить на телефон:\n"
         "1. Откройте ссылку → «Открыть в Safari/Chrome» (не во встроенном браузере).\n"
         "2. Меню браузера → «На экран Домой» / «Установить приложение».\n"
-        "Дальше открывается как обычное приложение, вход уже сохранён.",
+        "3. Если после установки попросит войти — нажмите «вставить ключ» и вставьте этот код:\n\n"
+        f"{WEBAPP_SECRET}",
         disable_web_page_preview=True,
     )
 
