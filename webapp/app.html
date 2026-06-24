@@ -145,14 +145,16 @@
   function applyView() { gview.setAttribute("transform", "translate(" + view.tx + "," + view.ty + ") scale(" + view.s + ")"); }
   function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
+  var graphRoot = { x: 0, y: 0 };
   function openMap(id) {
     api("/api/map?id=" + id).then(function (m) {
       currentMap = m;
       document.getElementById("maps-screen").style.display = "none";
       document.getElementById("map-screen").style.display = "block";
       document.getElementById("map-name").textContent = m.title;
-      if (lastMapId !== id) { view = { tx: window.innerWidth / 2, ty: window.innerHeight / 2, s: 1 }; lastMapId = id; }
-      renderGraph(m); applyView();
+      renderGraph(m);
+      if (lastMapId !== id) { view = { tx: 80, ty: window.innerHeight / 2 - graphRoot.y, s: 1 }; lastMapId = id; }
+      applyView();
     });
   }
   document.getElementById("map-back").onclick = showMaps;
@@ -161,33 +163,31 @@
   function renderGraph(m) {
     var byParent = {};
     m.nodes.forEach(function (n) { var k = n.parent_id || "root"; (byParent[k] = byParent[k] || []).push(n); });
-    var pos = {}, col = {}, dep = {};
-    function radius(d) { return 190 + (d - 1) * 150; }
-    function place(node, depth, ac, sector, color) {
-      pos[node.id] = { x: radius(depth) * Math.cos(ac), y: radius(depth) * Math.sin(ac) }; col[node.id] = color; dep[node.id] = depth;
-      var ch = byParent[node.id] || []; var n = ch.length; if (!n) return;
-      var step = sector / n, start = ac - sector / 2 + step / 2;
-      ch.forEach(function (c, i) { place(c, depth + 1, start + i * step, step * 0.85, color); });
+    // аккуратное дерево слева-направо: уровень = столбец (X), братья — столбиком (Y)
+    var COL = 220, ROW = 64, pos = {}, col = {}, dep = {}, ny = { v: 0 };
+    function layout(node, depth, color) {
+      dep[node.id] = depth; col[node.id] = color;
+      var ch = byParent[node.id] || [], x = depth * COL;
+      if (!ch.length) { pos[node.id] = { x: x, y: ny.v }; ny.v += ROW; return; }
+      ch.forEach(function (c) { layout(c, depth + 1, color); });
+      pos[node.id] = { x: x, y: (pos[ch[0].id].y + pos[ch[ch.length - 1].id].y) / 2 };
     }
-    var tops = byParent["root"] || [], N = tops.length || 1;
-    tops.forEach(function (t, i) {
-      var ac = -Math.PI / 2 + i * (2 * Math.PI / N);
-      place(t, 1, ac, (2 * Math.PI / N) * 0.8, PALETTE[i % PALETTE.length]);
-    });
+    var tops = byParent["root"] || [];
+    tops.forEach(function (t, i) { layout(t, 1, PALETTE[i % PALETTE.length]); });
+    graphRoot = { x: 0, y: tops.length ? (pos[tops[0].id].y + pos[tops[tops.length - 1].id].y) / 2 : 0 };
+    pos.__root = graphRoot;
 
     gview.innerHTML = "";
-    // рёбра — мягкие кривые, цвет ветки
+    // рёбра — плавные горизонтальные кривые, цвет ветки
     m.nodes.forEach(function (n) {
-      var p = n.parent_id ? pos[n.parent_id] : { x: 0, y: 0 }, c = pos[n.id];
-      var dx = c.x - p.x, dy = c.y - p.y, len = Math.hypot(dx, dy) || 1, off = len * 0.14;
-      var cxp = (p.x + c.x) / 2 + (-dy / len) * off, cyp = (p.y + c.y) / 2 + (dx / len) * off;
+      var p = n.parent_id ? pos[n.parent_id] : graphRoot, c = pos[n.id], dx = c.x - p.x;
       var path = document.createElementNS(SVGNS, "path");
-      path.setAttribute("d", "M" + p.x + "," + p.y + " Q" + cxp + "," + cyp + " " + c.x + "," + c.y);
-      path.setAttribute("fill", "none"); path.setAttribute("stroke", col[n.id]); path.setAttribute("stroke-width", "3"); path.setAttribute("stroke-opacity", "0.5");
+      path.setAttribute("d", "M" + p.x + "," + p.y + " C" + (p.x + dx * 0.5) + "," + p.y + " " + (c.x - dx * 0.5) + "," + c.y + " " + c.x + "," + c.y);
+      path.setAttribute("fill", "none"); path.setAttribute("stroke", col[n.id]); path.setAttribute("stroke-width", "2.5"); path.setAttribute("stroke-opacity", "0.6");
       gview.appendChild(path);
     });
     // центр (проект)
-    addRectNode(0, 0, 0, "#ffffff", "#0f1115", m.title, function () {
+    addRectNode(graphRoot.x, graphRoot.y, 0, "#ffffff", "#0f1115", m.title, function () {
       openSheet(m.title, [
         { label: "➕ Добавить блок", fn: function () { addNode(null, 1); } },
         { label: "✏️ Переименовать проект", fn: function () { openInput("Название проекта", m.title, false, function (v) { if (v) post("/api/maps/rename", { id: m.id, title: v }).then(function () { openMap(m.id); }); }); } },
