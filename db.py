@@ -263,6 +263,19 @@ def format_deadline(deadline):
         return deadline
 
 
+WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def _day_header(date_str, today, tomorrow):
+    dd = format_deadline(date_str)
+    try:
+        wd = WEEKDAYS_RU[datetime.strptime(date_str, "%Y-%m-%d").weekday()]
+    except (ValueError, TypeError):
+        wd = ""
+    tag = "Сегодня, " if date_str == today else "Завтра, " if date_str == tomorrow else ""
+    return f"📅 {tag}{dd}" + (f" ({wd})" if wd else "")
+
+
 def format_task_line(prefix, name, deadline, assignee):
     line = f"{prefix} {name}"
     extra = []
@@ -296,44 +309,43 @@ def db_get_tasks():
     with db_conn() as conn:
         c = conn.cursor()
         c.execute("""SELECT id, name, deadline, priority, assignee FROM tasks WHERE status != 'Готово'
-                     ORDER BY created_at DESC""")
+                     ORDER BY (deadline IS NULL), deadline ASC, id ASC""")
         rows = c.fetchall()
     if not rows:
         return "Открытых задач нет."
 
-    today = now_msk().strftime("%Y-%m-%d")
-    tomorrow = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
+    today = today_msk().strftime("%Y-%m-%d")
+    tomorrow = (today_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    groups = {"Срочно (сегодня и просрочено)": [], "На завтра": [], "Позже": [], "Без срока": []}
+    overdue, by_date, nodl, order = [], {}, [], []
     for row in rows:
         deadline = row[2]
         if deadline is None:
-            groups["Без срока"].append(row)
-        elif deadline <= today:
-            groups["Срочно (сегодня и просрочено)"].append(row)
-        elif deadline == tomorrow:
-            groups["На завтра"].append(row)
+            nodl.append(row)
+        elif str(deadline) < today:
+            overdue.append(row)
         else:
-            groups["Позже"].append(row)
+            d = str(deadline)
+            if d not in by_date:
+                by_date[d] = []
+                order.append(d)
+            by_date[d].append(row)
+
+    def render(items, show_date=False):
+        items = sorted(items, key=lambda r: PRIORITY_ORDER.get(r[3], 3)) if any(r[3] for r in items) else items
+        out = []
+        for tid, name, deadline, priority, assignee in items:
+            nm = ("🔴 " if priority == "Высокий" else "") + name
+            out.append(format_task_line(f"#{tid}", nm, deadline if show_date else None, assignee))
+        return "\n".join(out)
 
     blocks = []
-    for title, items in groups.items():
-        if not items:
-            continue
-        items.sort(key=lambda r: (PRIORITY_ORDER.get(r[3], 3), r[2] or ""))
-        high = [r for r in items if r[3] == "Высокий"]
-        rest = [r for r in items if r[3] != "Высокий"]
-
-        sections = [f"*{title}:*"]
-        for emoji, group_items in (("🔴", high), ("🟡", rest)):
-            if not group_items:
-                continue
-            lines = "\n".join(
-                format_task_line(f"#{tid}", name, deadline, assignee)
-                for (tid, name, deadline, priority, assignee) in group_items
-            )
-            sections.append(f"{emoji}\n{lines}")
-        blocks.append("\n\n".join(sections))
+    if overdue:
+        blocks.append(f"*🔴 Просрочено — {len(overdue)}:*\n" + render(overdue, show_date=True))
+    for d in order:
+        blocks.append(f"*{_day_header(d, today, tomorrow)} — {len(by_date[d])}:*\n" + render(by_date[d]))
+    if nodl:
+        blocks.append(f"*📌 Без срока — {len(nodl)}:*\n" + render(nodl))
     return "\n\n".join(blocks)
 
 
