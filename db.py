@@ -363,8 +363,8 @@ def db_get_today_tasks():
         c.execute("""SELECT COUNT(*) FROM tasks
                      WHERE status!='Готово' AND deadline IS NOT NULL AND deadline > %s""", (today_s,))
         upcoming = c.fetchone()[0]
-        c.execute("""SELECT text, progress FROM goals WHERE status='active' AND horizon='day'
-                     ORDER BY created_at""")
+        c.execute("""SELECT text, progress FROM goals WHERE status='active' AND horizon='day' AND period=%s
+                     ORDER BY created_at""", (today_s,))
         day_goals = c.fetchall()
     overdue = [r for r in rows if str(r[2]) < today_s]
     todays = [r for r in rows if str(r[2]) == today_s]
