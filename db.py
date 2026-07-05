@@ -356,6 +356,13 @@ def db_get_today_tasks():
                      WHERE status!='Готово' AND deadline IS NOT NULL AND deadline <= %s
                      ORDER BY deadline ASC, created_at""", (today_s,))
         rows = c.fetchall()
+        c.execute("""SELECT id, name, deadline, priority, postpone_count FROM tasks
+                     WHERE status!='Готово' AND deadline IS NULL
+                     ORDER BY created_at DESC""")
+        nodl = c.fetchall()
+        c.execute("""SELECT COUNT(*) FROM tasks
+                     WHERE status!='Готово' AND deadline IS NOT NULL AND deadline > %s""", (today_s,))
+        upcoming = c.fetchone()[0]
         c.execute("""SELECT text, progress FROM goals WHERE status='active' AND horizon='day'
                      ORDER BY created_at""")
         day_goals = c.fetchall()
@@ -384,8 +391,12 @@ def db_get_today_tasks():
         out.append("\n*🔴 Просрочено:*\n" + "\n".join(fmt(r, True) for r in overdue))
     if todays:
         out.append("\n*🟠 На сегодня:*\n" + "\n".join(fmt(r, False) for r in todays))
-    if not overdue and not todays and not day_goals:
-        out.append("\nНа сегодня и просроченных задач нет, сэр. 👍")
+    if nodl:
+        out.append("\n*📌 Без срока:*\n" + "\n".join(fmt(r, False) for r in nodl))
+    if upcoming:
+        out.append(f"\n_🔜 Ещё {upcoming} с будущим сроком._")
+    if not overdue and not todays and not day_goals and not nodl and not upcoming:
+        out.append("\nОткрытых задач нет, сэр. 👍")
     out.append("\n_Полный список — напишите «все задачи» или /alltasks._")
     return "\n".join(out)
 
