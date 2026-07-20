@@ -179,6 +179,12 @@ def init_db():
             c.execute("ALTER TABLE map_nodes ADD COLUMN IF NOT EXISTS side TEXT")
         except Exception:
             pass
+        # Декомпозиция: связь узла-атома с реальной задачей + признак атома
+        for _col, _type in (("task_id", "INTEGER"), ("is_atom", "BOOLEAN DEFAULT FALSE")):
+            try:
+                c.execute(f"ALTER TABLE map_nodes ADD COLUMN IF NOT EXISTS {_col} {_type}")
+            except Exception:
+                pass
         c.execute('''CREATE TABLE IF NOT EXISTS apartment_meters (
             id SERIAL PRIMARY KEY,
             apartment_id INTEGER REFERENCES apartments(id),
@@ -291,7 +297,8 @@ def format_task_line(prefix, name, deadline, assignee):
 def db_create_task(name, deadline=None, priority=None, assignee=None):
     with db_conn() as conn:
         c = conn.cursor()
-        c.execute("INSERT INTO tasks (name, deadline, priority, assignee) VALUES (%s, %s, %s, %s)", (name, deadline, priority, assignee))
+        c.execute("INSERT INTO tasks (name, deadline, priority, assignee) VALUES (%s, %s, %s, %s) RETURNING id", (name, deadline, priority, assignee))
+        return c.fetchone()[0]
 
 
 def db_create_task_if_absent(name, deadline=None):
@@ -1121,6 +1128,47 @@ def db_delete_map_node(node_id):
         c = conn.cursor()
         c.execute("DELETE FROM map_nodes WHERE id=%s RETURNING id", (_task_id_from(node_id),))
         return "ok" if c.fetchone() else "not_found"
+
+
+# --- Декомпозиция задач (дерево на maps/map_nodes) ---
+def db_add_decomp_node(map_id, parent_id, title, task_id=None, is_atom=False):
+    """Узел дерева декомпозиции. Атом (лист) связывается с задачей через task_id."""
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO map_nodes (map_id, parent_id, title, task_id, is_atom) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (_task_id_from(map_id), _task_id_from(parent_id) if parent_id else None, title, task_id, is_atom),
+        )
+        return c.fetchone()[0]
+
+
+def db_get_decomposition(map_id):
+    """Дерево декомпозиции с прогрессом: узлы + для атомов статус их задачи (закрыта/нет)."""
+    mid = _task_id_from(map_id)
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT id, title FROM maps WHERE id=%s", (mid,))
+        row = c.fetchone()
+        if not row:
+            return None
+        c.execute(
+            """SELECT n.id, n.parent_id, n.title, COALESCE(n.is_atom, FALSE), n.task_id,
+                      CASE WHEN t.status='Готово' THEN TRUE ELSE FALSE END
+               FROM map_nodes n LEFT JOIN tasks t ON t.id = n.task_id
+               WHERE n.map_id=%s ORDER BY n.created_at""",
+            (mid,),
+        )
+        nodes = [{"id": i, "parent_id": p, "title": ti, "is_atom": bool(a), "task_id": tk, "done": bool(d)}
+                 for i, p, ti, a, tk, d in c.fetchall()]
+    return {"id": row[0], "title": row[1], "nodes": nodes}
+
+
+def db_list_decompositions(limit=20):
+    """Список деревьев декомпозиции (id, title), свежие сверху."""
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT id, title FROM maps ORDER BY created_at DESC LIMIT %s", (limit,))
+        return c.fetchall()
 
 
 def db_get_overview():

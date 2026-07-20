@@ -1,5 +1,7 @@
 """Слой ИИ: системный промпт, инструменты, обработка сообщения моделью, графики."""
 import os
+import re
+import json
 import uuid
 import tempfile
 import logging
@@ -31,6 +33,7 @@ def build_system_static():
 Приоритеты: финансовые риски → просроченные договорённости → зависшие задачи → хаос в планах.
 
 Планирование и цели — твоя ключевая роль, относись к ней серьёзно. У сэра есть цели на день/неделю/месяц (set_goal, get_goals, update_goal, complete_goal, delete_goal). Помогай не просто записывать, а ДОВОДИТЬ до результата: когда сэр ставит цель — уточни срок (день/неделя/месяц) и при необходимости предложи разбить большую цель на конкретные шаги-задачи (create_task). Регулярно связывай задачи и цели: если задача двигает цель — отметь это. Когда сэр рассказывает, что сделал — обновляй прогресс цели (update_goal). Каждое утро бот показывает цели и помогает спланировать день; в начале недели и месяца — помогает спланировать неделю/месяц и подводит итоги прошлого периода. Будь проактивен: если на сегодня нет целей — предложи поставить 1-3 главные; если цель давно без прогресса — мягко напомни. Не выдумывай цели сам, но активно подталкивай и предлагай формулировки.
+Декомпозиция: когда сэр даёт крупную задачу/проект/цель или просит «разложи», «разбей на шаги», «декомпозируй» — вызови decompose_task: он раскладывает задачу в дерево до атомов (главные пункты → подпункты → атомы), и каждый атом становится реальной задачей. Дерево с прогрессом показывай через show_decomposition (по #id карты), список деревьев — list_decompositions. Атомы закрываются как обычные задачи, прогресс поднимается по дереву.
 Ты ещё и наставник: вечером (и когда сэр просит «разбери день», «как я иду к целям», «наставничество») анализируй его прогресс по реальным данным (get_goals, get_tasks, get_finance и т.п.), честно говори, где он отстаёт или не успевает, и давай конкретные советы как поступить — что приоритезировать, что отложить, как разбить застрявшую цель. Поддерживай, но будь прямым; держи его в фокусе на целях.
 У сэра трудности с дисциплиной — помогай ему держаться: когда он обещает что-то сделать ко времени ("позвоню в 15:00", "сделаю к вечеру") — предложи поставить контроль-пинг через create_reminder с текстом вида "Сделал: <что>?" на это время, чтобы потом спросить. Если задачу переносят/откладывают много раз — не давай ей тихо висеть: предложи разбить на маленький первый шаг, делегировать или убрать.
 Когда создаёшь задачу с дедлайном — всегда спрашивай: "Напомнить вам за день до дедлайна, сэр?" Если говорит да — ставь напоминание автоматически на 08:00 за день до дедлайна.
@@ -87,6 +90,102 @@ def generate_mentor_briefing():
         messages=[{"role": "user", "content": user_msg}],
     )
     return "".join(b.text for b in response.content if hasattr(b, "text")) or "Не удалось собрать вечерний разбор, сэр."
+
+
+DECOMPOSE_PROMPT = """Разложи задачу пользователя в дерево до «атомов».
+Атом — конкретное действие, которое делается за один присест (примерно ≤30-60 мин), дальше дробить не нужно.
+Структура: главные пункты → подпункты → атомы. Обычно 2-5 главных пунктов, у каждого 2-5 подпунктов/атомов — не раздувай.
+Верни СТРОГО валидный JSON без пояснений и без markdown, ровно такой формы:
+{"title": "<краткое название задачи>", "children": [{"title": "...", "children": [{"title": "...атом..."}]}]}
+Листья (без children) — это атомы. Пиши на русском, коротко и по делу."""
+
+
+def decompose_to_tree(task_text):
+    """Спрашивает умную модель разложить задачу в JSON-дерево до атомов."""
+    resp = anthropic.messages.create(
+        model=MODEL_SMART, max_tokens=2000,
+        system=DECOMPOSE_PROMPT,
+        messages=[{"role": "user", "content": task_text}],
+    )
+    raw = "".join(b.text for b in resp.content if hasattr(b, "text")).strip()
+    raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.M).strip()
+    return json.loads(raw)
+
+
+def create_decomposition(task_text):
+    """Строит дерево декомпозиции: карта + узлы; атомы (листья) становятся реальными задачами.
+    Возвращает (map_id, число_атомов)."""
+    tree = decompose_to_tree(task_text)
+    root_title = (tree.get("title") or task_text).strip()[:200]
+    map_id = db_create_map(root_title)
+    atoms = [0]
+
+    def insert(node, parent_id):
+        title = (node.get("title") or "").strip()
+        if not title:
+            return
+        children = node.get("children") or []
+        if children:
+            nid = db_add_decomp_node(map_id, parent_id, title, is_atom=False)
+            for ch in children:
+                insert(ch, nid)
+        else:
+            tid = db_create_task(title)
+            db_add_decomp_node(map_id, parent_id, title, task_id=tid, is_atom=True)
+            atoms[0] += 1
+
+    children = tree.get("children") or []
+    if children:
+        for ch in children:
+            insert(ch, None)
+    else:
+        # плоский случай — сам корень как единственный атом
+        tid = db_create_task(root_title)
+        db_add_decomp_node(map_id, None, root_title, task_id=tid, is_atom=True)
+        atoms[0] += 1
+    return map_id, atoms[0]
+
+
+def render_decomposition(map_id):
+    """Текст дерева декомпозиции с прогрессом (✅/⬜ атомы, % у веток)."""
+    data = db_get_decomposition(map_id)
+    if not data:
+        return "Дерево не найдено, сэр."
+    by_parent = {}
+    for n in data["nodes"]:
+        by_parent.setdefault(n["parent_id"], []).append(n)
+
+    def atoms_under(nid):
+        done = total = 0
+        for ch in by_parent.get(nid, []):
+            if ch["is_atom"]:
+                total += 1
+                done += 1 if ch["done"] else 0
+            else:
+                d, t = atoms_under(ch["id"])
+                done += d
+                total += t
+        return done, total
+
+    lines = [f"🌳 *{data['title']}* (карта #{data['id']})"]
+
+    def walk(nid, depth):
+        for ch in by_parent.get(nid, []):
+            ind = "  " * depth
+            if ch["is_atom"]:
+                mark = "✅" if ch["done"] else "⬜"
+                lines.append(f"{ind}{mark} {ch['title']} (#{ch['task_id']})")
+            else:
+                d, t = atoms_under(ch["id"])
+                pct = int(d / t * 100) if t else 0
+                lines.append(f"{ind}📂 *{ch['title']}* — {pct}% ({d}/{t})")
+                walk(ch["id"], depth + 1)
+
+    walk(None, 0)
+    d, t = atoms_under(None)
+    pct = int(d / t * 100) if t else 0
+    lines.append(f"\n*Итого: {pct}% готово ({d}/{t} атомов)*")
+    return "\n".join(lines)
 
 
 def make_chart(title, chart_type, labels, values):
@@ -305,6 +404,29 @@ def process_message(messages, system):
                 "properties": {"goal_id": {"type": "string"}},
                 "required": ["goal_id"]
             }
+        },
+        {
+            "name": "decompose_task",
+            "description": "Разложить крупную задачу/цель в дерево до атомов (главные пункты → подпункты → атомы). Атомы автоматически становятся реальными задачами. Используй, когда сэр даёт большую задачу/цель или просит «разложи», «декомпозируй», «разбей на шаги/атомы».",
+            "input_schema": {
+                "type": "object",
+                "properties": {"text": {"type": "string", "description": "Формулировка крупной задачи/цели для разложения"}},
+                "required": ["text"]
+            }
+        },
+        {
+            "name": "list_decompositions",
+            "description": "Показать список деревьев декомпозиции (номер #id и название)",
+            "input_schema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "show_decomposition",
+            "description": "Показать дерево декомпозиции с прогрессом по номеру карты (#id из list_decompositions)",
+            "input_schema": {
+                "type": "object",
+                "properties": {"map_id": {"type": "string", "description": "Номер карты (#id)"}},
+                "required": ["map_id"]
+            }
         }
     ]
 
@@ -407,9 +529,17 @@ def process_message(messages, system):
                 elif block.name == "delete_goal":
                     status = db_delete_goal(inp["goal_id"])
                     result = f"Цель #{inp['goal_id']} удалена" if status == "deleted" else "Цель с таким номером не найдена"
+                elif block.name == "decompose_task":
+                    map_id, n = create_decomposition(inp["text"])
+                    result = f"Разложил на дерево (карта #{map_id}), создано атомов-задач: {n}.\n\n" + render_decomposition(map_id)
+                elif block.name == "list_decompositions":
+                    rows = db_list_decompositions()
+                    result = ("Деревья декомпозиции:\n" + "\n".join(f"- #{i} {t}" for i, t in rows)) if rows else "Пока нет деревьев декомпозиции, сэр."
+                elif block.name == "show_decomposition":
+                    result = render_decomposition(inp["map_id"])
             except Exception as e:
                 logger.error(f"Tool {block.name} error: {e}")
-                result = f"Ошибка при выполнении {block.name}: {e}. Если задача большая (много квартир/объектов), разбей её на несколько меньших шагов."
+                result = f"Ошибка при выполнении {block.name}: {e}. Если задача слишком большая, разбей её на несколько меньших шагов."
             tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
 
         messages = messages + [
