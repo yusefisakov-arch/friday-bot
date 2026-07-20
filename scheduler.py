@@ -123,6 +123,12 @@ async def send_monthly_planning(bot: Bot):
 
 
 async def scheduler(bot: Bot):
+    # Пауза всех авто-рассылок (утренний бриф, чек-ины, вечерний разбор, планирование,
+    # напоминания) на время перестройки бота. Включить обратно: убрать/сменить
+    # переменную SCHEDULER_ENABLED на Railway. Ответы на сообщения и формы работают как обычно.
+    if os.getenv("SCHEDULER_ENABLED", "true").strip().lower() in ("false", "0", "off", "no"):
+        logger.info("Планировщик отключён (SCHEDULER_ENABLED=false) — авто-рассылки на паузе.")
+        return
     while True:
         now = now_msk()
         today_str = now.strftime("%Y-%m-%d")
