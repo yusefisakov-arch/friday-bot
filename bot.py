@@ -10,7 +10,6 @@ from core import *
 from db import *
 from ai import (
     build_system, process_message, generate_mentor_briefing,
-    make_apartments_heatmap, make_apartments_table,
 )
 from webapp import (
     run_webapp_server, handle_webapp_data, normalize_deadline,
@@ -72,35 +71,6 @@ async def memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Пока ничего не запомнено, сэр.")
 
 
-async def send_apartments_image(update, context, kind):
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
-    builder = make_apartments_heatmap if kind == "heat" else make_apartments_table
-    path = await asyncio.to_thread(builder)
-    if not path:
-        await update.message.reply_text("Нет квартир для отображения, сэр.")
-        return
-    try:
-        with open(path, "rb") as f:
-            await update.message.reply_photo(photo=f)
-    finally:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-
-
-async def heatmap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
-        return
-    await send_apartments_image(update, context, "heat")
-
-
-async def table_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
-        return
-    await send_apartments_image(update, context, "table")
-
-
 async def appcmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
@@ -150,7 +120,7 @@ async def selfdestruct(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "⚠️ ВНИМАНИЕ, сэр.\n\n"
         "Это БЕЗВОЗВРАТНО сотрёт ВСЕ данные: задачи, цели, финансы, договорённости, "
-        "кассу квартир, справочник квартир, счётчики, историю — всё до нуля. "
+        "историю — всё до нуля. "
         "Восстановить будет нельзя.\n\n"
         f"Если действительно уверены — отправьте СЛЕДУЮЩИМ сообщением ровно эту фразу:\n\n{SELF_DESTRUCT_PHRASE}\n\n"
         "Любое другое сообщение отменит операцию."
@@ -295,14 +265,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(summary, reply_markup=MAIN_KEYBOARD)
         return
 
-    # --- Квартиры без мини-формы (если WEBAPP_URL не настроен) ---
-    if user_message == APARTMENT_BUTTON:
-        await update.message.reply_text(
-            "Опишите операцию текстом, сэр, например: \"запиши приход 700 лей аренды по Лев Толстой от квартиранта\". "
-            "Я разберусь сам."
-        )
-        return
-
     # --- Кнопки мониторинга ---
     if user_message == VIEW_TASKS_BUTTON:
         await reply_md(update.message, db_get_today_tasks())
@@ -318,18 +280,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_message == VIEW_FINANCE_BUTTON:
         await reply_md(update.message, db_get_finance())
-        return
-
-    if user_message == VIEW_APARTMENT_BALANCE_BUTTON:
-        await reply_md(update.message, db_get_apartment_balance())
-        return
-
-    if user_message == MAP_BUTTON:
-        await send_apartments_image(update, context, "heat")
-        return
-
-    if user_message.strip().lower() in ("таблица квартир", "таблица", "квартиры таблицей"):
-        await send_apartments_image(update, context, "table")
         return
 
     # Триаж пересланных сообщений (разгрузка от переписки)
@@ -445,8 +395,6 @@ async def post_init(application: Application):
             BotCommand("mentor", "Разбор дня и движение к целям (наставник)"),
             BotCommand("tasks", "Задачи на сегодня и просроченные"),
             BotCommand("alltasks", "Полный список задач"),
-            BotCommand("map", "Тепловая карта аренды (картинка)"),
-            BotCommand("table", "Таблица квартир (картинка)"),
             BotCommand("finance", "Финансы и итоги за месяц"),
             BotCommand("decisions", "Открытые договорённости"),
             BotCommand("memory", "Что бот о вас запомнил"),
@@ -474,8 +422,6 @@ def main():
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("tasks", tasks))
     app.add_handler(CommandHandler("alltasks", alltasks))
-    app.add_handler(CommandHandler("map", heatmap_cmd))
-    app.add_handler(CommandHandler("table", table_cmd))
     app.add_handler(CommandHandler("decisions", decisions_cmd))
     app.add_handler(CommandHandler("finance", finance_cmd))
     app.add_handler(CommandHandler("memory", memory))

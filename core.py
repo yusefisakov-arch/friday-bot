@@ -70,11 +70,6 @@ if WEBAPP_URL:
             [KeyboardButton(QUICK_TASK_BUTTON, web_app=WebAppInfo(url=webapp_url("form"))), VIEW_TASKS_BUTTON],
             [KeyboardButton(QUICK_FINANCE_BUTTON, web_app=WebAppInfo(url=webapp_url("finance"))), VIEW_FINANCE_BUTTON],
             [KeyboardButton(QUICK_DECISION_BUTTON, web_app=WebAppInfo(url=webapp_url("decisions"))), VIEW_DECISIONS_BUTTON],
-            [KeyboardButton(APARTMENT_BUTTON, web_app=WebAppInfo(url=webapp_url("apartments"))), VIEW_APARTMENT_BALANCE_BUTTON],
-            [KeyboardButton(MOVE_IN_BUTTON, web_app=WebAppInfo(url=webapp_url("move_in"))),
-             KeyboardButton(MOVE_OUT_BUTTON, web_app=WebAppInfo(url=webapp_url("move_out")))],
-            [KeyboardButton(UTILITIES_BUTTON, web_app=WebAppInfo(url=webapp_url("utilities"))),
-             KeyboardButton(MAP_BUTTON, web_app=WebAppInfo(url=webapp_url("board")))],
         ],
         resize_keyboard=True,
     )
@@ -84,9 +79,6 @@ else:
             [QUICK_TASK_BUTTON, VIEW_TASKS_BUTTON],
             [QUICK_FINANCE_BUTTON, VIEW_FINANCE_BUTTON],
             [QUICK_DECISION_BUTTON, VIEW_DECISIONS_BUTTON],
-            [APARTMENT_BUTTON, VIEW_APARTMENT_BALANCE_BUTTON],
-            [MOVE_IN_BUTTON, MOVE_OUT_BUTTON],
-            [UTILITIES_BUTTON, MAP_BUTTON],
         ],
         resize_keyboard=True,
     )
