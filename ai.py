@@ -15,6 +15,10 @@ from db import *
 logger = logging.getLogger(__name__)
 anthropic = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
+# Модели по уровням стоимости (баланс цена/ум):
+MODEL_FAST = "claude-haiku-4-5"     # обычный чат, простые действия — дефолт (дёшево)
+MODEL_SMART = "claude-sonnet-4-6"   # наставник, планирование, декомпозиция (редко, дорого)
+
 
 def build_system_static():
     staff_lines = ", ".join(f"{name} ({role})" for name, role in STAFF.items())
@@ -77,7 +81,7 @@ def generate_mentor_briefing():
                 "Сформируй вечерний разбор-наставничество по этим данным.")
     system = build_system_static() + "\n\n" + MENTOR_INSTRUCTIONS + (HARD_MODE_INSTRUCTION if hard_mode_on() else "")
     response = anthropic.messages.create(
-        model="claude-sonnet-4-6",
+        model=MODEL_SMART,
         max_tokens=1500,
         system=system,
         messages=[{"role": "user", "content": user_msg}],
@@ -313,7 +317,7 @@ def process_message(messages, system):
     chart_path = None
     for _ in range(5):
         response = anthropic.messages.create(
-            model="claude-sonnet-4-6",
+            model=MODEL_FAST,
             max_tokens=4096,
             system=system,
             messages=messages,
