@@ -24,7 +24,7 @@ if not ALLOWED_USER_ID:
 DATABASE_URL = os.environ["DATABASE_URL"]
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")  # для распознавания голоса (Whisper через Groq)
 MSK = ZoneInfo("Europe/Moscow")
-HISTORY_WINDOW = 20  # сколько последних сообщений держим в оперативной памяти диалога
+HISTORY_WINDOW = 12  # сколько последних сообщений держим в оперативной памяти диалога (меньше = дешевле контекст)
 HISTORY_KEEP = 300   # сколько строк истории храним в базе (старше — чистим)
 
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "").rstrip("/")

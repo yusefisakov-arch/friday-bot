@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import logging
+import re
 import aiohttp
 from telegram import Update, Bot, ReplyKeyboardRemove, BotCommand
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
@@ -125,6 +126,36 @@ async def selfdestruct(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Если действительно уверены — отправьте СЛЕДУЮЩИМ сообщением ровно эту фразу:\n\n{SELF_DESTRUCT_PHRASE}\n\n"
         "Любое другое сообщение отменит операцию."
     )
+
+
+# --- Быстрые команды правилами (без обращения к нейросети — бесплатно и мгновенно) ---
+_QC_CLOSE = re.compile(r'^(?:закрой|закрыть|готово|выполнено|сделано|сделал[аи]?|done)\s*#?\s*(\d+)\s*$', re.I)
+_QC_DELETE = re.compile(r'^(?:удали|удалить|delete)\s*#?\s*(\d+)\s*$', re.I)
+_QC_SPEND = re.compile(r'^(?:потрать|потратил[аи]?|трата|расход)\s+(\d+(?:[.,]\d+)?)\s+(.+)$', re.I)
+
+
+def try_quick_command(text):
+    """Детерминированные короткие команды мимо ИИ. Возвращает текст-ответ или None."""
+    t = (text or "").strip()
+    m = _QC_CLOSE.match(t)
+    if m:
+        status, items = db_close_task(m.group(1))
+        if status == "closed":
+            return f"✅ Задача закрыта: {items[0]}"
+        if status == "ambiguous":
+            return "Нашлось несколько подходящих — уточните номер, сэр:\n" + "\n".join(f"- {n}" for n in items)
+        return f"Задача #{m.group(1)} не найдена, сэр."
+    m = _QC_DELETE.match(t)
+    if m:
+        status, name = db_delete_task(m.group(1))
+        return f"🗑 Задача удалена: {name}" if status == "deleted" else f"Задача #{m.group(1)} не найдена, сэр."
+    m = _QC_SPEND.match(t)
+    if m:
+        amount = float(m.group(1).replace(",", "."))
+        category = re.sub(r'^(?:на|за)\s+', '', m.group(2).strip(), flags=re.I).strip() or "Прочее"
+        db_create_finance(amount, category, "расход", None, "MDL")
+        return f"💸 Записал расход: {category} −{amount:g} MDL"
+    return None
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -281,6 +312,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_message == VIEW_FINANCE_BUTTON:
         await reply_md(update.message, db_get_finance())
         return
+
+    # Быстрые команды правилами (без нейросети) — только для обычного текста, не для пересланного
+    if not forward_sender(update.message):
+        quick = try_quick_command(user_message)
+        if quick is not None:
+            await reply_md(update.message, quick)
+            return
 
     # Триаж пересланных сообщений (разгрузка от переписки)
     sender = forward_sender(update.message)
