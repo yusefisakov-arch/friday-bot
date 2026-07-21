@@ -185,6 +185,16 @@ def init_db():
                 c.execute(f"ALTER TABLE map_nodes ADD COLUMN IF NOT EXISTS {_col} {_type}")
             except Exception:
                 pass
+        # Почтовые ящики: пароль приложения хранится зашифрованным
+        c.execute('''CREATE TABLE IF NOT EXISTS mail_accounts (
+            id SERIAL PRIMARY KEY,
+            label TEXT,
+            email TEXT UNIQUE NOT NULL,
+            secret TEXT NOT NULL,
+            noisy BOOLEAN DEFAULT FALSE,
+            active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
         c.execute('''CREATE TABLE IF NOT EXISTS apartment_meters (
             id SERIAL PRIMARY KEY,
             apartment_id INTEGER REFERENCES apartments(id),
@@ -1169,6 +1179,53 @@ def db_list_decompositions(limit=20):
         c = conn.cursor()
         c.execute("SELECT id, title FROM maps ORDER BY created_at DESC LIMIT %s", (limit,))
         return c.fetchall()
+
+
+def db_mail_list(include_secret=False):
+    """Ящики почты. Секрет отдаём только внутреннему коду, не в веб-форму."""
+    cols = "id, label, email, secret, noisy, active" if include_secret else "id, label, email, noisy, active"
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute(f"SELECT {cols} FROM mail_accounts ORDER BY id")
+        rows = c.fetchall()
+    out = []
+    for r in rows:
+        if include_secret:
+            out.append({"id": r[0], "label": r[1], "email": r[2], "secret": r[3],
+                        "noisy": bool(r[4]), "active": bool(r[5])})
+        else:
+            out.append({"id": r[0], "label": r[1], "email": r[2],
+                        "noisy": bool(r[3]), "active": bool(r[4])})
+    return out
+
+
+def db_mail_save(label, email, secret, noisy=False, active=True):
+    """Добавить/обновить ящик. Пустой secret — оставить прежний пароль."""
+    with db_conn() as conn:
+        c = conn.cursor()
+        if secret:
+            c.execute(
+                """INSERT INTO mail_accounts (label, email, secret, noisy, active)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT (email) DO UPDATE SET
+                     label=EXCLUDED.label, secret=EXCLUDED.secret,
+                     noisy=EXCLUDED.noisy, active=EXCLUDED.active
+                   RETURNING id""",
+                (label, email, secret, noisy, active))
+        else:
+            c.execute(
+                """UPDATE mail_accounts SET label=%s, noisy=%s, active=%s
+                   WHERE email=%s RETURNING id""",
+                (label, noisy, active, email))
+        row = c.fetchone()
+        return row[0] if row else None
+
+
+def db_mail_delete(account_id):
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM mail_accounts WHERE id=%s", (_task_id_from(account_id),))
+        return c.rowcount > 0
 
 
 def db_decomposition_overview(limit=50):

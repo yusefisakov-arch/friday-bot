@@ -9,13 +9,42 @@
 import os
 import re
 import json
+import base64
+import hashlib
 import email
 import imaplib
 import logging
 from email.header import decode_header, make_header
 from datetime import datetime, timedelta
 
+from db import db_mail_list
+
 logger = logging.getLogger(__name__)
+
+# Пароли приложений шифруются ключом, производным от токена бота (он и так секретный).
+_FERNET = None
+
+
+def _fernet():
+    global _FERNET
+    if _FERNET is None:
+        from cryptography.fernet import Fernet
+        token = os.environ.get("TELEGRAM_TOKEN", "")
+        key = base64.urlsafe_b64encode(hashlib.sha256(("mail-enc:" + token).encode()).digest())
+        _FERNET = Fernet(key)
+    return _FERNET
+
+
+def encrypt_secret(plain):
+    return _fernet().encrypt(plain.encode()).decode()
+
+
+def decrypt_secret(blob):
+    try:
+        return _fernet().decrypt(blob.encode()).decode()
+    except Exception as e:
+        logger.error(f"Не расшифровать пароль ящика: {e}")
+        return ""
 
 IMAP_HOSTS = {
     "gmail.com": "imap.gmail.com",
@@ -52,6 +81,23 @@ IMPORTANT_RE = re.compile(
 
 
 def _load_accounts():
+    """Ящики: сначала из базы (кнопка «Почта»), иначе из переменной окружения."""
+    try:
+        rows = db_mail_list(include_secret=True)
+    except Exception as e:
+        logger.error(f"Ящики из базы: {e}")
+        rows = []
+    from_db = []
+    for r in rows:
+        if not r.get("active"):
+            continue
+        secret = decrypt_secret(r["secret"])
+        if secret:
+            from_db.append({"label": r.get("label") or r["email"], "user": r["email"],
+                            "pass": secret, "noisy": r.get("noisy")})
+    if from_db:
+        return from_db
+
     raw = os.environ.get("MAIL_ACCOUNTS", "").strip()
     if not raw:
         return []
@@ -160,6 +206,33 @@ def fetch_account(account, hours=24, limit=40):
             except Exception:
                 pass
     return items
+
+
+def test_login(address, password):
+    """Проверить вход в ящик. Возвращает (ок, понятное человеку сообщение)."""
+    host = _host_for(address)
+    conn = None
+    try:
+        conn = imaplib.IMAP4_SSL(host, 993)
+        conn.login(address, password)
+        conn.select("INBOX", readonly=True)
+        typ, data = conn.search(None, "ALL")
+        n = len((data[0] or b"").split()) if typ == "OK" else 0
+        return True, f"Подключено ✓ Писем в папке: {n}"
+    except imaplib.IMAP4.error as e:
+        msg = str(e)
+        if "Invalid credentials" in msg or "AUTHENTICATIONFAILED" in msg:
+            return False, ("Не принял пароль. Нужен именно «пароль приложения» "
+                           "(16 символов из myaccount.google.com/apppasswords), а не обычный пароль.")
+        return False, f"Почта отказала: {msg[:150]}"
+    except Exception as e:
+        return False, f"Не удалось подключиться к {host}: {str(e)[:150]}"
+    finally:
+        if conn is not None:
+            try:
+                conn.logout()
+            except Exception:
+                pass
 
 
 def fetch_all(hours=24):

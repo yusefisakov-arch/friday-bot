@@ -13,6 +13,7 @@ from telegram.ext import ContextTypes
 
 from core import *
 from db import *
+from mail import test_login, encrypt_secret
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +186,51 @@ async def api_node_delete(request):
     return web.json_response({"ok": True})
 
 
+# ===== Почта: подключение ящиков через форму =====
+
+async def api_mail_list(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    return web.json_response(db_mail_list())  # без паролей
+
+
+async def api_mail_save(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    address = (data.get("email") or "").strip()
+    password = (data.get("password") or "").strip()
+    if not address or "@" not in address:
+        return web.json_response({"ok": False, "message": "Укажите адрес ящика."})
+    if password:
+        ok, message = test_login(address, password)
+        if not ok:
+            return web.json_response({"ok": False, "message": message})
+    db_mail_save(
+        (data.get("label") or "").strip() or address.split("@")[0],
+        address,
+        encrypt_secret(password) if password else None,
+        bool(data.get("noisy")),
+        bool(data.get("active", True)),
+    )
+    return web.json_response({"ok": True, "message": "Ящик подключён ✓" if password else "Настройки сохранены ✓"})
+
+
+async def api_mail_test(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    ok, message = test_login((data.get("email") or "").strip(), (data.get("password") or "").strip())
+    return web.json_response({"ok": ok, "message": message})
+
+
+async def api_mail_delete(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    return web.json_response({"ok": db_mail_delete(data.get("id"))})
+
+
 # ===== Декомпозиция (визуальный модуль «Карты») =====
 
 async def api_decompositions(request):
@@ -348,6 +394,7 @@ async def run_webapp_server():
     app.router.add_get("/utilities", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "utilities.html")))
     app.router.add_get("/board", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "board.html")))
     app.router.add_get("/maps", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "maps.html")))
+    app.router.add_get("/mail", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "mail.html")))
     app.router.add_get("/app", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "app.html")))
     app.router.add_get("/manifest.webmanifest", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "manifest.webmanifest")))
     app.router.add_get("/sw.js", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "sw.js")))
@@ -364,6 +411,10 @@ async def run_webapp_server():
     app.router.add_post("/api/maps/rename", api_maps_rename)
     app.router.add_post("/api/maps/delete", api_maps_delete)
     app.router.add_get("/api/map", api_map)
+    app.router.add_get("/api/mail/list", api_mail_list)
+    app.router.add_post("/api/mail/save", api_mail_save)
+    app.router.add_post("/api/mail/test", api_mail_test)
+    app.router.add_post("/api/mail/delete", api_mail_delete)
     app.router.add_get("/api/decompositions", api_decompositions)
     app.router.add_get("/api/decomposition", api_decomposition)
     app.router.add_post("/api/decomposition/toggle", api_decomposition_toggle)

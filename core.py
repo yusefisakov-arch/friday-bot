@@ -57,6 +57,7 @@ MOVE_OUT_BUTTON = "🚪 Выселение"
 UTILITIES_BUTTON = "⚡ Коммуналка"
 MAP_BUTTON = "🔥 Карта аренды"
 MAPS_BUTTON = "🧠 Карты"
+MAIL_BUTTON = "📬 Почта"
 
 DEADLINE_KEYBOARD = ReplyKeyboardMarkup([["Сегодня", "Завтра"], ["Нет"]], resize_keyboard=True)
 PRIORITY_KEYBOARD = ReplyKeyboardMarkup([["Высокий", "Средний", "Низкий"], ["Нет"]], resize_keyboard=True)
@@ -71,7 +72,8 @@ if WEBAPP_URL:
             [KeyboardButton(QUICK_TASK_BUTTON, web_app=WebAppInfo(url=webapp_url("form"))), VIEW_TASKS_BUTTON],
             [KeyboardButton(QUICK_FINANCE_BUTTON, web_app=WebAppInfo(url=webapp_url("finance"))), VIEW_FINANCE_BUTTON],
             [KeyboardButton(QUICK_DECISION_BUTTON, web_app=WebAppInfo(url=webapp_url("decisions"))), VIEW_DECISIONS_BUTTON],
-            [KeyboardButton(MAPS_BUTTON, web_app=WebAppInfo(url=webapp_url("maps")))],
+            [KeyboardButton(MAPS_BUTTON, web_app=WebAppInfo(url=webapp_url("maps"))),
+             KeyboardButton(MAIL_BUTTON, web_app=WebAppInfo(url=webapp_url("mail")))],
         ],
         resize_keyboard=True,
     )
