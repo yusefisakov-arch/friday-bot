@@ -368,11 +368,14 @@ async def run_text_turn(update: Update, context: ContextTypes.DEFAULT_TYPE, user
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         # Тяжёлый синхронный вызов ИИ — в отдельном потоке, чтобы не блокировать
         # напоминания, веб-формы и другие сообщения.
-        assistant_message, chart_path = await asyncio.to_thread(
+        assistant_message, chart_path, direct_blocks = await asyncio.to_thread(
             process_message, list(conversation_history), system
         )
         conversation_history.append({"role": "assistant", "content": assistant_message})
         db_save_message("assistant", assistant_message)
+        # Дословные блоки (дерево декомпозиции и т.п.) — до ответа модели, чтобы сэр видел их первыми.
+        for blk in direct_blocks:
+            await reply_md(update.message, blk)
         await reply_md(update.message, assistant_message)
         if chart_path:
             try:

@@ -185,6 +185,31 @@ async def api_node_delete(request):
     return web.json_response({"ok": True})
 
 
+# ===== Декомпозиция (визуальный модуль «Карты») =====
+
+async def api_decompositions(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    return web.json_response(db_decomposition_overview())
+
+
+async def api_decomposition(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    tree = db_get_decomposition(request.query.get("id"))
+    if not tree:
+        return web.json_response({"error": "not_found"}, status=404)
+    return web.json_response(tree)
+
+
+async def api_decomposition_toggle(request):
+    if not is_webapp_request_allowed(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    ok, name = db_toggle_atom(data.get("node_id"), bool(data.get("done")))
+    return web.json_response({"ok": ok, "name": name})
+
+
 async def api_overview(request):
     if not is_webapp_request_allowed(request):
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -322,6 +347,7 @@ async def run_webapp_server():
     app.router.add_get("/move_out", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "move_out.html")))
     app.router.add_get("/utilities", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "utilities.html")))
     app.router.add_get("/board", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "board.html")))
+    app.router.add_get("/maps", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "maps.html")))
     app.router.add_get("/app", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "app.html")))
     app.router.add_get("/manifest.webmanifest", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "manifest.webmanifest")))
     app.router.add_get("/sw.js", lambda r: web.FileResponse(os.path.join(WEBAPP_DIR, "sw.js")))
@@ -338,6 +364,9 @@ async def run_webapp_server():
     app.router.add_post("/api/maps/rename", api_maps_rename)
     app.router.add_post("/api/maps/delete", api_maps_delete)
     app.router.add_get("/api/map", api_map)
+    app.router.add_get("/api/decompositions", api_decompositions)
+    app.router.add_get("/api/decomposition", api_decomposition)
+    app.router.add_post("/api/decomposition/toggle", api_decomposition_toggle)
     app.router.add_post("/api/map/node/add", api_node_add)
     app.router.add_post("/api/map/node/update", api_node_update)
     app.router.add_post("/api/map/node/delete", api_node_delete)

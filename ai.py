@@ -185,7 +185,28 @@ def render_decomposition(map_id):
     d, t = atoms_under(None)
     pct = int(d / t * 100) if t else 0
     lines.append(f"\n*Итого: {pct}% готово ({d}/{t} атомов)*")
+
+    nxt = db_next_atoms(data["id"], limit=3)
+    if nxt:
+        lines.append("\n*Делать сейчас:*")
+        for i, (title, task_id) in enumerate(nxt):
+            lines.append(f"{'👉' if i == 0 else '  ·'} {title} (#{task_id})")
+        lines.append(f"\nЗакрыть: «закрой #{nxt[0][1]}» · Всё дерево: кнопка «🧠 Карты»")
+    elif t:
+        lines.append("\n🎉 Все атомы закрыты, сэр.")
     return "\n".join(lines)
+
+
+def _next_step_hint(map_id):
+    """Короткая подсказка для модели: какой атом брать следующим."""
+    try:
+        rows = db_next_atoms(map_id, limit=1)
+    except Exception:
+        return "предложи сэру начать с первого атома."
+    if not rows:
+        return "все атомы закрыты — поздравь сэра."
+    title, task_id = rows[0]
+    return f"скажи сэру начинать с атома «{title}» (задача #{task_id}); закрыть его можно словами «закрой #{task_id}»."
 
 
 def make_chart(title, chart_type, labels, values):
@@ -437,6 +458,8 @@ def process_message(messages, system):
     messages = list(messages)
     text = ""
     chart_path = None
+    # Блоки, которые уходят сэру дословно отдельными сообщениями (модель их не пересказывает).
+    direct_blocks = []
     for _ in range(5):
         response = anthropic.messages.create(
             model=MODEL_FAST,
@@ -531,12 +554,18 @@ def process_message(messages, system):
                     result = f"Цель #{inp['goal_id']} удалена" if status == "deleted" else "Цель с таким номером не найдена"
                 elif block.name == "decompose_task":
                     map_id, n = create_decomposition(inp["text"])
-                    result = f"Разложил на дерево (карта #{map_id}), создано атомов-задач: {n}.\n\n" + render_decomposition(map_id)
+                    direct_blocks.append(render_decomposition(map_id))
+                    result = (f"Дерево построено (карта #{map_id}), атомов-задач: {n}. "
+                              f"Оно уже отправлено сэру отдельным сообщением — НЕ пересказывай его. "
+                              f"Ответь одной-двумя фразами: {_next_step_hint(map_id)} "
+                              f"и напомни, что дерево целиком — в кнопке «🧠 Карты».")
                 elif block.name == "list_decompositions":
                     rows = db_list_decompositions()
                     result = ("Деревья декомпозиции:\n" + "\n".join(f"- #{i} {t}" for i, t in rows)) if rows else "Пока нет деревьев декомпозиции, сэр."
                 elif block.name == "show_decomposition":
-                    result = render_decomposition(inp["map_id"])
+                    direct_blocks.append(render_decomposition(inp["map_id"]))
+                    result = ("Дерево отправлено сэру отдельным сообщением — НЕ пересказывай его. "
+                              f"Ответь коротко: {_next_step_hint(inp['map_id'])}")
             except Exception as e:
                 logger.error(f"Tool {block.name} error: {e}")
                 result = f"Ошибка при выполнении {block.name}: {e}. Если задача слишком большая, разбей её на несколько меньших шагов."
@@ -547,5 +576,5 @@ def process_message(messages, system):
             {"role": "user", "content": tool_results}
         ]
 
-    return (text or "Готово, сэр."), chart_path
+    return (text or "Готово, сэр."), chart_path, direct_blocks
 

@@ -1171,6 +1171,61 @@ def db_list_decompositions(limit=20):
         return c.fetchall()
 
 
+def db_decomposition_overview(limit=50):
+    """Карты с прогрессом по атомам — для плиток визуального модуля."""
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute(
+            """SELECT m.id, m.title,
+                      count(n.id) FILTER (WHERE COALESCE(n.is_atom, FALSE)) AS atoms,
+                      count(n.id) FILTER (WHERE COALESCE(n.is_atom, FALSE) AND t.status='Готово') AS done
+               FROM maps m
+               LEFT JOIN map_nodes n ON n.map_id = m.id
+               LEFT JOIN tasks t ON t.id = n.task_id
+               GROUP BY m.id, m.title ORDER BY m.created_at DESC LIMIT %s""",
+            (limit,),
+        )
+        return [{"id": i, "title": t, "atoms": a, "done": d} for i, t, a, d in c.fetchall()]
+
+
+def db_toggle_atom(node_id, done):
+    """Отметить/снять атом. Возвращает (ok, название задачи)."""
+    nid = _task_id_from(node_id)
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT task_id FROM map_nodes WHERE id=%s", (nid,))
+        row = c.fetchone()
+        if not row or not row[0]:
+            return False, None
+        tid = row[0]
+        c.execute("SELECT name FROM tasks WHERE id=%s", (tid,))
+        trow = c.fetchone()
+        if not trow:
+            return False, None
+        if done:
+            c.execute("UPDATE tasks SET status='Готово', closed_at=%s WHERE id=%s",
+                      (now_msk().replace(tzinfo=None), tid))
+        else:
+            c.execute("UPDATE tasks SET status='Открыта', closed_at=NULL WHERE id=%s", (tid,))
+        return True, trow[0]
+
+
+def db_next_atoms(map_id, limit=3):
+    """Ближайшие незакрытые атомы карты — что делать прямо сейчас."""
+    mid = _task_id_from(map_id)
+    with db_conn() as conn:
+        c = conn.cursor()
+        c.execute(
+            """SELECT n.title, n.task_id
+               FROM map_nodes n LEFT JOIN tasks t ON t.id = n.task_id
+               WHERE n.map_id=%s AND COALESCE(n.is_atom, FALSE)
+                     AND (t.status IS NULL OR t.status != 'Готово')
+               ORDER BY n.created_at LIMIT %s""",
+            (mid, limit),
+        )
+        return c.fetchall()
+
+
 def db_get_overview():
     """Сводка для хаба brain map (живые цифры по доменам)."""
     today = today_msk()
