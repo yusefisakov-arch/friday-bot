@@ -36,6 +36,10 @@
            border-radius: 10px; margin-top: 12px; cursor: pointer;
            background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff); }
   button.ghost { background: transparent; color: var(--tg-theme-link-color, #2481cc); }
+  button.google { background: #fff; color: #3c4043; border: 1px solid #dadce0; margin-top: 14px;
+                  box-shadow: 0 1px 2px rgba(60,64,67,.2); }
+  .or { text-align: center; font-size: 11px; color: var(--tg-theme-hint-color, #888);
+        margin: 16px 0 -4px; text-transform: uppercase; letter-spacing: .04em; }
   button:disabled { opacity: .5; }
 
   #msg { margin-top: 12px; padding: 11px 12px; border-radius: 10px; font-size: 13px; line-height: 1.45; display: none; }
@@ -47,13 +51,12 @@
 </head>
 <body>
   <h2>📬 Почта</h2>
-  <div class="legend">
-    Вводи <b>пароль приложения</b>, а не обычный пароль от почты.
-    Для Gmail он создаётся тут: <a href="https://myaccount.google.com/apppasswords" target="_blank">myaccount.google.com/apppasswords</a> —
-    16 символов. Пароль хранится в зашифрованном виде, письма бот только читает.
-  </div>
+  <div class="legend">Подключи ящик через Google — паролей вводить не нужно, доступ только на чтение.</div>
 
   <div id="list" class="empty">Загрузка…</div>
+
+  <button id="google" class="google">Подключить Gmail через Google</button>
+  <div class="or">или вручную, паролем приложения</div>
 
   <form id="f" onsubmit="return false;">
     <label>Адрес почты</label>
@@ -107,7 +110,7 @@ async function load() {
         <div class="dot ${a.active ? '' : 'off'}"></div>
         <div class="info">
           <div class="em">${a.email}</div>
-          <div class="sub">${a.label || ''}${a.noisy ? ' · только важное' : ''}</div>
+          <div class="sub">${a.auth_type === 'oauth' ? 'через Google' : 'пароль приложения'}${a.label ? ' · ' + a.label : ''}${a.noisy ? ' · только важное' : ''}</div>
         </div>
         <div class="del" data-id="${a.id}">✕</div>
       </div>`).join('');
@@ -140,6 +143,11 @@ async function send(url, okThen) {
   } catch (e) { msg('Ошибка сети: ' + e, false); }
   $('save').disabled = $('test').disabled = false;
 }
+
+$('google').onclick = () => {
+  const k = new URLSearchParams(location.search).get('k');
+  location.href = '/oauth/google/start' + (k ? '?k=' + encodeURIComponent(k) : '');
+};
 
 $('save').onclick = () => send('/api/mail/save', true);
 $('test').onclick = () => send('/api/mail/test', false);

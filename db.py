@@ -195,6 +195,10 @@ def init_db():
             active BOOLEAN DEFAULT TRUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
+        try:
+            c.execute("ALTER TABLE mail_accounts ADD COLUMN IF NOT EXISTS auth_type TEXT DEFAULT 'password'")
+        except Exception:
+            pass
         c.execute('''CREATE TABLE IF NOT EXISTS apartment_meters (
             id SERIAL PRIMARY KEY,
             apartment_id INTEGER REFERENCES apartments(id),
@@ -1183,7 +1187,8 @@ def db_list_decompositions(limit=20):
 
 def db_mail_list(include_secret=False):
     """Ящики почты. Секрет отдаём только внутреннему коду, не в веб-форму."""
-    cols = "id, label, email, secret, noisy, active" if include_secret else "id, label, email, noisy, active"
+    cols = ("id, label, email, secret, noisy, active, auth_type" if include_secret
+            else "id, label, email, noisy, active, auth_type")
     with db_conn() as conn:
         c = conn.cursor()
         c.execute(f"SELECT {cols} FROM mail_accounts ORDER BY id")
@@ -1192,26 +1197,27 @@ def db_mail_list(include_secret=False):
     for r in rows:
         if include_secret:
             out.append({"id": r[0], "label": r[1], "email": r[2], "secret": r[3],
-                        "noisy": bool(r[4]), "active": bool(r[5])})
+                        "noisy": bool(r[4]), "active": bool(r[5]), "auth_type": r[6]})
         else:
             out.append({"id": r[0], "label": r[1], "email": r[2],
-                        "noisy": bool(r[3]), "active": bool(r[4])})
+                        "noisy": bool(r[3]), "active": bool(r[4]), "auth_type": r[5]})
     return out
 
 
-def db_mail_save(label, email, secret, noisy=False, active=True):
-    """Добавить/обновить ящик. Пустой secret — оставить прежний пароль."""
+def db_mail_save(label, email, secret, noisy=False, active=True, auth_type="password"):
+    """Добавить/обновить ящик. Пустой secret — оставить прежний пароль/токен."""
     with db_conn() as conn:
         c = conn.cursor()
         if secret:
             c.execute(
-                """INSERT INTO mail_accounts (label, email, secret, noisy, active)
-                   VALUES (%s, %s, %s, %s, %s)
+                """INSERT INTO mail_accounts (label, email, secret, noisy, active, auth_type)
+                   VALUES (%s, %s, %s, %s, %s, %s)
                    ON CONFLICT (email) DO UPDATE SET
                      label=EXCLUDED.label, secret=EXCLUDED.secret,
-                     noisy=EXCLUDED.noisy, active=EXCLUDED.active
+                     noisy=EXCLUDED.noisy, active=EXCLUDED.active,
+                     auth_type=EXCLUDED.auth_type
                    RETURNING id""",
-                (label, email, secret, noisy, active))
+                (label, email, secret, noisy, active, auth_type))
         else:
             c.execute(
                 """UPDATE mail_accounts SET label=%s, noisy=%s, active=%s

@@ -94,7 +94,8 @@ def _load_accounts():
         secret = decrypt_secret(r["secret"])
         if secret:
             from_db.append({"label": r.get("label") or r["email"], "user": r["email"],
-                            "pass": secret, "noisy": r.get("noisy")})
+                            "pass": secret, "noisy": r.get("noisy"),
+                            "auth": r.get("auth_type") or "password"})
     if from_db:
         return from_db
 
@@ -161,6 +162,114 @@ def _is_noise(sender, subject, snippet, noisy_box):
     return False
 
 
+# ===== Подключение через Google без паролей (OAuth, только чтение) =====
+
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
+GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+
+
+def google_oauth_ready():
+    return bool(os.environ.get("GOOGLE_CLIENT_ID") and os.environ.get("GOOGLE_CLIENT_SECRET"))
+
+
+def _post_form(url, fields):
+    import urllib.request
+    import urllib.parse
+    data = urllib.parse.urlencode(fields).encode()
+    req = urllib.request.Request(url, data=data, method="POST")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode())
+
+
+def _api_get(url, access_token):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {access_token}"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode())
+
+
+def oauth_authorize_url(redirect_uri, state):
+    """Ссылка на окно «Разрешить» у Google."""
+    import urllib.parse
+    params = {
+        "client_id": os.environ["GOOGLE_CLIENT_ID"],
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": GMAIL_SCOPE,
+        "access_type": "offline",      # чтобы дали refresh_token
+        "prompt": "consent",           # иначе при повторе refresh_token не вернётся
+        "state": state,
+    }
+    return GOOGLE_AUTH_URL + "?" + urllib.parse.urlencode(params)
+
+
+def oauth_exchange_code(code, redirect_uri):
+    """Код из окна Google → refresh_token + адрес ящика."""
+    tokens = _post_form(GOOGLE_TOKEN_URL, {
+        "code": code,
+        "client_id": os.environ["GOOGLE_CLIENT_ID"],
+        "client_secret": os.environ["GOOGLE_CLIENT_SECRET"],
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    })
+    refresh = tokens.get("refresh_token")
+    access = tokens.get("access_token")
+    if not refresh:
+        raise RuntimeError("Google не выдал refresh_token — отключи и подключи ящик заново.")
+    address = _api_get(f"{GMAIL_API}/profile", access).get("emailAddress", "")
+    return refresh, address
+
+
+def oauth_access_token(refresh_token):
+    return _post_form(GOOGLE_TOKEN_URL, {
+        "refresh_token": refresh_token,
+        "client_id": os.environ["GOOGLE_CLIENT_ID"],
+        "client_secret": os.environ["GOOGLE_CLIENT_SECRET"],
+        "grant_type": "refresh_token",
+    })["access_token"]
+
+
+def fetch_account_oauth(account, hours=24, limit=40):
+    """Свежие письма через Gmail API. Права — только чтение."""
+    user = account["user"]
+    try:
+        access = oauth_access_token(account["pass"])
+        days = max(1, round(hours / 24))
+        listing = _api_get(
+            f"{GMAIL_API}/messages?q=in:inbox+newer_than:{days}d&maxResults={limit}", access)
+        items = []
+        for ref in listing.get("messages", []):
+            raw = _api_get(f"{GMAIL_API}/messages/{ref['id']}?format=raw", access).get("raw", "")
+            if not raw:
+                continue
+            msg = email.message_from_bytes(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+            item = _item_from_msg(msg, account)
+            if item:
+                items.append(item)
+        return items
+    except Exception as e:
+        logger.error(f"Gmail API {user}: {e}")
+        return [{"box": account.get("label") or user, "error": str(e)[:200]}]
+
+
+def _item_from_msg(msg, account):
+    """Письмо → короткая карточка. None, если это шум."""
+    sender = _decode(msg.get("From"))
+    subject = _decode(msg.get("Subject"))
+    snippet = _body_snippet(msg)
+    if _is_noise(sender, subject, snippet, account.get("noisy")):
+        return None
+    return {
+        "box": account.get("label") or account["user"],
+        "from": sender[:120],
+        "subject": subject[:200],
+        "snippet": snippet,
+        "date": _decode(msg.get("Date"))[:40],
+    }
+
+
 def fetch_account(account, hours=24, limit=40):
     """Свежие письма одного ящика. Возвращает список словарей (уже без явной рутины)."""
     user = account["user"]
@@ -180,19 +289,9 @@ def fetch_account(account, hours=24, limit=40):
             typ, msg_data = conn.fetch(num, "(BODY.PEEK[])")
             if typ != "OK" or not msg_data or not msg_data[0]:
                 continue
-            msg = email.message_from_bytes(msg_data[0][1])
-            sender = _decode(msg.get("From"))
-            subject = _decode(msg.get("Subject"))
-            snippet = _body_snippet(msg)
-            if _is_noise(sender, subject, snippet, account.get("noisy")):
-                continue
-            items.append({
-                "box": account.get("label") or user,
-                "from": sender[:120],
-                "subject": subject[:200],
-                "snippet": snippet,
-                "date": _decode(msg.get("Date"))[:40],
-            })
+            item = _item_from_msg(email.message_from_bytes(msg_data[0][1]), account)
+            if item:
+                items.append(item)
     except imaplib.IMAP4.error as e:
         logger.error(f"IMAP {user}: {e}")
         return [{"box": account.get("label") or user, "error": f"не удалось войти: {e}"}]
@@ -242,5 +341,6 @@ def fetch_all(hours=24):
         return None, []
     out = []
     for a in accounts:
-        out.extend(fetch_account(a, hours=hours))
+        reader = fetch_account_oauth if a.get("auth") == "oauth" else fetch_account
+        out.extend(reader(a, hours=hours))
     return accounts, out

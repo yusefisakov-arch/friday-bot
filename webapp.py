@@ -4,6 +4,7 @@ import os
 import json
 import hmac
 import hashlib
+import secrets
 import logging
 from urllib.parse import parse_qsl
 from datetime import datetime, timedelta
@@ -13,7 +14,11 @@ from telegram.ext import ContextTypes
 
 from core import *
 from db import *
-from mail import test_login, encrypt_secret
+from mail import (test_login, encrypt_secret, google_oauth_ready,
+                  oauth_authorize_url, oauth_exchange_code)
+
+# Одноразовые метки для окна Google — защита от подделки ссылки
+_OAUTH_STATES = set()
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +236,60 @@ async def api_mail_delete(request):
     return web.json_response({"ok": db_mail_delete(data.get("id"))})
 
 
+# ===== Подключение почты через Google (без паролей) =====
+
+def _oauth_redirect_uri(request):
+    base = (WEBAPP_URL or f"https://{request.host}").rstrip("/")
+    return f"{base}/oauth/google/callback"
+
+
+def _oauth_page(title, text, ok=True):
+    return web.Response(content_type="text/html", text=f"""<!DOCTYPE html>
+<html lang="ru"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+padding:40px 24px;text-align:center;background:var(--tg-theme-bg-color,#fff);
+color:var(--tg-theme-text-color,#000)}}
+h2{{font-size:20px;margin:0 0 12px}}p{{font-size:15px;line-height:1.5;color:#666}}
+.i{{font-size:52px;margin-bottom:16px}}</style></head>
+<body><div class="i">{'✅' if ok else '⚠️'}</div><h2>{title}</h2><p>{text}</p>
+<script>window.Telegram?.WebApp?.ready();setTimeout(()=>window.Telegram?.WebApp?.close(),{2500 if ok else 6000});</script>
+</body></html>""")
+
+
+async def oauth_google_start(request):
+    if not is_webapp_request_allowed(request):
+        return web.Response(text="unauthorized", status=401)
+    if not google_oauth_ready():
+        return _oauth_page("Google ещё не настроен",
+                           "В боте нет GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET. "
+                           "Скажи мне об этом — подключу.", ok=False)
+    state = secrets.token_urlsafe(16)
+    _OAUTH_STATES.add(state)
+    raise web.HTTPFound(oauth_authorize_url(_oauth_redirect_uri(request), state))
+
+
+async def oauth_google_callback(request):
+    state = request.query.get("state", "")
+    if state not in _OAUTH_STATES:
+        return _oauth_page("Ссылка устарела", "Открой «📬 Почта» в боте и попробуй ещё раз.", ok=False)
+    _OAUTH_STATES.discard(state)
+
+    if request.query.get("error"):
+        return _oauth_page("Доступ не выдан",
+                           "Ты нажал «Отмена» в окне Google. Ящик не подключён.", ok=False)
+    try:
+        refresh, address = oauth_exchange_code(request.query.get("code", ""), _oauth_redirect_uri(request))
+        db_mail_save(address.split("@")[0], address, encrypt_secret(refresh),
+                     noisy=False, active=True, auth_type="oauth")
+        logger.info(f"Почта подключена через Google: {address}")
+        return _oauth_page("Почта подключена", f"{address} — доступ только на чтение.")
+    except Exception as e:
+        logger.error(f"OAuth Google: {e}")
+        return _oauth_page("Не получилось", str(e)[:200], ok=False)
+
+
 # ===== Декомпозиция (визуальный модуль «Карты») =====
 
 async def api_decompositions(request):
@@ -411,6 +470,8 @@ async def run_webapp_server():
     app.router.add_post("/api/maps/rename", api_maps_rename)
     app.router.add_post("/api/maps/delete", api_maps_delete)
     app.router.add_get("/api/map", api_map)
+    app.router.add_get("/oauth/google/start", oauth_google_start)
+    app.router.add_get("/oauth/google/callback", oauth_google_callback)
     app.router.add_get("/api/mail/list", api_mail_list)
     app.router.add_post("/api/mail/save", api_mail_save)
     app.router.add_post("/api/mail/test", api_mail_test)
