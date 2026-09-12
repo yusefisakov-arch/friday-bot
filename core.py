@@ -13,6 +13,10 @@ from telegram.error import BadRequest
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# httpx пишет в лог полный URL запроса, а у Telegram токен стоит прямо в пути —
+# в итоге он оседает в логах Railway. Оставляем от httpx только предупреждения.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
 if not ALLOWED_USER_ID:
