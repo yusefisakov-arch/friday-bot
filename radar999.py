@@ -47,6 +47,7 @@ CAT_HOUSES = 1406
 
 F_OFFER, F_PRICE, F_REGION, F_SECTOR, F_LOCALITY = 1, 2, 7, 9, 8
 F_STREET, F_IMAGES, F_ROOMS, F_AREA, F_FLOOR = 10, 14, 241, 244, 248
+F_FLOORS_TOTAL = 249
 F_COND_APT, F_COND_HOUSE = 253, 254
 F_ROOMS_HOUSE = 588
 
@@ -334,7 +335,7 @@ def base_filters(category_id, max_price=None, bad_condition=True, extra=None):
 async def fetch_ads(session, category_id, filters, limit=40, skip=0, sort="SORT_ADS_DATE_DESC"):
     rooms_feature = F_ROOMS_HOUSE if category_id == CAT_HOUSES else F_ROOMS
     wanted = (F_PRICE, F_SECTOR, F_LOCALITY, F_STREET, F_IMAGES,
-              rooms_feature, F_AREA, F_FLOOR)
+              rooms_feature, F_AREA, F_FLOOR, F_FLOORS_TOTAL)
     fields = " ".join(f"f{fid}: feature(id: {fid}) {{ value }}" for fid in wanted)
     payload = {
         "subCategoryId": category_id,
@@ -378,11 +379,41 @@ def _parse_ad(raw, rooms_feature):
         "area": float(area) if isinstance(area, (int, float)) else None,
         "rooms": _text(raw, rooms_feature),
         "floor": _text(raw, F_FLOOR),
+        "floors_total": _text(raw, F_FLOORS_TOTAL),
         "sector": _text(raw, F_SECTOR),
         "locality": _text(raw, F_LOCALITY),
         "street": _text(raw, F_STREET),
         "images": [str(i) for i in images] if isinstance(images, list) else [],
     }
+
+
+# Верхние этажи не берём: под крышей течёт и топит, а предпоследний страдает
+# следом. Цоколь, подвал и мансарда не годятся под сдачу.
+BAD_FLOOR_WORDS = ("цокол", "подвал", "мансард", "пентхаус", "subsol", "demisol", "mansard")
+
+
+def floor_ok(ad):
+    """False, если этаж не подходит: цоколь, подвал, мансарда, два верхних."""
+    floor_text = (ad.get("floor") or "").strip().lower()
+    if not floor_text:
+        return True  # этаж не указан — не выбрасываем, решит человек
+
+    if any(word in floor_text for word in BAD_FLOOR_WORDS):
+        return False
+
+    try:
+        floor = int(floor_text)
+    except ValueError:
+        return True
+
+    try:
+        total = int((ad.get("floors_total") or "").strip().split()[0])
+    except (ValueError, IndexError):
+        return True  # этажность дома неизвестна — пропускаем дальше
+
+    if total <= 2:
+        return True  # в двухэтажном доме правило «двух верхних» бессмысленно
+    return floor <= total - 2
 
 
 def price_per_m2(ad):
@@ -463,7 +494,8 @@ def render(ad, below_pct, median, category=None):
     if ad["area"]:
         facts.append(f"{ad['area']:g} м²")
     if ad["floor"]:
-        facts.append(f"этаж {ad['floor']}")
+        total = (ad.get("floors_total") or "").strip()
+        facts.append(f"этаж {ad['floor']} из {total}" if total else f"этаж {ad['floor']}")
     if facts:
         lines.append(" · ".join(facts))
 
@@ -554,6 +586,8 @@ async def radar_check_all(bot, force=False):
             picked = []
             for ad in ads:
                 if ad["id"] not in fresh_set:
+                    continue
+                if category_id != CAT_HOUSES and not floor_ok(ad):
                     continue
                 below, median = evaluate(ad, market)
                 if below is not None and below >= sub["discount"]:
@@ -749,6 +783,8 @@ async def radar_top_cmd(update, context):
                 if not ads:
                     break
                 for ad in ads:
+                    if category_id != CAT_HOUSES and not floor_ok(ad):
+                        continue
                     below, median = evaluate(ad, market)
                     if below is not None and below >= sub["discount"]:
                         scored.append((below, median, ad))
