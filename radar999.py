@@ -403,7 +403,7 @@ def evaluate(ad, market):
 
 # --- отправка -------------------------------------------------------------------
 
-def render(ad, below_pct, median):
+def render(ad, below_pct, median, category=None):
     per_m2 = price_per_m2(ad)
     head = f"🎯 *{below_pct}% ниже рынка*" if below_pct else "🏠 *Новое объявление*"
 
@@ -434,6 +434,9 @@ def render(ad, below_pct, median):
         lines.append(f"📍 {place}")
 
     lines.append(f"\nhttps://999.md/ru/{ad['id']}")
+    if category:
+        tag = "".join(ch if ch.isalnum() else "_" for ch in category).strip("_")
+        lines.append(f"#{tag}")
     return "\n".join(lines)
 
 
@@ -446,7 +449,9 @@ async def send_ad(bot, sub, ad, below_pct, median):
     kwargs = {"chat_id": sub["chat_id"]}
     if sub["topic_id"]:
         kwargs["message_thread_id"] = sub["topic_id"]
-    text = render(ad, below_pct, median)
+    # В теме имя категории и так на виду; в общем чате нужен тег.
+    text = render(ad, below_pct, median,
+                  category=None if sub["topic_id"] else sub["name"])
 
     if ad["images"]:
         photo = f"{IMAGE_BASE}/640x480/{ad['images'][0]}"
@@ -568,7 +573,8 @@ async def radar_here(update, context):
             topic = await context.bot.create_forum_topic(chat_id=chat.id, name=name)
             topic_id = topic.message_thread_id
         except Exception as e:
-            logger.warning(f"Радар: тема «{name}» не создана: {e}")
+            # Темы в группе не включены — не беда, шлём в общий чат с тегом.
+            logger.info(f"Радар: тема «{name}» не создана ({e}), буду слать с тегом")
 
         filters = base_filters(category_id, max_price=DEFAULT_MAX_PRICE)
         sub_id = radar_add_sub(name, chat.id, topic_id, category_id,
