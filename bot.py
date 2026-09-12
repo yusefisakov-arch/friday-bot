@@ -17,7 +17,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from core import TELEGRAM_TOKEN, is_allowed
 from radar999 import (
     radar_init_db, radar_loop, radar_here, radar_status,
-    radar_check_cmd, radar_toggle_cmd, radar_top_cmd,
+    radar_check_cmd, radar_toggle_cmd, radar_top_cmd, radar_sync_filters,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,10 @@ async def post_init(application: Application):
 
 def main():
     radar_init_db()
+    try:
+        radar_sync_filters()
+    except Exception as e:
+        logger.warning(f"Радар: фильтры не синхронизированы — {e}")
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", start))

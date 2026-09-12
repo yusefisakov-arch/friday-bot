@@ -53,11 +53,20 @@ F_ROOMS_HOUSE = 588
 FILTER_OFFER, FILTER_REGION, FILTER_PRICE = 16, 32, 9441
 FILTER_COND_APT, FILTER_COND_HOUSE = 1074, 1207
 
-OPT_SELL = 776           # «Продам»
-OPT_CHISINAU = 12900     # регион «Кишинёв мун.»
+OPT_SELL = 776             # «Продам»
+OPT_CHISINAU_MUN = 12900   # регион «Кишинёв мун.» — город плюс пригороды
+OPT_CHISINAU_CITY = 13859  # населённый пункт «Кишинёв» — только сам город
+# По автору объявления не фильтруем вовсе: у риелторов попадаются годные
+# варианты, а человек, построивший дом своими руками, нередко ставит себе
+# статус «Застройщик» — отсекая застройщиков, мы теряли бы как раз такие дома.
+# Недострой отсекается по состоянию, а не по тому, кто подал объявление.
 
-# состояния, которые нам интересны: жильё, требующее вложений
-COND_APT_BAD = [928, 952, 949, 925, 931]      # без ремонта, нуждается, серый, белый, косметический
+# Состояния, которые нам интересны: готовое жильё, требующее вложений.
+# Квартиры: без ремонта, нуждается в ремонте, серый вариант, белый вариант,
+# косметический ремонт, сдан в эксплуатацию.
+# Сознательно НЕ включены «Незавершенное строительство» и «Дом под снос» —
+# это и есть недострой, который не нужен.
+COND_APT_BAD = [928, 952, 949, 925, 931, 23788]
 COND_HOUSE_BAD = [1640, 1646, 1650, 1648, 1642]
 
 CATEGORY_TITLES = {CAT_APARTMENTS: "Квартиры", CAT_HOUSES: "Дома"}
@@ -114,6 +123,34 @@ def radar_init_db():
             )
         """)
         cur.close()
+
+
+def radar_sync_filters():
+    """Переписывает фильтры существующих подписок по текущему коду.
+
+    Критерии поиска живут в base_filters, а не в базе: правим их в одном месте
+    и при следующем запуске все подписки подхватывают новые. Просмотренность
+    при этом не сбрасывается — накопленное не прилетит заново.
+    """
+    updated = 0
+    for sub in radar_list_subs():
+        fresh = base_filters(sub["category_id"], max_price=sub["max_price"])
+        if fresh == sub["filters"]:
+            continue
+        with db_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE radar_subs SET filters=%s WHERE id=%s",
+                        (json.dumps(fresh), sub["id"]))
+            cur.close()
+        updated += 1
+    if updated:
+        logger.info(f"Радар: обновлены фильтры у {updated} подписок")
+        # Критерии изменились — старая карта рынка больше не сопоставима.
+        with db_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM radar_market")
+            cur.close()
+    return updated
 
 
 def radar_add_sub(name, chat_id, topic_id, category_id, max_price, discount, filters):
@@ -256,11 +293,24 @@ async def _gql(session, query):
 
 
 def base_filters(category_id, max_price=None, bad_condition=True, extra=None):
+    """Фильтры подписки.
+
+    География разная по смыслу: квартиры берём только в самом Кишинёве —
+    в пригородах они интересны редко. Частные дома в границах города почти
+    не продаются, поэтому им оставляем весь муниципий.
+
+    Недострой отсекается набором состояний: «Незавершенное строительство» и
+    «Дом под снос» в COND_* не входят.
+    """
+    if category_id == CAT_HOUSES:
+        geo = {"featureId": F_REGION, "optionIds": [OPT_CHISINAU_MUN]}
+    else:
+        geo = {"featureId": F_LOCALITY, "optionIds": [OPT_CHISINAU_CITY]}
+
     filters = [
         {"filterId": FILTER_OFFER,
          "features": [{"featureId": F_OFFER, "optionIds": [OPT_SELL]}]},
-        {"filterId": FILTER_REGION,
-         "features": [{"featureId": F_REGION, "optionIds": [OPT_CHISINAU]}]},
+        {"filterId": FILTER_REGION, "features": [geo]},
     ]
     if max_price:
         filters.append({"filterId": FILTER_PRICE,
