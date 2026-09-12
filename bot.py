@@ -17,6 +17,10 @@ from webapp import (
     create_quick_task, create_quick_finance, create_quick_decision,
 )
 from scheduler import scheduler
+from radar999 import (
+    radar_init_db, radar_loop, radar_here, radar_status,
+    radar_check_cmd, radar_toggle_cmd,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -439,6 +443,8 @@ async def post_init(application: Application):
             BotCommand("finance", "Финансы и итоги за месяц"),
             BotCommand("decisions", "Открытые договорённости"),
             BotCommand("memory", "Что бот о вас запомнил"),
+            BotCommand("radar", "🎯 Радар 999.md: что настроено"),
+            BotCommand("radar_check", "Проверить 999.md прямо сейчас"),
             BotCommand("hardmode", "Жёсткий режим наставника вкл/выкл"),
             BotCommand("clear", "Очистить историю разговора"),
             BotCommand("start", "Перезапуск и клавиатура"),
@@ -447,11 +453,19 @@ async def post_init(application: Application):
     except Exception as e:
         logger.warning(f"set_my_commands пропущено: {e}")
     asyncio.create_task(scheduler(application.bot))
+    asyncio.create_task(radar_loop(application.bot, RADAR_INTERVAL_MINUTES))
     asyncio.create_task(run_webapp_server())
+
+
+RADAR_INTERVAL_MINUTES = int(os.environ.get("RADAR_INTERVAL_MINUTES", "15"))
 
 
 def main():
     init_db()
+    try:
+        radar_init_db()
+    except Exception as e:
+        logger.warning(f"Радар: таблицы не созданы — {e}")
     try:
         db_prune_history()
     except Exception as e:
@@ -470,6 +484,11 @@ def main():
     app.add_handler(CommandHandler("mentor", mentor))
     app.add_handler(CommandHandler("hardmode", hardmode))
     app.add_handler(CommandHandler("selfdestruct", selfdestruct))
+    app.add_handler(CommandHandler("radar", radar_status))
+    app.add_handler(CommandHandler("radar_here", radar_here))
+    app.add_handler(CommandHandler("radar_check", radar_check_cmd))
+    app.add_handler(CommandHandler("radar_on", radar_toggle_cmd))
+    app.add_handler(CommandHandler("radar_off", radar_toggle_cmd))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
