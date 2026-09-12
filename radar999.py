@@ -649,6 +649,84 @@ async def radar_check_cmd(update, context):
     )
 
 
+async def radar_top_cmd(update, context):
+    """/radar_top [N] — лучшие находки среди того, что уже висит на 999.md.
+
+    Первый прогон помечает всю текущую выдачу просмотренной, чтобы не завалить
+    чат сотней сообщений. Эта команда позволяет разобрать тот запас руками:
+    проходит по всей базе подписки, считает отставание от медианы и показывает
+    самые выгодные. Просмотренность не трогает.
+    """
+    from core import is_allowed
+    if not is_allowed(update.effective_user.id):
+        return
+
+    parts = (update.message.text or "").split()
+    try:
+        top_n = max(1, min(15, int(parts[1])))
+    except (IndexError, ValueError):
+        top_n = 5
+
+    subs = radar_list_subs(only_active=True)
+    if not subs:
+        await update.message.reply_text("Радар не настроен, сэр.")
+        return
+
+    await update.message.reply_text(
+        f"Перебираю всё, что сейчас висит на 999.md, и отбираю по {top_n} лучших "
+        "в каждой категории. Минуту, сэр."
+    )
+
+    async with aiohttp.ClientSession() as session:
+        for sub in subs:
+            category_id = sub["category_id"]
+
+            age = radar_market_age_hours(category_id)
+            if age is None or age > MARKET_TTL_HOURS:
+                await rebuild_market(category_id)
+            market = radar_get_market(category_id)
+
+            scored = []
+            skip = 0
+            total = None
+            while total is None or (skip < total and skip < 1000):
+                try:
+                    ads, total = await fetch_ads(session, category_id, sub["filters"],
+                                                 limit=200, skip=skip)
+                except Exception as e:
+                    logger.error(f"Радар top #{sub['id']}: {e}")
+                    break
+                if not ads:
+                    break
+                for ad in ads:
+                    below, median = evaluate(ad, market)
+                    if below is not None and below >= sub["discount"]:
+                        scored.append((below, median, ad))
+                skip += 200
+                await asyncio.sleep(0.5)
+
+            scored.sort(key=lambda x: x[0], reverse=True)
+            if not scored:
+                await update.message.reply_text(
+                    f"*{sub['name']}*: подходящих под порог сейчас нет.",
+                    parse_mode="Markdown")
+                continue
+
+            await update.message.reply_text(
+                f"*{sub['name']}* — подходящих {len(scored)}, показываю {min(top_n, len(scored))}",
+                parse_mode="Markdown")
+
+            for below, median, ad in scored[:top_n]:
+                target = dict(sub)
+                target["chat_id"] = update.effective_chat.id
+                target["topic_id"] = update.message.message_thread_id
+                try:
+                    await send_ad(context.bot, target, ad, below, median)
+                except Exception as e:
+                    logger.error(f"Радар top: не отправилось {ad['id']}: {e}")
+                await asyncio.sleep(0.5)
+
+
 async def radar_toggle_cmd(update, context):
     """/radar_off N и /radar_on N."""
     from core import is_allowed

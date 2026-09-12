@@ -17,7 +17,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from core import TELEGRAM_TOKEN, is_allowed
 from radar999 import (
     radar_init_db, radar_loop, radar_here, radar_status,
-    radar_check_cmd, radar_toggle_cmd,
+    radar_check_cmd, radar_toggle_cmd, radar_top_cmd,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,7 @@ HELP = (
     "3. Отправьте в группе /radar\\_here — заведу темы и начну следить\n\n"
     "*Команды*\n"
     "/radar — что настроено и когда проверял\n"
+    "/radar\\_top — лучшее из того, что висит на 999.md сейчас\n"
     "/radar\\_check — проверить прямо сейчас\n"
     "/radar\\_on N, /radar\\_off N — включить или приостановить\n"
 )
@@ -49,6 +50,7 @@ async def post_init(application: Application):
     try:
         await application.bot.set_my_commands([
             BotCommand("radar", "🎯 Что настроено и когда проверял"),
+            BotCommand("radar_top", "🔥 Лучшее из того, что висит сейчас"),
             BotCommand("radar_check", "Проверить 999.md прямо сейчас"),
             BotCommand("radar_here", "Настроить радар в этой группе"),
             BotCommand("start", "Справка"),
@@ -66,6 +68,7 @@ def main():
     app.add_handler(CommandHandler("radar", radar_status))
     app.add_handler(CommandHandler("radar_here", radar_here))
     app.add_handler(CommandHandler("radar_check", radar_check_cmd))
+    app.add_handler(CommandHandler("radar_top", radar_top_cmd))
     app.add_handler(CommandHandler("radar_on", radar_toggle_cmd))
     app.add_handler(CommandHandler("radar_off", radar_toggle_cmd))
     logger.info(f"Радар запущен, интервал проверки {RADAR_INTERVAL_MINUTES} мин")
