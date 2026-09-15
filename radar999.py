@@ -16,6 +16,7 @@ HTML — это переживает редизайны сайта и не уп�
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import statistics
@@ -26,6 +27,10 @@ import aiohttp
 from core import db_conn, send_md
 
 logger = logging.getLogger(__name__)
+
+# Подписки, у которых сменились критерии: их выдачу надо один раз пометить
+# просмотренной, иначе после расширения фильтров в чат хлынет всё разом.
+PENDING_SEED = []
 
 GRAPHQL_URL = "https://999.md/graphql"
 IMAGE_BASE = "https://i.simpalsmedia.com/999.md/BoardImages"
@@ -64,14 +69,14 @@ OPT_CHISINAU_CITY = 13859  # населённый пункт «Кишинёв» 
 # Риелторы остаются в обеих категориях.
 FILTER_AUTHOR_APT = 9453
 F_AUTHOR = 795
-# все типы авторов, кроме застройщика (20364)
-AUTHORS_NO_DEVELOPER = [18895, 18894, 23241, 29849, 37797, 37798]
 
 # Жилой фонд (есть только у квартир): берём исключительно вторичный.
 # Новостройки не нужны вовсе — низкая цена за квадрат там означает голые
 # стены, и именно ими агентства забивали выдачу.
 FILTER_FOND, F_FOND = 2307, 852
 OPT_SECONDARY = 19109      # «Вторичный»
+# все типы авторов, кроме застройщика (20364)
+AUTHORS_NO_DEVELOPER = [18895, 18894, 23241, 29849, 37797, 37798]
 
 # Состояния, которые нам интересны: готовое жильё, требующее вложений.
 # Квартиры: без ремонта, нуждается в ремонте, серый вариант, белый вариант,
@@ -82,6 +87,12 @@ COND_APT_BAD = [928, 952, 949, 925, 931, 23788]
 COND_HOUSE_BAD = [1640, 1646, 1650, 1648, 1642]
 
 CATEGORY_TITLES = {CAT_APARTMENTS: "Квартиры", CAT_HOUSES: "Дома"}
+
+# Главный критерий отбора: цена за квадратный метр. Всё, что стоит не дороже
+# этой планки, попадает в радар — медиана района осталась только справкой
+# в карточке, порогом она больше не служит.
+MAX_PRICE_PER_M2 = 1500
+FILTER_PRICE_M2, F_PRICE_M2 = 4251, 1385
 
 MARKET_SAMPLE_PAGES = 4      # 4 × 200 = 800 объявлений на категорию для карты рынка
 MARKET_MIN_GROUP = 8         # меньше — группа слишком мала, медиане нельзя верить
@@ -107,7 +118,7 @@ def radar_init_db():
                 topic_id     BIGINT,
                 category_id  INT NOT NULL,
                 max_price    INT,
-                discount     INT NOT NULL DEFAULT 20,
+                discount     INT NOT NULL DEFAULT 0,
                 filters      JSONB NOT NULL,
                 active       BOOLEAN NOT NULL DEFAULT TRUE,
                 created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -122,6 +133,22 @@ def radar_init_db():
                 PRIMARY KEY (sub_id, ad_id)
             )
         """)
+        # Что реально ушло в чат. Отдельно от radar_seen: seen помечает всё,
+        # что бот видел в выдаче, а sent — только отправленное. Отпечаток
+        # ловит перевыложенные объявления, у которых сменился номер.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS radar_sent (
+                sub_id      INT  NOT NULL,
+                ad_id       TEXT NOT NULL,
+                fingerprint TEXT,
+                sent_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (sub_id, ad_id)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_radar_sent_fp "
+                    "ON radar_sent(fingerprint)")
+        # Цена нужна, чтобы прислать объявление второй раз, если она упала.
+        cur.execute("ALTER TABLE radar_sent ADD COLUMN IF NOT EXISTS price NUMERIC")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS radar_market (
                 category_id INT NOT NULL,
@@ -144,25 +171,30 @@ def radar_sync_filters():
     и при следующем запуске все подписки подхватывают новые. Просмотренность
     при этом не сбрасывается — накопленное не прилетит заново.
     """
-    updated = 0
+    names = {category_id: name for name, category_id in PRESETS}
+    updated_ids = []
     for sub in radar_list_subs():
-        fresh = base_filters(sub["category_id"], max_price=sub["max_price"])
-        if fresh == sub["filters"]:
+        fresh = base_filters(sub["category_id"], max_price=DEFAULT_MAX_PRICE)
+        name = names.get(sub["category_id"], sub["name"])
+        if fresh == sub["filters"] and name == sub["name"] \
+                and sub["max_price"] == DEFAULT_MAX_PRICE:
             continue
         with db_conn() as conn:
             cur = conn.cursor()
-            cur.execute("UPDATE radar_subs SET filters=%s WHERE id=%s",
-                        (json.dumps(fresh), sub["id"]))
+            cur.execute("UPDATE radar_subs SET filters=%s, name=%s, max_price=%s "
+                        "WHERE id=%s",
+                        (json.dumps(fresh), name, DEFAULT_MAX_PRICE, sub["id"]))
             cur.close()
-        updated += 1
-    if updated:
-        logger.info(f"Радар: обновлены фильтры у {updated} подписок")
+        updated_ids.append(sub["id"])
+    if updated_ids:
+        PENDING_SEED.extend(updated_ids)
+        logger.info(f"Радар: обновлены фильтры у {len(updated_ids)} подписок")
         # Критерии изменились — старая карта рынка больше не сопоставима.
         with db_conn() as conn:
             cur = conn.cursor()
             cur.execute("DELETE FROM radar_market")
             cur.close()
-    return updated
+    return len(updated_ids)
 
 
 def radar_add_sub(name, chat_id, topic_id, category_id, max_price, discount, filters):
@@ -206,6 +238,7 @@ def radar_delete_sub(sub_id):
     with db_conn() as conn:
         cur = conn.cursor()
         cur.execute("DELETE FROM radar_seen WHERE sub_id=%s", (sub_id,))
+        cur.execute("DELETE FROM radar_sent WHERE sub_id=%s", (sub_id,))
         cur.execute("DELETE FROM radar_subs WHERE id=%s", (sub_id,))
         cur.close()
 
@@ -232,6 +265,60 @@ def radar_mark_seen(sub_id, ad_ids):
             [(sub_id, a) for a in ad_ids],
         )
         cur.execute("UPDATE radar_subs SET last_checked=now() WHERE id=%s", (sub_id,))
+        cur.close()
+
+
+def ad_fingerprint(ad):
+    """Отпечаток объявления: та же квартира, даже если её выложили заново.
+
+    Берём то, что не меняется при перепубликации: район, комнатность, площадь,
+    этаж и цену. Плюс имя первого файла фотографии — 999.md сохраняет его при
+    повторной подаче, так что это самый надёжный признак.
+    """
+    photo = ad["images"][0] if ad.get("images") else ""
+    if photo:
+        return "img:" + photo
+    parts = (
+        ad.get("locality", ""), ad.get("sector", ""), ad.get("rooms", ""),
+        str(ad.get("area") or ""), str(ad.get("floor") or ""),
+        str(int(ad["price"])) if ad.get("price") else "",
+    )
+    return "attr:" + hashlib.sha1("|".join(parts).encode()).hexdigest()[:16]
+
+
+def radar_sent_price(sub_id, ad_id, fingerprint):
+    """Цена, с которой объявление уже уходило в чат. None — не уходило.
+
+    Ищем и по номеру, и по отпечатку: объявление могли снять и выложить
+    заново с новым номером. Берём минимальную из отправленных цен, чтобы
+    повторно слать только на реальном снижении, а не на возврате к прежней.
+    """
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT MIN(price) FROM radar_sent WHERE sub_id=%s AND (ad_id=%s OR "
+            "(fingerprint IS NOT NULL AND fingerprint=%s))",
+            (sub_id, ad_id, fingerprint))
+        row = cur.fetchone()
+        cur.execute(
+            "SELECT 1 FROM radar_sent WHERE sub_id=%s AND (ad_id=%s OR "
+            "(fingerprint IS NOT NULL AND fingerprint=%s)) LIMIT 1",
+            (sub_id, ad_id, fingerprint))
+        exists = cur.fetchone() is not None
+        cur.close()
+    if not exists:
+        return None
+    return float(row[0]) if row and row[0] is not None else 0.0
+
+
+def radar_mark_sent(sub_id, ad_id, fingerprint, price=None):
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO radar_sent (sub_id, ad_id, fingerprint, price) "
+            "VALUES (%s,%s,%s,%s) ON CONFLICT (sub_id, ad_id) DO UPDATE "
+            "SET price = LEAST(radar_sent.price, EXCLUDED.price), sent_at = now()",
+            (sub_id, ad_id, fingerprint, price))
         cur.close()
 
 
@@ -304,16 +391,18 @@ async def _gql(session, query):
     return payload["data"]
 
 
-def base_filters(category_id, max_price=None, bad_condition=True, extra=None):
+def base_filters(category_id, max_price=None, bad_condition=False, extra=None,
+                 max_price_m2=MAX_PRICE_PER_M2):
     """Фильтры подписки.
 
     География разная по смыслу: квартиры берём только в самом Кишинёве —
     в пригородах они интересны редко. Частные дома в границах города почти
     не продаются, поэтому им оставляем весь муниципий.
 
-    Недострой отсекается набором состояний: «Незавершенное строительство» и
-    «Дом под снос» в COND_* не входят. У квартир вдобавок отсекаются
-    застройщики — см. комментарий к AUTHORS_NO_DEVELOPER.
+    У квартир берётся только вторичный жилой фонд — новостройки не нужны.
+    Состояние не фильтруется: подходит любое, вплоть до убитого. По автору
+    объявления тоже не фильтруем — застройщики и агентства остаются.
+    Отбор делает цена за квадратный метр.
     """
     if category_id == CAT_HOUSES:
         geo = {"featureId": F_REGION, "optionIds": [OPT_CHISINAU_MUN]}
@@ -326,12 +415,16 @@ def base_filters(category_id, max_price=None, bad_condition=True, extra=None):
         {"filterId": FILTER_REGION, "features": [geo]},
     ]
     if category_id != CAT_HOUSES:
-        filters.append({"filterId": FILTER_AUTHOR_APT,
-                        "features": [{"featureId": F_AUTHOR,
-                                      "optionIds": AUTHORS_NO_DEVELOPER}]})
         filters.append({"filterId": FILTER_FOND,
                         "features": [{"featureId": F_FOND,
                                       "optionIds": [OPT_SECONDARY]}]})
+
+    if max_price_m2:
+        # У этого фильтра на 999.md единицу указывать нельзя — с unit он
+        # возвращает ноль объявлений. Значения приходят в евро.
+        filters.append({"filterId": FILTER_PRICE_M2,
+                        "features": [{"featureId": F_PRICE_M2,
+                                      "range": {"max": max_price_m2}}]})
     if max_price:
         filters.append({"filterId": FILTER_PRICE,
                         "features": [{"featureId": F_PRICE,
@@ -447,10 +540,17 @@ def price_per_m2(ad):
 # --- карта рынка ----------------------------------------------------------------
 
 async def rebuild_market(category_id):
-    """Пересчитывает медиану €/м² по (город, сектор, комнаты) для категории."""
+    """Пересчитывает медиану €/м² по (город, сектор, комнаты) для категории.
+
+    Медиана нужна только для подписи «на сколько ниже рынка» в карточке —
+    отбор идёт по цене за квадрат, а не по ней.
+    """
     groups = {}
     async with aiohttp.ClientSession() as session:
-        filters = base_filters(category_id, bad_condition=True)
+        # Рынок меряем по всей выдаче района: без потолка цены и без
+        # ограничения по цене за квадрат, иначе медиана окажется обрезанной
+        # ровно по той планке, с которой мы её сравниваем.
+        filters = base_filters(category_id, max_price=None, max_price_m2=None)
         for page in range(MARKET_SAMPLE_PAGES):
             try:
                 ads, _ = await fetch_ads(session, category_id, filters, limit=200,
@@ -503,9 +603,18 @@ def evaluate(ad, market):
 
 # --- отправка -------------------------------------------------------------------
 
-def render(ad, below_pct, median, category=None):
+def render(ad, below_pct, median, category=None, price_drop=None):
     per_m2 = price_per_m2(ad)
-    head = f"🎯 *{below_pct}% ниже рынка*" if below_pct else "🏠 *Новое объявление*"
+
+    if price_drop:
+        was = f"{price_drop:,.0f}".replace(",", " ")
+        now = f"{ad['price']:,.0f}".replace(",", " ")
+        minus = f"{price_drop - ad['price']:,.0f}".replace(",", " ")
+        head = f"📉 *Цена упала: {was} → {now} € (−{minus} €)*"
+    elif below_pct and below_pct > 0:
+        head = f"🎯 *{below_pct}% ниже рынка*"
+    else:
+        head = "🏠 *Новое объявление*"
 
     lines = [head, f"*{ad['title']}*"]
 
@@ -547,23 +656,44 @@ def strip_markup(text):
 
 
 async def send_ad(bot, sub, ad, below_pct, median):
+    """Отправляет объявление. Возвращает False, если оно уже уходило в чат.
+
+    Повторно объявление уходит только одним способом — если цена стала ниже
+    той, с которой его присылали в прошлый раз. Тогда в карточке видно,
+    сколько скинули.
+    """
+    fingerprint = ad_fingerprint(ad)
+    price = ad.get("price")
+    was = radar_sent_price(sub["id"], ad["id"], fingerprint)
+
+    price_drop = None
+    if was is not None:
+        if price and was and price < was:
+            price_drop = was          # подешевело — шлём ещё раз
+        else:
+            logger.info(f"Радар: {ad['id']} уже отправляли, пропускаю")
+            return False
+
     kwargs = {"chat_id": sub["chat_id"]}
     if sub["topic_id"]:
         kwargs["message_thread_id"] = sub["topic_id"]
     # В теме имя категории и так на виду; в общем чате нужен тег.
     text = render(ad, below_pct, median,
-                  category=None if sub["topic_id"] else sub["name"])
+                  category=None if sub["topic_id"] else sub["name"],
+                  price_drop=price_drop)
 
     if ad["images"]:
         photo = f"{IMAGE_BASE}/640x480/{ad['images'][0]}"
         try:
             await bot.send_photo(photo=photo, caption=text, parse_mode="Markdown", **kwargs)
-            return
+            radar_mark_sent(sub["id"], ad["id"], fingerprint, price)
+            return True
         except Exception as e:
             logger.warning(f"Радар: фото с разметкой не ушло ({e})")
             try:
                 await bot.send_photo(photo=photo, caption=strip_markup(text), **kwargs)
-                return
+                radar_mark_sent(sub["id"], ad["id"], fingerprint, price)
+                return True
             except Exception as e2:
                 logger.warning(f"Радар: фото не ушло совсем ({e2}), шлю текстом")
     try:
@@ -571,6 +701,8 @@ async def send_ad(bot, sub, ad, below_pct, median):
     except Exception as e:
         logger.warning(f"Радар: разметка не прошла ({e}), шлю простым текстом")
         await bot.send_message(text=strip_markup(text), **kwargs)
+    radar_mark_sent(sub["id"], ad["id"], fingerprint, price)
+    return True
 
 
 # --- основной цикл --------------------------------------------------------------
@@ -608,15 +740,15 @@ async def radar_check_all(bot, force=False):
                     continue
                 if category_id != CAT_HOUSES and not floor_ok(ad):
                     continue
+                # Медиана теперь только справка в карточке, а не условие.
                 below, median = evaluate(ad, market)
-                if below is not None and below >= sub["discount"]:
-                    picked.append((ad, below, median))
+                picked.append((ad, below, median))
 
             # свежие идут первыми — отправляем в хронологическом порядке
             for ad, below, median in reversed(picked[:10]):
                 try:
-                    await send_ad(bot, sub, ad, below, median)
-                    sent_total += 1
+                    if await send_ad(bot, sub, ad, below, median):
+                        sent_total += 1
                 except Exception as e:
                     logger.error(f"Радар #{sub['id']}: не отправилось {ad['id']}: {e}")
                 await asyncio.sleep(0.5)
@@ -643,12 +775,12 @@ async def radar_seed(sub_id):
 
 # --- телеграм-хендлеры ----------------------------------------------------------
 
-DEFAULT_MAX_PRICE = 60000
-DEFAULT_DISCOUNT = 20
+DEFAULT_MAX_PRICE = 70000
+DEFAULT_DISCOUNT = 0
 
 PRESETS = [
-    ("Квартиры под ремонт", CAT_APARTMENTS),
-    ("Дома под ремонт", CAT_HOUSES),
+    ("Квартиры", CAT_APARTMENTS),
+    ("Дома", CAT_HOUSES),
 ]
 
 
@@ -805,12 +937,13 @@ async def radar_top_cmd(update, context):
                     if category_id != CAT_HOUSES and not floor_ok(ad):
                         continue
                     below, median = evaluate(ad, market)
-                    if below is not None and below >= sub["discount"]:
-                        scored.append((below, median, ad))
+                    # В /radar_top сортируем по цене за квадрат: самое дешёвое
+                    # по отношению к площади — сверху.
+                    scored.append((below, median, ad))
                 skip += 200
                 await asyncio.sleep(0.5)
 
-            scored.sort(key=lambda x: x[0], reverse=True)
+            scored.sort(key=lambda x: price_per_m2(x[2]) or 1e9)
             if not scored:
                 await update.message.reply_text(
                     f"*{sub['name']}*: подходящих под порог сейчас нет.",
@@ -821,15 +954,25 @@ async def radar_top_cmd(update, context):
                 f"*{sub['name']}* — подходящих {len(scored)}, показываю {min(top_n, len(scored))}",
                 parse_mode="Markdown")
 
-            for below, median, ad in scored[:top_n]:
-                target = dict(sub)
-                target["chat_id"] = update.effective_chat.id
-                target["topic_id"] = update.message.message_thread_id
+            target = dict(sub)
+            target["chat_id"] = update.effective_chat.id
+            target["topic_id"] = update.message.message_thread_id
+
+            shown = 0
+            for below, median, ad in scored:
+                if shown >= top_n:
+                    break
                 try:
-                    await send_ad(context.bot, target, ad, below, median)
+                    if await send_ad(context.bot, target, ad, below, median):
+                        shown += 1
                 except Exception as e:
                     logger.error(f"Радар top: не отправилось {ad['id']}: {e}")
                 await asyncio.sleep(0.5)
+
+            if shown == 0:
+                await update.message.reply_text(
+                    f"*{sub['name']}*: всё подходящее уже присылал раньше.",
+                    parse_mode="Markdown")
 
 
 async def radar_toggle_cmd(update, context):
@@ -850,6 +993,16 @@ async def radar_toggle_cmd(update, context):
 async def radar_loop(bot, interval_minutes=15):
     """Фоновый цикл: проверяет подписки, пока бот жив."""
     await asyncio.sleep(30)
+
+    while PENDING_SEED:
+        sub_id = PENDING_SEED.pop()
+        try:
+            total = await radar_seed(sub_id)
+            logger.info(f"Радар: подписка #{sub_id} пересеяна после смены "
+                        f"критериев, в базе {total} подходящих")
+        except Exception as e:
+            logger.error(f"Радар: пересев #{sub_id} не удался: {e}")
+
     while True:
         try:
             radar_init_db()
