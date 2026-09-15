@@ -67,6 +67,12 @@ F_AUTHOR = 795
 # все типы авторов, кроме застройщика (20364)
 AUTHORS_NO_DEVELOPER = [18895, 18894, 23241, 29849, 37797, 37798]
 
+# Жилой фонд (есть только у квартир): берём исключительно вторичный.
+# Новостройки не нужны вовсе — низкая цена за квадрат там означает голые
+# стены, и именно ими агентства забивали выдачу.
+FILTER_FOND, F_FOND = 2307, 852
+OPT_SECONDARY = 19109      # «Вторичный»
+
 # Состояния, которые нам интересны: готовое жильё, требующее вложений.
 # Квартиры: без ремонта, нуждается в ремонте, серый вариант, белый вариант,
 # косметический ремонт, сдан в эксплуатацию.
@@ -323,6 +329,9 @@ def base_filters(category_id, max_price=None, bad_condition=True, extra=None):
         filters.append({"filterId": FILTER_AUTHOR_APT,
                         "features": [{"featureId": F_AUTHOR,
                                       "optionIds": AUTHORS_NO_DEVELOPER}]})
+        filters.append({"filterId": FILTER_FOND,
+                        "features": [{"featureId": F_FOND,
+                                      "optionIds": [OPT_SECONDARY]}]})
     if max_price:
         filters.append({"filterId": FILTER_PRICE,
                         "features": [{"featureId": F_PRICE,
