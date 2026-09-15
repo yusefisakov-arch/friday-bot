@@ -149,6 +149,16 @@ def radar_init_db():
                     "ON radar_sent(fingerprint)")
         # Цена нужна, чтобы прислать объявление второй раз, если она упала.
         cur.execute("ALTER TABLE radar_sent ADD COLUMN IF NOT EXISTS price NUMERIC")
+        # Тема группы под каждый район. Ключ — название сектора, как его
+        # отдаёт 999.md, либо «Дома» для частных домов.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS radar_topics (
+                chat_id  BIGINT NOT NULL,
+                key      TEXT   NOT NULL,
+                topic_id BIGINT NOT NULL,
+                PRIMARY KEY (chat_id, key)
+            )
+        """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS radar_market (
                 category_id INT NOT NULL,
@@ -322,6 +332,64 @@ def radar_mark_sent(sub_id, ad_id, fingerprint, price=None):
         cur.close()
 
 
+HOUSES_TOPIC = "Дома"
+# Секторы Кишинёва в том виде, в каком их присылает 999.md
+CHISINAU_SECTORS = ["Центр", "Ботаника", "Буюканы", "Рышкановка", "Чокана",
+                    "Телецентр", "Старая Почта", "Скулянка", "Аэропорт"]
+
+
+def topic_key(sub, ad):
+    """В какую тему идёт объявление: район города или общая тема домов."""
+    if sub["category_id"] == CAT_HOUSES:
+        return HOUSES_TOPIC
+    return (ad.get("sector") or "").strip() or "Прочее"
+
+
+def radar_get_topic(chat_id, key):
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT topic_id FROM radar_topics WHERE chat_id=%s AND key=%s",
+                    (chat_id, key))
+        row = cur.fetchone()
+        cur.close()
+    return row[0] if row else None
+
+
+def radar_save_topic(chat_id, key, topic_id):
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO radar_topics (chat_id, key, topic_id) VALUES (%s,%s,%s) "
+            "ON CONFLICT (chat_id, key) DO UPDATE SET topic_id=EXCLUDED.topic_id",
+            (chat_id, key, topic_id))
+        cur.close()
+
+
+def radar_list_topics(chat_id):
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT key, topic_id FROM radar_topics WHERE chat_id=%s "
+                    "ORDER BY key", (chat_id,))
+        rows = cur.fetchall()
+        cur.close()
+    return rows
+
+
+async def ensure_topic(bot, chat_id, key):
+    """Возвращает id темы для района, создавая её при первом объявлении."""
+    topic_id = radar_get_topic(chat_id, key)
+    if topic_id:
+        return topic_id
+    try:
+        topic = await bot.create_forum_topic(chat_id=chat_id, name=key)
+    except Exception as e:
+        logger.warning(f"Радар: тема «{key}» не создана ({e}) — шлю в общий чат")
+        return None
+    radar_save_topic(chat_id, key, topic.message_thread_id)
+    logger.info(f"Радар: создана тема «{key}»")
+    return topic.message_thread_id
+
+
 def radar_save_market(category_id, rows):
     """rows: [(locality, sector, rooms, median_m2, sample_size), ...]"""
     if not rows:
@@ -447,7 +515,7 @@ def base_filters(category_id, max_price=None, bad_condition=False, extra=None,
 async def fetch_ads(session, category_id, filters, limit=40, skip=0, sort="SORT_ADS_DATE_DESC"):
     rooms_feature = F_ROOMS_HOUSE if category_id == CAT_HOUSES else F_ROOMS
     wanted = (F_PRICE, F_SECTOR, F_LOCALITY, F_STREET, F_IMAGES,
-              rooms_feature, F_AREA, F_FLOOR, F_FLOORS_TOTAL)
+              rooms_feature, F_AREA, F_FLOOR, F_FLOORS_TOTAL, F_AUTHOR)
     fields = " ".join(f"f{fid}: feature(id: {fid}) {{ value }}" for fid in wanted)
     payload = {
         "subCategoryId": category_id,
@@ -492,6 +560,7 @@ def _parse_ad(raw, rooms_feature):
         "rooms": _text(raw, rooms_feature),
         "floor": _text(raw, F_FLOOR),
         "floors_total": _text(raw, F_FLOORS_TOTAL),
+        "author": _text(raw, F_AUTHOR),
         "sector": _text(raw, F_SECTOR),
         "locality": _text(raw, F_LOCALITY),
         "street": _text(raw, F_STREET),
@@ -643,6 +712,11 @@ def render(ad, below_pct, median, category=None, price_drop=None):
     if place:
         lines.append(f"📍 {place}")
 
+    author = (ad.get("author") or "").strip()
+    if author:
+        icon = "👤" if author.lower().startswith("частн") else "🏢"
+        lines.append(f"{icon} {author}")
+
     lines.append(f"\nhttps://999.md/ru/{ad['id']}")
     if category:
         tag = "".join(ch if ch.isalnum() else "_" for ch in category).strip("_")
@@ -674,12 +748,15 @@ async def send_ad(bot, sub, ad, below_pct, median):
             logger.info(f"Радар: {ad['id']} уже отправляли, пропускаю")
             return False
 
+    key = topic_key(sub, ad)
+    topic_id = await ensure_topic(bot, sub["chat_id"], key)
+
     kwargs = {"chat_id": sub["chat_id"]}
-    if sub["topic_id"]:
-        kwargs["message_thread_id"] = sub["topic_id"]
-    # В теме имя категории и так на виду; в общем чате нужен тег.
+    if topic_id:
+        kwargs["message_thread_id"] = topic_id
+    # В теме район и так на виду; в общем чате нужен тег.
     text = render(ad, below_pct, median,
-                  category=None if sub["topic_id"] else sub["name"],
+                  category=None if topic_id else key,
                   price_drop=price_drop)
 
     if ad["images"]:
@@ -803,16 +880,10 @@ async def radar_here(update, context):
     for name, category_id in PRESETS:
         if name in existing:
             continue
-        topic_id = None
-        try:
-            topic = await context.bot.create_forum_topic(chat_id=chat.id, name=name)
-            topic_id = topic.message_thread_id
-        except Exception as e:
-            # Темы в группе не включены — не беда, шлём в общий чат с тегом.
-            logger.info(f"Радар: тема «{name}» не создана ({e}), буду слать с тегом")
-
+        # Тема выбирается по району в момент отправки, поэтому у самой
+        # подписки её нет.
         filters = base_filters(category_id, max_price=DEFAULT_MAX_PRICE)
-        sub_id = radar_add_sub(name, chat.id, topic_id, category_id,
+        sub_id = radar_add_sub(name, chat.id, None, category_id,
                                DEFAULT_MAX_PRICE, DEFAULT_DISCOUNT, filters)
         try:
             total = await radar_seed(sub_id)
@@ -828,10 +899,105 @@ async def radar_here(update, context):
     price_txt = f"{DEFAULT_MAX_PRICE:,}".replace(",", " ")
     await update.message.reply_text(
         "Радар настроен, сэр.\n\n" + "\n".join(created) +
-        f"\n\nПотолок цены {price_txt} €, порог — дешевле медианы сопоставимых "
-        f"на {DEFAULT_DISCOUNT}%. Всё, что есть сейчас, помечено как просмотренное — "
-        "буду присылать только новое."
+        f"\n\nПотолок цены {price_txt} €, не дороже {MAX_PRICE_PER_M2} €/м². "
+        "Всё, что есть сейчас, помечено как просмотренное — буду присылать "
+        "только новое и подешевевшее.\n\n"
+        "Дальше: /radar_topics — завести темы по районам, "
+        "/radar_dump — разложить по ним текущие варианты."
     )
+
+
+async def radar_topics_cmd(update, context):
+    """/radar_topics — завести в этой группе тему под каждый район."""
+    from core import is_allowed
+    if not is_allowed(update.effective_user.id):
+        return
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("Эту команду нужно отправить в группе.")
+        return
+
+    radar_init_db()
+    created, existed = [], []
+    for key in CHISINAU_SECTORS + [HOUSES_TOPIC]:
+        if radar_get_topic(chat.id, key):
+            existed.append(key)
+            continue
+        topic_id = await ensure_topic(context.bot, chat.id, key)
+        (created if topic_id else existed).append(key)
+        await asyncio.sleep(0.4)
+
+    if not created:
+        await update.message.reply_text(
+            "Темы уже заведены. Если их не видно — проверьте, что в группе "
+            "включены темы, а бот админ с правом ими управлять.")
+        return
+
+    await update.message.reply_text(
+        "Темы созданы: " + ", ".join(created) +
+        ("\nУже были: " + ", ".join(existed) if existed else "") +
+        "\n\nТеперь каждое объявление уходит в тему своего района. "
+        "Чтобы разложить по темам всё, что висит сейчас, отправьте /radar_dump")
+
+
+async def radar_dump_cmd(update, context):
+    """/radar_dump — разложить по темам всё, что подходит прямо сейчас.
+
+    В отличие от /radar_top не выбирает лучшее, а выгружает всю выдачу:
+    по объявлению на сообщение, каждое в тему своего района.
+    """
+    from core import is_allowed
+    if not is_allowed(update.effective_user.id):
+        return
+
+    subs = radar_list_subs(only_active=True)
+    if not subs:
+        await update.message.reply_text("Радар не настроен, сэр.")
+        return
+
+    await update.message.reply_text(
+        "Выгружаю всё, что подходит, по темам районов. Это займёт несколько "
+        "минут — объявлений много.")
+
+    total_sent = 0
+    async with aiohttp.ClientSession() as session:
+        for sub in subs:
+            category_id = sub["category_id"]
+            age = radar_market_age_hours(category_id)
+            if age is None or age > MARKET_TTL_HOURS:
+                await rebuild_market(category_id)
+            market = radar_get_market(category_id)
+
+            skip, total, sent_here = 0, None, 0
+            while total is None or (skip < total and skip < 1000):
+                try:
+                    ads, total = await fetch_ads(session, category_id,
+                                                 sub["filters"], limit=200, skip=skip)
+                except Exception as e:
+                    logger.error(f"Радар dump #{sub['id']}: {e}")
+                    break
+                if not ads:
+                    break
+                for ad in ads:
+                    if category_id != CAT_HOUSES and not floor_ok(ad):
+                        continue
+                    below, median = evaluate(ad, market)
+                    try:
+                        if await send_ad(context.bot, sub, ad, below, median):
+                            sent_here += 1
+                            total_sent += 1
+                    except Exception as e:
+                        logger.error(f"Радар dump: {ad['id']} — {e}")
+                    await asyncio.sleep(0.4)
+                skip += 200
+
+            radar_mark_seen(sub["id"], [])
+            await update.message.reply_text(
+                f"*{sub['name']}*: отправлено {sent_here}", parse_mode="Markdown")
+
+    await update.message.reply_text(
+        f"Готово, сэр. Всего разложено по темам: {total_sent}.\n"
+        "Дальше буду присылать только новое и подешевевшее.")
 
 
 async def radar_status(update, context):
@@ -954,16 +1120,12 @@ async def radar_top_cmd(update, context):
                 f"*{sub['name']}* — подходящих {len(scored)}, показываю {min(top_n, len(scored))}",
                 parse_mode="Markdown")
 
-            target = dict(sub)
-            target["chat_id"] = update.effective_chat.id
-            target["topic_id"] = update.message.message_thread_id
-
             shown = 0
             for below, median, ad in scored:
                 if shown >= top_n:
                     break
                 try:
-                    if await send_ad(context.bot, target, ad, below, median):
+                    if await send_ad(context.bot, sub, ad, below, median):
                         shown += 1
                 except Exception as e:
                     logger.error(f"Радар top: не отправилось {ad['id']}: {e}")
