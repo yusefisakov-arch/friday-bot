@@ -1049,6 +1049,50 @@ async def radar_dump_cmd(update, context):
         "Дальше буду присылать только новое и подешевевшее.")
 
 
+async def radar_redump_cmd(update, context):
+    """/radar_redump — забыть отправленное и разложить всё заново.
+
+    Нужна, когда выгрузка уже прошла, но легла не туда: например, у бота
+    не было права заводить темы и всё ушло в общий чат. Очищает список
+    отправленного и выгружает заново — теперь уже по темам районов.
+    """
+    from core import is_allowed
+    if not is_allowed(update.effective_user.id):
+        return
+
+    subs = radar_list_subs(only_active=True)
+    if not subs:
+        await update.message.reply_text("Радар не настроен, сэр.")
+        return
+
+    chat_id = update.effective_chat.id
+    created = []
+    for key in CHISINAU_SECTORS + [HOUSES_TOPIC]:
+        if await ensure_topic(context.bot, chat_id, key):
+            created.append(key)
+        await asyncio.sleep(0.4)
+
+    if not created:
+        await update.message.reply_text(
+            "Темы завести не удалось — проверьте, что в группе включены темы, "
+            "а у меня есть право ими управлять. Пока шлю в общий чат.")
+
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM radar_sent")
+        cur.close()
+
+    await update.message.reply_text(
+        "Забыл, что уже присылал, и раскладываю всё заново. "
+        "Займёт время — между сообщениями пауза.")
+
+    async def report(text):
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+    total_sent = await dump_everything(context.bot, report=report)
+    await update.message.reply_text(f"Готово, сэр. Разложено: {total_sent}.")
+
+
 async def radar_status(update, context):
     """/radar — что настроено и в каком состоянии."""
     from core import is_allowed

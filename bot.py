@@ -18,7 +18,7 @@ from core import TELEGRAM_TOKEN, is_allowed
 from radar999 import (
     radar_init_db, radar_loop, radar_here, radar_status,
     radar_check_cmd, radar_toggle_cmd, radar_top_cmd, radar_sync_filters,
-    radar_topics_cmd, radar_dump_cmd,
+    radar_topics_cmd, radar_dump_cmd, radar_redump_cmd,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,7 @@ async def post_init(application: Application):
             BotCommand("radar_top", "🔥 Лучшее из того, что висит сейчас"),
             BotCommand("radar_topics", "🗂 Завести темы по районам"),
             BotCommand("radar_dump", "📦 Разложить всё текущее по темам"),
+            BotCommand("radar_redump", "♻️ Забыть отправленное и разложить заново"),
             BotCommand("radar_check", "Проверить 999.md прямо сейчас"),
             BotCommand("radar_here", "Настроить радар в этой группе"),
             BotCommand("start", "Справка"),
@@ -80,6 +81,7 @@ def main():
     app.add_handler(CommandHandler("radar_top", radar_top_cmd))
     app.add_handler(CommandHandler("radar_topics", radar_topics_cmd))
     app.add_handler(CommandHandler("radar_dump", radar_dump_cmd))
+    app.add_handler(CommandHandler("radar_redump", radar_redump_cmd))
     app.add_handler(CommandHandler("radar_on", radar_toggle_cmd))
     app.add_handler(CommandHandler("radar_off", radar_toggle_cmd))
     logger.info(f"Радар запущен, интервал проверки {RADAR_INTERVAL_MINUTES} мин")
