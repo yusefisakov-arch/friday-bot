@@ -149,6 +149,13 @@ def radar_init_db():
                     "ON radar_sent(fingerprint)")
         # Цена нужна, чтобы прислать объявление второй раз, если она упала.
         cur.execute("ALTER TABLE radar_sent ADD COLUMN IF NOT EXISTS price NUMERIC")
+        # Служебные отметки бота — например, что стартовая выгрузка уже была.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS radar_state (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
         # Тема группы под каждый район. Ключ — название сектора, как его
         # отдаёт 999.md, либо «Дома» для частных домов.
         cur.execute("""
@@ -329,6 +336,25 @@ def radar_mark_sent(sub_id, ad_id, fingerprint, price=None):
             "VALUES (%s,%s,%s,%s) ON CONFLICT (sub_id, ad_id) DO UPDATE "
             "SET price = LEAST(radar_sent.price, EXCLUDED.price), sent_at = now()",
             (sub_id, ad_id, fingerprint, price))
+        cur.close()
+
+
+def radar_state_get(key):
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM radar_state WHERE key=%s", (key,))
+        row = cur.fetchone()
+        cur.close()
+    return row[0] if row else None
+
+
+def radar_state_set(key, value):
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO radar_state (key, value) VALUES (%s,%s) "
+            "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+            (key, str(value)))
         cur.close()
 
 
@@ -940,24 +966,19 @@ async def radar_topics_cmd(update, context):
         "Чтобы разложить по темам всё, что висит сейчас, отправьте /radar_dump")
 
 
-async def radar_dump_cmd(update, context):
-    """/radar_dump — разложить по темам всё, что подходит прямо сейчас.
+DUMP_PAUSE_SECONDS = 3.5   # Telegram не любит больше ~20 сообщений в минуту
 
-    В отличие от /radar_top не выбирает лучшее, а выгружает всю выдачу:
-    по объявлению на сообщение, каждое в тему своего района.
+
+async def dump_everything(bot, report=None):
+    """Выгружает всю подходящую выдачу — по объявлению на сообщение.
+
+    В отличие от /radar_top ничего не отбирает: отправляет всё, что проходит
+    фильтры, каждое в тему своего района. Между сообщениями пауза, иначе
+    Telegram начнёт отбивать их как флуд. Возвращает, сколько ушло.
     """
-    from core import is_allowed
-    if not is_allowed(update.effective_user.id):
-        return
-
     subs = radar_list_subs(only_active=True)
     if not subs:
-        await update.message.reply_text("Радар не настроен, сэр.")
-        return
-
-    await update.message.reply_text(
-        "Выгружаю всё, что подходит, по темам районов. Это займёт несколько "
-        "минут — объявлений много.")
+        return 0
 
     total_sent = 0
     async with aiohttp.ClientSession() as session:
@@ -974,7 +995,7 @@ async def radar_dump_cmd(update, context):
                     ads, total = await fetch_ads(session, category_id,
                                                  sub["filters"], limit=200, skip=skip)
                 except Exception as e:
-                    logger.error(f"Радар dump #{sub['id']}: {e}")
+                    logger.error(f"Радар: выгрузка #{sub['id']} — {e}")
                     break
                 if not ads:
                     break
@@ -983,20 +1004,48 @@ async def radar_dump_cmd(update, context):
                         continue
                     below, median = evaluate(ad, market)
                     try:
-                        if await send_ad(context.bot, sub, ad, below, median):
+                        if await send_ad(bot, sub, ad, below, median):
                             sent_here += 1
                             total_sent += 1
+                            await asyncio.sleep(DUMP_PAUSE_SECONDS)
                     except Exception as e:
-                        logger.error(f"Радар dump: {ad['id']} — {e}")
-                    await asyncio.sleep(0.4)
+                        # Telegram просит подождать — ждём столько, сколько сказал
+                        wait = getattr(e, "retry_after", None)
+                        if wait:
+                            logger.warning(f"Радар: пауза {wait} с по требованию Telegram")
+                            await asyncio.sleep(float(wait) + 1)
+                        else:
+                            logger.error(f"Радар: выгрузка, {ad['id']} — {e}")
                 skip += 200
 
             radar_mark_seen(sub["id"], [])
-            await update.message.reply_text(
-                f"*{sub['name']}*: отправлено {sent_here}", parse_mode="Markdown")
+            logger.info(f"Радар: выгружено по «{sub['name']}» — {sent_here}")
+            if report:
+                await report(f"*{sub['name']}*: отправлено {sent_here}")
+
+    return total_sent
+
+
+async def radar_dump_cmd(update, context):
+    """/radar_dump — разложить по темам всё, что подходит прямо сейчас."""
+    from core import is_allowed
+    if not is_allowed(update.effective_user.id):
+        return
+
+    if not radar_list_subs(only_active=True):
+        await update.message.reply_text("Радар не настроен, сэр.")
+        return
 
     await update.message.reply_text(
-        f"Готово, сэр. Всего разложено по темам: {total_sent}.\n"
+        "Выгружаю всё, что подходит, по темам районов. Это займёт время — "
+        "между сообщениями пауза, чтобы Telegram не счёл это флудом.")
+
+    async def report(text):
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+    total_sent = await dump_everything(context.bot, report=report)
+    await update.message.reply_text(
+        f"Готово, сэр. Всего разложено: {total_sent}.\n"
         "Дальше буду присылать только новое и подешевевшее.")
 
 
@@ -1152,6 +1201,42 @@ async def radar_toggle_cmd(update, context):
     await update.message.reply_text("Включил." if turn_on else "Поставил на паузу.")
 
 
+INITIAL_DUMP_KEY = "initial_dump_done"
+
+
+async def initial_dump_once(bot):
+    """Один раз за всё время: завести темы и выгрузить в них текущую выдачу.
+
+    Нужна, чтобы радар начинал работать без единой команды: после первого
+    запуска в группе уже лежат все подходящие варианты, разложенные по
+    районам, а дальше приходят только новые и подешевевшие.
+    """
+    if radar_state_get(INITIAL_DUMP_KEY):
+        return
+
+    subs = radar_list_subs(only_active=True)
+    if not subs:
+        return
+
+    chat_id = subs[0]["chat_id"]
+    for key in CHISINAU_SECTORS + [HOUSES_TOPIC]:
+        await ensure_topic(bot, chat_id, key)
+        await asyncio.sleep(0.4)
+
+    logger.info("Радар: стартовая выгрузка началась")
+    total = await dump_everything(bot)
+    radar_state_set(INITIAL_DUMP_KEY, "1")
+    logger.info(f"Радар: стартовая выгрузка завершена, отправлено {total}")
+
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(f"Выгрузил всё, что подходит под критерии: {total} объявлений.\n"
+                  "Дальше буду присылать только новые и те, где упала цена."))
+    except Exception as e:
+        logger.warning(f"Радар: итоговое сообщение не ушло — {e}")
+
+
 async def radar_loop(bot, interval_minutes=15):
     """Фоновый цикл: проверяет подписки, пока бот жив."""
     await asyncio.sleep(30)
@@ -1164,6 +1249,11 @@ async def radar_loop(bot, interval_minutes=15):
                         f"критериев, в базе {total} подходящих")
         except Exception as e:
             logger.error(f"Радар: пересев #{sub_id} не удался: {e}")
+
+    try:
+        await initial_dump_once(bot)
+    except Exception:
+        logger.exception("Радар: стартовая выгрузка не удалась")
 
     while True:
         try:
