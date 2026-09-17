@@ -19,12 +19,14 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import statistics
 from datetime import datetime
 
 import aiohttp
 
 from core import db_conn, send_md
+import tgchannels as tg
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +93,23 @@ CATEGORY_TITLES = {CAT_APARTMENTS: "Квартиры", CAT_HOUSES: "Дома"}
 # Главный критерий отбора: цена за квадратный метр. Всё, что стоит не дороже
 # этой планки, попадает в радар — медиана района осталась только справкой
 # в карточке, порогом она больше не служит.
-MAX_PRICE_PER_M2 = 1500
+MAX_PRICE_PER_M2 = 1700
 FILTER_PRICE_M2, F_PRICE_M2 = 4251, 1385
+
+# Считаем €/м² сами, а фильтр сайта по цене за квадрат не используем.
+# Причина: на 999.md это вычисляемое поле, и у части объявлений оно пустое —
+# такие объявления фильтр молча выбрасывает, даже когда цена и площадь в них
+# есть. Отсюда и «объектов мало». Берём всё до потолка общей цены и режем
+# по квадрату уже у себя.
+USE_SITE_PRICE_M2_FILTER = False
+
+# Сколько объявлений максимум просматриваем за одну выгрузку. Раньше стояло
+# 1000 под фильтр сайта; без него выборка шире, и упираться в потолок рано.
+SCAN_LIMIT = 3000
+
+# Курсы для объявлений не в евро. Точность здесь не нужна: это отсечка по
+# потолку, а не оценка. Занижены в нашу пользу, чтобы не потерять пограничное.
+FX_TO_EUR = {"UNIT_EUR": 1.0, "UNIT_USD": 0.92, "UNIT_MDL": 1 / 19.5}
 
 MARKET_SAMPLE_PAGES = 4      # 4 × 200 = 800 объявлений на категорию для карты рынка
 MARKET_MIN_GROUP = 8         # меньше — группа слишком мала, медиане нельзя верить
@@ -164,6 +181,19 @@ def radar_init_db():
                 key      TEXT   NOT NULL,
                 topic_id BIGINT NOT NULL,
                 PRIMARY KEY (chat_id, key)
+            )
+        """)
+        # Один и тот же объект часто висит и на 999.md, и в канале. Ключ
+        # «район + улица + комнаты + площадь» узнаёт его независимо от того,
+        # откуда он пришёл, и второй раз мы его не показываем.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS radar_objects (
+                chat_id BIGINT NOT NULL,
+                okey    TEXT   NOT NULL,
+                price   NUMERIC,
+                ref     TEXT,
+                seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (chat_id, okey)
             )
         """)
         cur.execute("""
@@ -366,7 +396,11 @@ CHISINAU_SECTORS = ["Центр", "Ботаника", "Буюканы", "Рыш�
 
 def topic_key(sub, ad):
     """В какую тему идёт объявление: район города или общая тема домов."""
-    if sub["category_id"] == CAT_HOUSES:
+    return topic_key_for(ad, is_house=sub["category_id"] == CAT_HOUSES)
+
+
+def topic_key_for(ad, is_house=False):
+    if is_house or ad.get("is_house"):
         return HOUSES_TOPIC
     return (ad.get("sector") or "").strip() or "Прочее"
 
@@ -486,7 +520,7 @@ async def _gql(session, query):
 
 
 def base_filters(category_id, max_price=None, bad_condition=False, extra=None,
-                 max_price_m2=MAX_PRICE_PER_M2):
+                 max_price_m2=None):
     """Фильтры подписки.
 
     География разная по смыслу: квартиры берём только в самом Кишинёве —
@@ -513,7 +547,7 @@ def base_filters(category_id, max_price=None, bad_condition=False, extra=None,
                         "features": [{"featureId": F_FOND,
                                       "optionIds": [OPT_SECONDARY]}]})
 
-    if max_price_m2:
+    if max_price_m2 and USE_SITE_PRICE_M2_FILTER:
         # У этого фильтра на 999.md единицу указывать нельзя — с unit он
         # возвращает ноль объявлений. Значения приходят в евро.
         filters.append({"filterId": FILTER_PRICE_M2,
@@ -541,7 +575,7 @@ def base_filters(category_id, max_price=None, bad_condition=False, extra=None,
 async def fetch_ads(session, category_id, filters, limit=40, skip=0, sort="SORT_ADS_DATE_DESC"):
     rooms_feature = F_ROOMS_HOUSE if category_id == CAT_HOUSES else F_ROOMS
     wanted = (F_PRICE, F_SECTOR, F_LOCALITY, F_STREET, F_IMAGES,
-              rooms_feature, F_AREA, F_FLOOR, F_FLOORS_TOTAL, F_AUTHOR)
+              rooms_feature, F_AREA, F_FLOOR, F_FLOORS_TOTAL, F_AUTHOR, F_OFFER)
     fields = " ".join(f"f{fid}: feature(id: {fid}) {{ value }}" for fid in wanted)
     payload = {
         "subCategoryId": category_id,
@@ -587,10 +621,15 @@ def _parse_ad(raw, rooms_feature):
         "floor": _text(raw, F_FLOOR),
         "floors_total": _text(raw, F_FLOORS_TOTAL),
         "author": _text(raw, F_AUTHOR),
+        "offer": _text(raw, F_OFFER),
         "sector": _text(raw, F_SECTOR),
         "locality": _text(raw, F_LOCALITY),
         "street": _text(raw, F_STREET),
         "images": [str(i) for i in images] if isinstance(images, list) else [],
+        "photo_url": None,
+        "url": f"https://999.md/ru/{raw['id']}",
+        "source": "999.md",
+        "is_house": False,
     }
 
 
@@ -623,6 +662,41 @@ def floor_ok(ad):
     return floor <= total - 2
 
 
+# Минимальная осмысленная цена продажи. Всё, что дешевле, — это аренда,
+# доля в квартире или ошибка в объявлении.
+MIN_SALE_PRICE_EUR = 5000
+MIN_SALE_PRICE_M2 = 150
+
+# Слова, по которым видно, что это не продажа. Проверяем именно их, а не
+# «начинается на продам»: формулировки на сайте меняются, и строгая проверка
+# однажды молча выкосит вообще всё.
+NOT_A_SALE_WORDS = ("сдам", "сниму", "аренд", "куплю", "обмен",
+                    "chirie", "închiri", "inchiri", "cumpăr", "cumpar", "schimb")
+
+
+def is_real_sale(ad):
+    """Продажа ли это на самом деле.
+
+    Фильтр 999.md по типу сделки иногда пропускает аренду, а отсечка по цене
+    за квадрат её не ловит: 400 € за 50 м² — это 8 €/м², то есть «дешевле
+    1700» с огромным запасом. Поэтому проверяем сами: тип сделки не должен
+    быть арендой или обменом, а цена — не смешной.
+    """
+    offer = (ad.get("offer") or "").strip().lower()
+    if any(word in offer for word in NOT_A_SALE_WORDS):
+        return False
+
+    eur = price_eur(ad)
+    if not eur or eur < MIN_SALE_PRICE_EUR:
+        return False
+
+    per_m2 = price_per_m2_any(ad)
+    if per_m2 is not None and per_m2 < MIN_SALE_PRICE_M2:
+        return False
+
+    return True
+
+
 def price_per_m2(ad):
     """€/м². Объявления не в евро в расчёт рынка не берём — курс плавает."""
     if not ad["price"] or not ad["area"] or ad["currency"] != "UNIT_EUR":
@@ -630,6 +704,38 @@ def price_per_m2(ad):
     if ad["area"] < 10:  # мусорные данные
         return None
     return ad["price"] / ad["area"]
+
+
+def price_eur(ad):
+    """Цена в евро, с пересчётом из лея и доллара. None — если не понять."""
+    price = ad.get("price")
+    if not price:
+        return None
+    rate = FX_TO_EUR.get(ad.get("currency") or "")
+    return price * rate if rate else None
+
+
+def price_per_m2_any(ad):
+    """€/м² с пересчётом валюты — для отсечки по потолку, а не для медианы."""
+    eur = price_eur(ad)
+    area = ad.get("area")
+    if not eur or not area or area < 10:
+        return None
+    return eur / area
+
+
+def m2_ok(ad, ceiling=None):
+    """Проходит ли объявление по потолку €/м².
+
+    Площадь указана не везде. Раньше такие объявления терялись в фильтре
+    сайта; теперь пропускаем их дальше, если общая цена в рамках, — в карточке
+    будет видно, что квадратуры нет, и решение за человеком.
+    """
+    ceiling = ceiling or MAX_PRICE_PER_M2
+    per_m2 = price_per_m2_any(ad)
+    if per_m2 is None:
+        return True
+    return per_m2 <= ceiling
 
 
 # --- карта рынка ----------------------------------------------------------------
@@ -696,10 +802,62 @@ def evaluate(ad, market):
     return below, median
 
 
+def object_key(ad):
+    """Ключ объекта, общий для всех источников.
+
+    Номера объявлений у 999.md и у каналов свои, отпечаток по фотографии
+    тоже не поможет — фото там разные. Зато совпадают район, улица, число
+    комнат и площадь: этого достаточно, чтобы узнать ту же квартиру.
+    Без площади ключа нет — тогда объявление просто идёт как новое.
+    """
+    area = ad.get("area")
+    if not area:
+        return None
+    sector = (ad.get("sector") or "").strip().lower()
+    street = re.sub(r"[^a-zа-яё0-9]+", "", (ad.get("street") or "").lower())
+    rooms = (ad.get("rooms") or "").strip()
+    return f"{sector}|{street}|{rooms}|{round(float(area))}"
+
+
+def object_check(chat_id, ad):
+    """(решение, прежняя цена): 'new' — не встречался, 'drop' — подешевел,
+    'dup' — уже показывали по такой же цене или дороже."""
+    okey = object_key(ad)
+    if not okey:
+        return "new", None
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT price FROM radar_objects WHERE chat_id=%s AND okey=%s",
+                    (chat_id, okey))
+        row = cur.fetchone()
+        cur.close()
+    if not row:
+        return "new", None
+    was = float(row[0]) if row[0] is not None else None
+    now = price_eur(ad)
+    if was and now and now < was * 0.99:
+        return "drop", was
+    return "dup", was
+
+
+def object_remember(chat_id, ad):
+    okey = object_key(ad)
+    if not okey:
+        return
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO radar_objects (chat_id, okey, price, ref) VALUES (%s,%s,%s,%s) "
+            "ON CONFLICT (chat_id, okey) DO UPDATE SET price=EXCLUDED.price, "
+            "ref=EXCLUDED.ref, seen_at=now()",
+            (chat_id, okey, price_eur(ad), ad.get("url")))
+        cur.close()
+
+
 # --- отправка -------------------------------------------------------------------
 
 def render(ad, below_pct, median, category=None, price_drop=None):
-    per_m2 = price_per_m2(ad)
+    per_m2 = price_per_m2_any(ad)
 
     if price_drop:
         was = f"{price_drop:,.0f}".replace(",", " ")
@@ -716,6 +874,8 @@ def render(ad, below_pct, median, category=None, price_drop=None):
     facts = []
     if ad["area"]:
         facts.append(f"{ad['area']:g} м²")
+    else:
+        facts.append("площадь не указана")
     if ad["floor"]:
         total = (ad.get("floors_total") or "").strip()
         facts.append(f"этаж {ad['floor']} из {total}" if total else f"этаж {ad['floor']}")
@@ -743,7 +903,11 @@ def render(ad, below_pct, median, category=None, price_drop=None):
         icon = "👤" if author.lower().startswith("частн") else "🏢"
         lines.append(f"{icon} {author}")
 
-    lines.append(f"\nhttps://999.md/ru/{ad['id']}")
+    source = ad.get("source")
+    if source and source != "999.md":
+        lines.append(f"📡 {source}")
+
+    lines.append("\n" + (ad.get("url") or f"https://999.md/ru/{ad['id']}"))
     if category:
         tag = "".join(ch if ch.isalnum() else "_" for ch in category).strip("_")
         lines.append(f"#{tag}")
@@ -774,6 +938,16 @@ async def send_ad(bot, sub, ad, below_pct, median):
             logger.info(f"Радар: {ad['id']} уже отправляли, пропускаю")
             return False
 
+    # Тот же объект мог прийти из другого источника под другим номером.
+    if price_drop is None:
+        verdict, was_eur = object_check(sub["chat_id"], ad)
+        if verdict == "dup":
+            logger.info(f"Радар: {ad['id']} — этот объект уже показывали "
+                        f"из другого источника, пропускаю")
+            return False
+        if verdict == "drop" and ad.get("currency") == "UNIT_EUR":
+            price_drop = was_eur
+
     key = topic_key(sub, ad)
     topic_id = await ensure_topic(bot, sub["chat_id"], key)
 
@@ -785,17 +959,21 @@ async def send_ad(bot, sub, ad, below_pct, median):
                   category=None if topic_id else key,
                   price_drop=price_drop)
 
-    if ad["images"]:
+    photo = ad.get("photo_url")
+    if not photo and ad["images"]:
         photo = f"{IMAGE_BASE}/640x480/{ad['images'][0]}"
+    if photo:
         try:
             await bot.send_photo(photo=photo, caption=text, parse_mode="Markdown", **kwargs)
             radar_mark_sent(sub["id"], ad["id"], fingerprint, price)
+            object_remember(sub["chat_id"], ad)
             return True
         except Exception as e:
             logger.warning(f"Радар: фото с разметкой не ушло ({e})")
             try:
                 await bot.send_photo(photo=photo, caption=strip_markup(text), **kwargs)
                 radar_mark_sent(sub["id"], ad["id"], fingerprint, price)
+                object_remember(sub["chat_id"], ad)
                 return True
             except Exception as e2:
                 logger.warning(f"Радар: фото не ушло совсем ({e2}), шлю текстом")
@@ -805,6 +983,7 @@ async def send_ad(bot, sub, ad, below_pct, median):
         logger.warning(f"Радар: разметка не прошла ({e}), шлю простым текстом")
         await bot.send_message(text=strip_markup(text), **kwargs)
     radar_mark_sent(sub["id"], ad["id"], fingerprint, price)
+    object_remember(sub["chat_id"], ad)
     return True
 
 
@@ -840,6 +1019,10 @@ async def radar_check_all(bot, force=False):
             picked = []
             for ad in ads:
                 if ad["id"] not in fresh_set:
+                    continue
+                if not is_real_sale(ad):
+                    continue
+                if not m2_ok(ad, sub.get("max_price_m2")):
                     continue
                 if category_id != CAT_HOUSES and not floor_ok(ad):
                     continue
@@ -933,8 +1116,94 @@ async def radar_here(update, context):
     )
 
 
+def normalize_topic_name(raw):
+    """Приводит название темы к нашему ключу.
+
+    Тему в группе человек мог назвать как угодно: «ботаника», «Ботаника 🏠»,
+    «Рышкановка/Rîșcani». Сверяем по первому совпадению слова, чтобы привязка
+    не срывалась из-за регистра, эмодзи и лишних слов.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    low = text.lower()
+    for key in CHISINAU_SECTORS + [HOUSES_TOPIC, "Прочее"]:
+        if key.lower() in low:
+            return key
+    return None
+
+
+async def radar_bind_cmd(update, context):
+    """/bind [Район] — привязать тему, созданную руками, к району.
+
+    Боту нельзя просто спросить у Telegram список тем группы — такого метода
+    в Bot API нет. Поэтому темы, созданные человеком, бот сам не видит и лепит
+    всё в общий чат. Эта команда решает вопрос: заходим в нужную тему, пишем
+    в ней /bind — бот запоминает её номер и дальше шлёт туда.
+    """
+    from core import is_allowed
+    if not is_allowed(update.effective_user.id):
+        return
+    chat = update.effective_chat
+    msg = update.message
+    if chat.type not in ("group", "supergroup"):
+        await msg.reply_text("Эту команду нужно отправить в группе, внутри темы.")
+        return
+
+    thread_id = msg.message_thread_id
+    if not thread_id:
+        await msg.reply_text(
+            "Отправьте /bind внутри темы района — я запомню именно её.\n"
+            "Например: зайдите в тему «Ботаника» и напишите там /bind")
+        return
+
+    # 1) что написали руками; 2) название самой темы, если Telegram его дал
+    raw = " ".join(context.args).strip() if context.args else ""
+    if not raw:
+        created = getattr(msg.reply_to_message, "forum_topic_created", None) \
+            if msg.reply_to_message else None
+        raw = getattr(created, "name", "") or ""
+
+    key = normalize_topic_name(raw)
+    if not key:
+        await msg.reply_text(
+            "Не понял, какой это район. Напишите прямо: /bind Ботаника\n\n"
+            "Известные: " + ", ".join(CHISINAU_SECTORS + [HOUSES_TOPIC, "Прочее"]))
+        return
+
+    radar_init_db()
+    radar_save_topic(chat.id, key, thread_id)
+    logger.info(f"Радар: тема {thread_id} привязана к «{key}»")
+    await msg.reply_text(
+        f"Готово: «{key}» — эта тема. Всё по району буду присылать сюда.\n"
+        "Когда привяжете все районы, отправьте /radar_dump — разложу текущие варианты.")
+
+
+async def radar_unbind_cmd(update, context):
+    """/unbind — снять привязку темы, из которой отправлена команда."""
+    from core import is_allowed
+    if not is_allowed(update.effective_user.id):
+        return
+    chat = update.effective_chat
+    thread_id = update.message.message_thread_id
+    if not thread_id:
+        await update.message.reply_text("Отправьте /unbind внутри темы.")
+        return
+    radar_init_db()
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM radar_topics WHERE chat_id=%s AND topic_id=%s "
+                    "RETURNING key", (chat.id, thread_id))
+        rows = cur.fetchall()
+        cur.close()
+    if rows:
+        await update.message.reply_text("Привязка снята: " + ", ".join(r[0] for r in rows))
+    else:
+        await update.message.reply_text("Эта тема ни к чему не привязана.")
+
+
 async def radar_topics_cmd(update, context):
-    """/radar_topics — завести в этой группе тему под каждый район."""
+    """/radar_topics — показать привязки и завести недостающие темы."""
     from core import is_allowed
     if not is_allowed(update.effective_user.id):
         return
@@ -944,26 +1213,33 @@ async def radar_topics_cmd(update, context):
         return
 
     radar_init_db()
-    created, existed = [], []
+    created, known, failed = [], [], []
     for key in CHISINAU_SECTORS + [HOUSES_TOPIC]:
         if radar_get_topic(chat.id, key):
-            existed.append(key)
+            known.append(key)
             continue
         topic_id = await ensure_topic(context.bot, chat.id, key)
-        (created if topic_id else existed).append(key)
+        (created if topic_id else failed).append(key)
         await asyncio.sleep(0.4)
 
-    if not created:
-        await update.message.reply_text(
-            "Темы уже заведены. Если их не видно — проверьте, что в группе "
-            "включены темы, а бот админ с правом ими управлять.")
-        return
+    parts = []
+    if known:
+        parts.append("Уже привязаны: " + ", ".join(known))
+    if created:
+        parts.append("Создал: " + ", ".join(created))
+    if failed:
+        parts.append(
+            "Не смог создать: " + ", ".join(failed) + ".\n"
+            "Скорее всего, у меня нет права управлять темами. Два пути:\n"
+            "• дайте мне в настройках группы права админа с «Управление темами», "
+            "потом повторите /radar\\_topics;\n"
+            "• или, если темы вы уже создали руками, зайдите в каждую и напишите "
+            "в ней /bind — я запомню её сам, никаких прав для этого не нужно.")
+    if not failed:
+        parts.append("Чтобы разложить по темам всё, что висит сейчас, "
+                     "отправьте /radar\\_dump")
 
-    await update.message.reply_text(
-        "Темы созданы: " + ", ".join(created) +
-        ("\nУже были: " + ", ".join(existed) if existed else "") +
-        "\n\nТеперь каждое объявление уходит в тему своего района. "
-        "Чтобы разложить по темам всё, что висит сейчас, отправьте /radar_dump")
+    await update.message.reply_text("\n\n".join(parts), parse_mode="Markdown")
 
 
 DUMP_PAUSE_SECONDS = 3.5   # Telegram не любит больше ~20 сообщений в минуту
@@ -990,7 +1266,7 @@ async def dump_everything(bot, report=None):
             market = radar_get_market(category_id)
 
             skip, total, sent_here = 0, None, 0
-            while total is None or (skip < total and skip < 1000):
+            while total is None or (skip < total and skip < SCAN_LIMIT):
                 try:
                     ads, total = await fetch_ads(session, category_id,
                                                  sub["filters"], limit=200, skip=skip)
@@ -1000,6 +1276,10 @@ async def dump_everything(bot, report=None):
                 if not ads:
                     break
                 for ad in ads:
+                    if not is_real_sale(ad):
+                        continue
+                    if not m2_ok(ad, sub.get("max_price_m2")):
+                        continue
                     if category_id != CAT_HOUSES and not floor_ok(ad):
                         continue
                     below, median = evaluate(ad, market)
@@ -1080,6 +1360,7 @@ async def radar_redump_cmd(update, context):
     with db_conn() as conn:
         cur = conn.cursor()
         cur.execute("DELETE FROM radar_sent")
+        cur.execute("DELETE FROM radar_objects WHERE chat_id=%s", (chat_id,))
         cur.close()
 
     await update.message.reply_text(
@@ -1183,7 +1464,7 @@ async def radar_top_cmd(update, context):
             scored = []
             skip = 0
             total = None
-            while total is None or (skip < total and skip < 1000):
+            while total is None or (skip < total and skip < SCAN_LIMIT):
                 try:
                     ads, total = await fetch_ads(session, category_id, sub["filters"],
                                                  limit=200, skip=skip)
@@ -1193,6 +1474,10 @@ async def radar_top_cmd(update, context):
                 if not ads:
                     break
                 for ad in ads:
+                    if not is_real_sale(ad):
+                        continue
+                    if not m2_ok(ad, sub.get("max_price_m2")):
+                        continue
                     if category_id != CAT_HOUSES and not floor_ok(ad):
                         continue
                     below, median = evaluate(ad, market)
@@ -1202,7 +1487,7 @@ async def radar_top_cmd(update, context):
                 skip += 200
                 await asyncio.sleep(0.5)
 
-            scored.sort(key=lambda x: price_per_m2(x[2]) or 1e9)
+            scored.sort(key=lambda x: price_per_m2_any(x[2]) or 1e9)
             if not scored:
                 await update.message.reply_text(
                     f"*{sub['name']}*: подходящих под порог сейчас нет.",
@@ -1305,4 +1590,229 @@ async def radar_loop(bot, interval_minutes=15):
             await radar_check_all(bot)
         except Exception:
             logger.exception("Радар: сбой цикла")
+        try:
+            await check_channels(bot)
+        except Exception:
+            logger.exception("Радар: сбой обхода каналов")
         await asyncio.sleep(interval_minutes * 60)
+
+
+# --- телеграм-каналы как второй источник ----------------------------------------
+
+# Каналу выдаётся «псевдоподписка» с отрицательным номером: так посты каналов
+# проходят через ту же отправку, дедупликацию и темы, что и 999.md, а их
+# отметки в radar_sent не пересекаются с настоящими подписками.
+def channel_sub(channel):
+    return {
+        "id": -channel["id"],
+        "name": f"@{channel['username']}",
+        "chat_id": channel["chat_id"],
+        "topic_id": None,
+        "category_id": CAT_APARTMENTS,   # дом определяется по тексту поста
+        "max_price": DEFAULT_MAX_PRICE,
+        "discount": 0,
+    }
+
+
+CHANNEL_PAUSE_SECONDS = 2.0
+
+
+def channel_wanted(ad):
+    """Проходит ли пост канала наши правила. Возвращает (да/нет, причина)."""
+    if not is_real_sale(ad):
+        return False, "не продажа"
+    eur = price_eur(ad)
+    if eur and eur > DEFAULT_MAX_PRICE:
+        return False, f"дороже {DEFAULT_MAX_PRICE} €"
+    if not m2_ok(ad):
+        return False, "дороже потолка за квадрат"
+    if not ad.get("is_house") and not floor_ok(ad):
+        return False, "неподходящий этаж"
+    return True, ""
+
+
+async def check_channels(bot, chat_id=None, deep=False):
+    """Обходит подключённые каналы и отправляет подходящее в темы районов."""
+    tg.ch_init_db()
+    channels = tg.ch_list(chat_id=chat_id)
+    if not channels:
+        return 0, 0
+
+    market = radar_get_market(CAT_APARTMENTS)
+    scanned = sent = 0
+
+    async with aiohttp.ClientSession() as session:
+        for ch in channels:
+            first_time = deep or not ch["last_post_id"]
+            pages = tg.PAGES_ON_FIRST_DUMP if first_time else tg.PAGES_PER_CHECK
+            try:
+                posts, _ = await tg.fetch_channel(
+                    session, ch["username"], pages=pages,
+                    stop_at=0 if deep else ch["last_post_id"])
+            except Exception as e:
+                logger.error(f"Канал @{ch['username']}: не прочитался — {e}")
+                continue
+
+            sub = channel_sub(ch)
+            newest = ch["last_post_id"]
+            for post in posts:
+                scanned += 1
+                newest = max(newest, post["post_id"])
+                ad = tg.post_to_ad(post)
+                if not ad:
+                    continue
+                good, why = channel_wanted(ad)
+                if not good:
+                    logger.debug(f"Канал @{ch['username']} #{post['post_id']}: {why}")
+                    continue
+                below, median = evaluate(ad, market)
+                try:
+                    if await send_ad(bot, sub, ad, below, median):
+                        sent += 1
+                        await asyncio.sleep(CHANNEL_PAUSE_SECONDS)
+                except Exception as e:
+                    wait = getattr(e, "retry_after", None)
+                    if wait:
+                        await asyncio.sleep(float(wait) + 1)
+                    else:
+                        logger.error(f"Канал @{ch['username']} #{post['post_id']}: {e}")
+
+            tg.ch_set_last(ch["id"], newest)
+            logger.info(f"Канал @{ch['username']}: постов {len(posts)}, отправлено {sent}")
+            await asyncio.sleep(1.0)
+
+    return scanned, sent
+
+
+CHANNEL_RE = re.compile(r"(?:https?://)?(?:t\.me/|telegram\.me/|@)?([A-Za-z0-9_]{4,32})/?$")
+
+
+def parse_channel_arg(raw):
+    m = CHANNEL_RE.match((raw or "").strip())
+    return m.group(1) if m else None
+
+
+async def ch_add_cmd(update, context):
+    """/ch_add @канал — подключить публичный телеграм-канал как источник."""
+    from core import is_allowed
+    if not is_allowed(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Пришлите ссылку или имя канала: /ch\\_add @moldova\\_imobil\n"
+            "Канал должен быть публичным — закрытые и группы так не читаются.",
+            parse_mode="Markdown")
+        return
+
+    username = parse_channel_arg(context.args[0])
+    if not username:
+        await update.message.reply_text("Не разобрал имя канала. Пример: /ch_add @имя_канала")
+        return
+
+    await update.message.reply_text(f"Смотрю @{username}…")
+    try:
+        async with aiohttp.ClientSession() as session:
+            posts, title = await tg.fetch_channel(session, username, pages=1, stop_at=0)
+    except Exception as e:
+        await update.message.reply_text(
+            f"Не смог прочитать @{username}: {e}\n\n"
+            "Обычно это значит, что канал закрытый, это группа, а не канал, "
+            "или у него выключен предпросмотр в вебе.")
+        return
+
+    if not posts:
+        await update.message.reply_text(
+            f"Страница @{username} открылась, но постов на ней нет. "
+            "Скорее всего, это группа или канал с выключенным предпросмотром — "
+            "такие прочитать нельзя.")
+        return
+
+    # показываем, что именно бот вычитал — чтобы сразу было видно, понял он формат или нет
+    good = []
+    for post in posts:
+        ad = tg.post_to_ad(post)
+        if ad and channel_wanted(ad)[0]:
+            good.append(ad)
+
+    tg.ch_init_db()
+    tg.ch_add(update.effective_chat.id, username, title)
+
+    sample = posts[-1]
+    sample_ad = tg.post_to_ad(sample) or {}
+    lines = [
+        f"Подключил *@{username}*" + (f" — {title}" if title else ""),
+        f"На первой странице постов: {len(posts)}, подходящих под фильтры: {len(good)}",
+        "",
+        "*Как я читаю последний пост:*",
+        f"цена: {sample_ad.get('price') or '—'} "
+        f"{ {'UNIT_EUR':'€','UNIT_USD':'$','UNIT_MDL':'лей'}.get(sample_ad.get('currency'), '') }",
+        f"площадь: {sample_ad.get('area') or '—'} м²",
+        f"этаж: {sample_ad.get('floor') or '—'}"
+        + (f"/{sample_ad.get('floors_total')}" if sample_ad.get("floors_total") else ""),
+        f"комнат: {sample_ad.get('rooms') or '—'}",
+        f"район: {sample_ad.get('sector') or 'не определён'}",
+        "",
+        "Если тут пусто там, где в посте цифры есть — скажите, поправлю разбор.",
+        "Выгрузить всё подходящее из канала: /ch\\_dump",
+    ]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def ch_list_cmd(update, context):
+    """/ch_list — какие каналы подключены."""
+    from core import is_allowed
+    if not is_allowed(update.effective_user.id):
+        return
+    tg.ch_init_db()
+    rows = tg.ch_list(chat_id=update.effective_chat.id, only_active=False)
+    if not rows:
+        await update.message.reply_text(
+            "Каналы не подключены. Добавить: /ch_add @имя_канала")
+        return
+    lines = ["*Подключённые каналы*", ""]
+    for ch in rows:
+        mark = "" if ch["active"] else " (выключен)"
+        lines.append(f"• @{ch['username']}{mark} — {ch['title'] or 'без названия'}")
+    lines.append("\nУбрать: /ch\\_del @имя\\_канала")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def ch_del_cmd(update, context):
+    """/ch_del @канал — отключить канал."""
+    from core import is_allowed
+    if not is_allowed(update.effective_user.id):
+        return
+    username = parse_channel_arg(context.args[0]) if context.args else None
+    if not username:
+        await update.message.reply_text("Пример: /ch_del @имя_канала")
+        return
+    tg.ch_init_db()
+    if tg.ch_delete(update.effective_chat.id, username):
+        await update.message.reply_text(f"Отключил @{username}.")
+    else:
+        await update.message.reply_text(f"@{username} и не был подключён.")
+
+
+async def ch_check_cmd(update, context):
+    """/ch_check — пройти по каналам прямо сейчас."""
+    from core import is_allowed
+    if not is_allowed(update.effective_user.id):
+        return
+    await update.message.reply_text("Иду по каналам…")
+    scanned, sent = await check_channels(context.bot, chat_id=update.effective_chat.id)
+    await update.message.reply_text(
+        f"Просмотрел постов: {scanned}, отправил: {sent}." if scanned
+        else "Новых постов в каналах нет.")
+
+
+async def ch_dump_cmd(update, context):
+    """/ch_dump — вычитать каналы поглубже и выгрузить всё подходящее."""
+    from core import is_allowed
+    if not is_allowed(update.effective_user.id):
+        return
+    await update.message.reply_text(
+        "Листаю каналы вглубь — это займёт несколько минут.")
+    scanned, sent = await check_channels(context.bot, chat_id=update.effective_chat.id,
+                                         deep=True)
+    await update.message.reply_text(
+        f"Готово: просмотрел {scanned} постов, отправил {sent}.")

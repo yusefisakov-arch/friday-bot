@@ -5,3 +5,6 @@ __pycache__/
 venv/
 .claude/
 *.bak
+
+_to_delete/
+*.lock

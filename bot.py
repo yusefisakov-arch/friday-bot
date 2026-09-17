@@ -19,6 +19,8 @@ from radar999 import (
     radar_init_db, radar_loop, radar_here, radar_status,
     radar_check_cmd, radar_toggle_cmd, radar_top_cmd, radar_sync_filters,
     radar_topics_cmd, radar_dump_cmd, radar_redump_cmd,
+    radar_bind_cmd, radar_unbind_cmd,
+    ch_add_cmd, ch_list_cmd, ch_del_cmd, ch_check_cmd, ch_dump_cmd,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,8 +39,13 @@ HELP = (
     "/radar — что настроено и когда проверял\n"
     "/radar\\_top — лучшее из того, что висит на 999.md сейчас\n"
     "/radar\\_topics — завести темы по районам\n"
+    "/bind Район — привязать тему, которую вы создали сами\n"
     "/radar\\_dump — разложить по темам все текущие варианты\n"
-    "/radar\\_check — проверить прямо сейчас\n"
+    "/radar\\_check — проверить прямо сейчас\n\n"
+    "*Телеграм-каналы*\n"
+    "/ch\\_add @канал — подключить публичный канал\n"
+    "/ch\\_list — подключённые каналы\n"
+    "/ch\\_dump — выгрузить из каналов всё подходящее\n"
     "/radar\\_on N, /radar\\_off N — включить или приостановить\n"
 )
 
@@ -55,9 +62,13 @@ async def post_init(application: Application):
             BotCommand("radar", "🎯 Что настроено и когда проверял"),
             BotCommand("radar_top", "🔥 Лучшее из того, что висит сейчас"),
             BotCommand("radar_topics", "🗂 Завести темы по районам"),
+            BotCommand("bind", "📌 Привязать эту тему к району"),
             BotCommand("radar_dump", "📦 Разложить всё текущее по темам"),
             BotCommand("radar_redump", "♻️ Забыть отправленное и разложить заново"),
             BotCommand("radar_check", "Проверить 999.md прямо сейчас"),
+            BotCommand("ch_add", "📡 Подключить телеграм-канал"),
+            BotCommand("ch_list", "📡 Подключённые каналы"),
+            BotCommand("ch_dump", "📡 Выгрузить всё из каналов"),
             BotCommand("radar_here", "Настроить радар в этой группе"),
             BotCommand("start", "Справка"),
         ])
@@ -80,8 +91,15 @@ def main():
     app.add_handler(CommandHandler("radar_check", radar_check_cmd))
     app.add_handler(CommandHandler("radar_top", radar_top_cmd))
     app.add_handler(CommandHandler("radar_topics", radar_topics_cmd))
+    app.add_handler(CommandHandler("bind", radar_bind_cmd))
+    app.add_handler(CommandHandler("unbind", radar_unbind_cmd))
     app.add_handler(CommandHandler("radar_dump", radar_dump_cmd))
     app.add_handler(CommandHandler("radar_redump", radar_redump_cmd))
+    app.add_handler(CommandHandler("ch_add", ch_add_cmd))
+    app.add_handler(CommandHandler("ch_list", ch_list_cmd))
+    app.add_handler(CommandHandler("ch_del", ch_del_cmd))
+    app.add_handler(CommandHandler("ch_check", ch_check_cmd))
+    app.add_handler(CommandHandler("ch_dump", ch_dump_cmd))
     app.add_handler(CommandHandler("radar_on", radar_toggle_cmd))
     app.add_handler(CommandHandler("radar_off", radar_toggle_cmd))
     logger.info(f"Радар запущен, интервал проверки {RADAR_INTERVAL_MINUTES} мин")
