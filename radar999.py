@@ -389,9 +389,17 @@ def radar_state_set(key, value):
 
 
 HOUSES_TOPIC = "Дома"
+# Подешевевшее уходит в свою тему, а не в тему района. Снижение цены —
+# сигнал сильнее самого района: продавец начал двигаться. Держать это
+# вперемешку с новыми объявлениями значит потерять момент.
+DROPS_TOPIC = "Подешевело"
+
+# Все темы, которые бот заводит и умеет привязывать
 # Секторы Кишинёва в том виде, в каком их присылает 999.md
 CHISINAU_SECTORS = ["Центр", "Ботаника", "Буюканы", "Рышкановка", "Чокана",
                     "Телецентр", "Старая Почта", "Скулянка", "Аэропорт"]
+
+ALL_TOPICS = CHISINAU_SECTORS + [HOUSES_TOPIC, DROPS_TOPIC]
 
 
 def topic_key(sub, ad):
@@ -948,16 +956,20 @@ async def send_ad(bot, sub, ad, below_pct, median):
         if verdict == "drop" and ad.get("currency") == "UNIT_EUR":
             price_drop = was_eur
 
-    key = topic_key(sub, ad)
+    key = DROPS_TOPIC if price_drop else topic_key(sub, ad)
     topic_id = await ensure_topic(bot, sub["chat_id"], key)
 
     kwargs = {"chat_id": sub["chat_id"]}
     if topic_id:
         kwargs["message_thread_id"] = topic_id
-    # В теме район и так на виду; в общем чате нужен тег.
-    text = render(ad, below_pct, median,
-                  category=None if topic_id else key,
-                  price_drop=price_drop)
+
+    # В теме района он и так на виду. А вот в «Подешевело» собраны все районы
+    # вперемешку — там район нужен тегом, чтобы можно было отфильтровать.
+    if price_drop and topic_id:
+        tag = topic_key(sub, ad)
+    else:
+        tag = None if topic_id else key
+    text = render(ad, below_pct, median, category=tag, price_drop=price_drop)
 
     photo = ad.get("photo_url")
     if not photo and ad["images"]:
@@ -1127,9 +1139,12 @@ def normalize_topic_name(raw):
     if not text:
         return None
     low = text.lower()
-    for key in CHISINAU_SECTORS + [HOUSES_TOPIC, "Прочее"]:
+    for key in ALL_TOPICS + ["Прочее"]:
         if key.lower() in low:
             return key
+    # «подешевело», «снижение цены», «торг» — всё это одна тема
+    if re.search(r"подешев|снижен|скидк|упала цена", low):
+        return DROPS_TOPIC
     return None
 
 
@@ -1168,7 +1183,7 @@ async def radar_bind_cmd(update, context):
     if not key:
         await msg.reply_text(
             "Не понял, какой это район. Напишите прямо: /bind Ботаника\n\n"
-            "Известные: " + ", ".join(CHISINAU_SECTORS + [HOUSES_TOPIC, "Прочее"]))
+            "Известные: " + ", ".join(ALL_TOPICS + ["Прочее"]))
         return
 
     radar_init_db()
@@ -1214,7 +1229,7 @@ async def radar_topics_cmd(update, context):
 
     radar_init_db()
     created, known, failed = [], [], []
-    for key in CHISINAU_SECTORS + [HOUSES_TOPIC]:
+    for key in ALL_TOPICS:
         if radar_get_topic(chat.id, key):
             known.append(key)
             continue
@@ -1347,7 +1362,7 @@ async def radar_redump_cmd(update, context):
 
     chat_id = update.effective_chat.id
     created = []
-    for key in CHISINAU_SECTORS + [HOUSES_TOPIC]:
+    for key in ALL_TOPICS:
         if await ensure_topic(context.bot, chat_id, key):
             created.append(key)
         await asyncio.sleep(0.4)
@@ -1548,7 +1563,7 @@ async def initial_dump_once(bot):
         return
 
     chat_id = subs[0]["chat_id"]
-    for key in CHISINAU_SECTORS + [HOUSES_TOPIC]:
+    for key in ALL_TOPICS:
         await ensure_topic(bot, chat_id, key)
         await asyncio.sleep(0.4)
 
