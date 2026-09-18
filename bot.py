@@ -11,8 +11,8 @@ import asyncio
 import logging
 import os
 
-from telegram import (Update, BotCommand, BotCommandScopeChat,
-                      BotCommandScopeDefault)
+from telegram import (Update, BotCommand, BotCommandScopeAllChatAdministrators,
+                      BotCommandScopeChat, BotCommandScopeDefault)
 from telegram.ext import (Application, ApplicationHandlerStop, CommandHandler,
                           ContextTypes, CallbackQueryHandler, MessageHandler,
                           TypeHandler, filters)
@@ -93,9 +93,12 @@ async def post_init(application: Application):
         BotCommand("start", "Справка"),
     ]
     try:
-        # Меню команд видит только владелец. Для всех остальных — пустое,
-        # чтобы не раскрывать возможности бота посторонним.
+        # По умолчанию меню пустое — обычные сотрудники команд не видят
+        # (они работают кнопками). Меню показываем администраторам групп
+        # (то есть вам) и вам лично в личке.
         await application.bot.set_my_commands([], scope=BotCommandScopeDefault())
+        await application.bot.set_my_commands(
+            commands, scope=BotCommandScopeAllChatAdministrators())
         if ALLOWED_USER_ID:
             await application.bot.set_my_commands(
                 commands, scope=BotCommandScopeChat(chat_id=ALLOWED_USER_ID))
@@ -163,8 +166,9 @@ def main():
     app.add_handler(CommandHandler("done", done_cmd))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(CallbackQueryHandler(crew_button, pattern=r"^crew:"))
-    # последним: ловит пояснение к «Проблеме», всё остальное пропускает мимо
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
+    # последним: ведёт пошаговый разбор «Проблемы» (текст и фото),
+    # всё остальное пропускает мимо
+    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND,
                                    catch_problem_note))
     logger.info(f"Радар запущен, интервал проверки {RADAR_INTERVAL_MINUTES} мин")
     app.run_polling(drop_pending_updates=True)

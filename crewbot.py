@@ -10,7 +10,7 @@ from datetime import timedelta
 from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 
-from core import db_conn, is_allowed, now_local, ALLOWED_USER_ID
+from core import db_conn, is_allowed, now_local, send_md, ALLOWED_USER_ID
 import crew as C
 
 logger = logging.getLogger(__name__)
@@ -18,8 +18,10 @@ logger = logging.getLogger(__name__)
 HQ_KEY = "hq_chat_id"
 CHECK_EVERY_SECONDS = 180
 
-# Кого бот ждёт с пояснением к «Проблеме»: (chat_id, user_id) -> номер задачи
-AWAITING_NOTE = {}
+# Активные разборы «Проблемы», по одному на человека в чате:
+# (chat_id, user_id) -> {"tid", "step", "desc", "photo", "solution"}
+# step: desc -> photo -> solution. По завершении уходит отчёт в Штаб.
+PROBLEM_FLOW = {}
 
 
 # --- вспомогательное ------------------------------------------------------------
@@ -419,13 +421,14 @@ async def crew_button(update, context):
                             f"Срок был {C.fmt_due(task['due_at'])}")
     elif action == "problem":
         C.task_update(tid, status=C.STATUS_PROBLEM)
-        AWAITING_NOTE[(query.message.chat_id, user.id)] = tid
-        await query.answer("Напишите, что случилось")
+        PROBLEM_FLOW[(query.message.chat_id, user.id)] = {
+            "tid": tid, "step": "desc", "desc": "", "photo": None, "solution": ""}
+        await query.answer("Опишите проблему")
         await context.bot.send_message(
             chat_id=query.message.chat_id,
             message_thread_id=query.message.message_thread_id,
-            text=f"{mention(person) if person else ''} напишите одним сообщением, "
-                 f"что мешает по задаче «{task['title']}» — передам.",
+            text=f"{mention(person) if person else ''} что случилось по задаче "
+                 f"«{task['title']}»? Опишите одним сообщением.",
             reply_markup=ForceReply(selective=bool(person and person.get("username"))))
     else:
         await query.answer()
@@ -435,32 +438,89 @@ async def crew_button(update, context):
 
 
 async def catch_problem_note(update, context):
-    """Ловит пояснение к «Проблеме» — следующее сообщение того, кто нажал."""
+    """Пошаговый разбор «Проблемы»: что случилось → фото → как решить.
+    Ведётся только с тем, кто нажал кнопку; в конце уходит отчёт в Штаб.
+    Свободного разговора с ботом нет — вне активного разбора всё игнорим."""
     msg = update.message
-    if not msg or not msg.text:
+    if not msg:
         return
-    # Только в группах и только по задаче — свободного разговора с ботом нет.
+    # Только в группах и только по активной задаче.
     if msg.chat.type not in ("group", "supergroup"):
         return
     key = (msg.chat_id, msg.from_user.id)
-    tid = AWAITING_NOTE.pop(key, None)
-    if not tid:
+    flow = PROBLEM_FLOW.get(key)
+    if not flow:
         return
 
+    text = (msg.text or msg.caption or "").strip()
+    step = flow["step"]
+
+    if step == "desc":
+        if not text:
+            await msg.reply_text("Опишите словами, в чём проблема.")
+            return
+        flow["desc"] = text[:1000]
+        flow["step"] = "photo"
+        await msg.reply_text(
+            "Принял. Нужно фото — пришлите его. Если фото не нужно, напишите «нет».",
+            reply_markup=ForceReply(selective=True))
+        return
+
+    if step == "photo":
+        if msg.photo:
+            flow["photo"] = msg.photo[-1].file_id
+        elif text.lower() in ("нет", "no", "-", "пропустить", "skip", "не надо"):
+            flow["photo"] = None
+        else:
+            await msg.reply_text("Пришлите фото или напишите «нет».")
+            return
+        flow["step"] = "solution"
+        await msg.reply_text(
+            "Хорошо. Как, по-вашему, это решить?",
+            reply_markup=ForceReply(selective=True))
+        return
+
+    if step == "solution":
+        if not text:
+            await msg.reply_text("Напишите, как предлагаете решить.")
+            return
+        flow["solution"] = text[:1000]
+        PROBLEM_FLOW.pop(key, None)
+        await _finish_problem(context.bot, msg, flow)
+
+
+async def _finish_problem(bot, msg, flow):
+    """Сохраняет разбор в задачу и шлёт полноценный отчёт в Штаб (+фото)."""
     C.crew_init_db()
+    tid = flow["tid"]
     task = C.task_get(tid)
     if not task:
         return
-    C.task_update(tid, note=msg.text.strip()[:500])
     person = C.person_by_id(task["person_id"])
-    await refresh_card(context.bot, tid)
-    await msg.reply_text("Передал.")
-    await tell_boss(
-        context.bot,
-        f"⚠️ *{person['name'] if person else '?'}* сообщает о проблеме\n"
-        f"Задача: {task['title']}\n"
+
+    C.task_update(tid, note=f"{flow['desc']}\n\nРешение: {flow['solution']}"[:500])
+    await refresh_card(bot, tid)
+    await msg.reply_text("Готово — передал в штаб. Спасибо.")
+
+    who = person["name"] if person else "?"
+    report = (
+        f"⚠️ *{who}* сообщает о проблеме\n"
+        f"Задача: {task['title']}  `#{tid}`\n"
         f"Срок: {C.fmt_due(task['due_at'])}\n\n"
-        f"_{msg.text.strip()[:500]}_")
+        f"*Что случилось:*\n{flow['desc']}\n\n"
+        f"*Как предлагает решить:*\n{flow['solution']}")
+
+    chat = hq_chat_id()
+    if not chat:
+        logger.warning("Отчёт по проблеме #%s некому отправить (нет Штаба)", tid)
+        return
+    await send_md(bot, chat, report)
+    if flow.get("photo"):
+        try:
+            await bot.send_photo(chat_id=chat, photo=flow["photo"],
+                                 caption=f"Фото к проблеме по задаче #{tid}")
+        except Exception as e:
+            logger.error("Фото к проблеме #%s не ушло: %s", tid, e)
 
 
 # --- фоновый контроль -----------------------------------------------------------
