@@ -429,6 +429,9 @@ async def catch_problem_note(update, context):
     msg = update.message
     if not msg or not msg.text:
         return
+    # Только в группах и только по задаче — свободного разговора с ботом нет.
+    if msg.chat.type not in ("group", "supergroup"):
+        return
     key = (msg.chat_id, msg.from_user.id)
     tid = AWAITING_NOTE.pop(key, None)
     if not tid:

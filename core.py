@@ -23,6 +23,27 @@ if not ALLOWED_USER_ID:
     logger.critical("ALLOWED_USER_ID не задан — бот не будет отвечать никому, "
                     "пока переменная не настроена!")
 
+
+def _parse_ids(raw):
+    ids = set()
+    for part in (raw or "").replace(";", ",").split(","):
+        part = part.strip().lstrip("@")
+        if part.isdigit():
+            ids.add(int(part))
+    return ids
+
+
+# Кому можно писать боту в личку и управлять им. Владелец — всегда.
+# Доверенных добавляют в ALLOWED_USER_IDS (Telegram id через запятую).
+ALLOWED_USER_IDS = _parse_ids(os.environ.get("ALLOWED_USER_IDS", ""))
+if ALLOWED_USER_ID:
+    ALLOWED_USER_IDS.add(ALLOWED_USER_ID)
+
+# Модель для будущего AI-помощника — только у владельца. Сотрудники работают
+# на скриптах и модель не вызывают, поэтому «дешёвой для людей» тут нет.
+# Подставится, когда/если LLM вернётся в бота. См. model_for.
+MODEL_OWNER = os.environ.get("MODEL_OWNER", "claude-opus-4-8")
+
 DATABASE_URL = os.environ["DATABASE_URL"]
 LOCAL_TZ = ZoneInfo(os.environ.get("TIMEZONE", "Europe/Chisinau"))
 
@@ -42,8 +63,20 @@ def db_conn():
         _pool.putconn(conn)
 
 
-def is_allowed(user_id):
+def is_owner(user_id):
+    """Только владелец: полный доступ и AI на хорошей модели."""
     return ALLOWED_USER_ID != 0 and user_id == ALLOWED_USER_ID
+
+
+def is_allowed(user_id):
+    """Владелец и доверенные, которым дан доступ в личку и к управлению."""
+    return user_id in ALLOWED_USER_IDS
+
+
+def model_for(user_id):
+    """Какую модель использовать для этого пользователя (задел под будущий AI).
+    Сейчас AI в боте нет; сотрудники работают на скриптах и сюда не попадают."""
+    return MODEL_OWNER
 
 
 def now_local():

@@ -12,8 +12,9 @@ import logging
 import os
 
 from telegram import Update, BotCommand
-from telegram.ext import (Application, CommandHandler, ContextTypes,
-                          CallbackQueryHandler, MessageHandler, filters)
+from telegram.ext import (Application, ApplicationHandlerStop, CommandHandler,
+                          ContextTypes, CallbackQueryHandler, MessageHandler,
+                          TypeHandler, filters)
 
 from core import TELEGRAM_TOKEN, is_allowed
 from radar999 import (
@@ -97,6 +98,19 @@ async def post_init(application: Application):
     asyncio.create_task(crew_loop(application.bot))
 
 
+async def gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Единый вход. В личке бот отвечает только тем, кому дан доступ —
+    остальным полная тишина (и никаких трат, когда появится AI). В группах
+    пропускаем дальше: команды сами проверяют доступ, а сотрудники могут
+    только жать кнопки задач и отвечать по «Проблеме» — ничего больше."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if chat and chat.type == "private" and not (user and is_allowed(user.id)):
+        logger.info("Личка от постороннего %s — игнор",
+                    user.id if user else "?")
+        raise ApplicationHandlerStop
+
+
 def main():
     radar_init_db()
     try:
@@ -108,6 +122,8 @@ def main():
     except Exception as e:
         logger.warning(f"Радар: фильтры не синхронизированы — {e}")
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
+    # Замок: срабатывает раньше всех и отсекает чужую личку.
+    app.add_handler(TypeHandler(Update, gate), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("radar", radar_status))
