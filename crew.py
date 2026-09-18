@@ -103,6 +103,27 @@ def crew_init_db():
                 key   TEXT PRIMARY KEY,
                 value TEXT
             )""")
+        # Черновик постановки задачи кнопками: по одному на пользователя.
+        # Живёт в базе, а не в памяти, чтобы переживать передеплой Railway.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS crew_draft (
+                user_id    BIGINT PRIMARY KEY,
+                chat_id    BIGINT,
+                message_id BIGINT,
+                person_id  INT,
+                title      TEXT,
+                due_at     TIMESTAMPTZ,
+                pick_date  DATE,
+                week_shift INT NOT NULL DEFAULT 0,
+                kind       TEXT,
+                weekdays   TEXT,
+                hour       INT,
+                minute     INT,
+                due_hour   INT,
+                due_minute INT,
+                step       TEXT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )""")
         cur.close()
 
 
@@ -352,6 +373,68 @@ def fix_delete(fix_id):
         row = cur.fetchone()
         cur.close()
     return row[0] if row else None
+
+
+# --- черновик постановки задачи кнопками ----------------------------------------
+
+DRAFT_KEYS = ("user_id", "chat_id", "message_id", "person_id", "title", "due_at",
+              "pick_date", "week_shift", "kind", "weekdays", "hour", "minute",
+              "due_hour", "due_minute", "step")
+DRAFT_COLS = ", ".join(DRAFT_KEYS)
+DRAFT_STALE_MIN = 30
+
+
+def _draft_gc(cur):
+    """Убирает брошенные черновики: старый диалог не должен перехватывать
+    сегодняшнее сообщение как название задачи."""
+    cur.execute("DELETE FROM crew_draft "
+                "WHERE updated_at < now() - %s::interval",
+                (f"{DRAFT_STALE_MIN} minutes",))
+
+
+def draft_get(user_id):
+    with db_conn() as conn:
+        cur = conn.cursor()
+        _draft_gc(cur)
+        cur.execute(f"SELECT {DRAFT_COLS} FROM crew_draft WHERE user_id=%s",
+                    (user_id,))
+        row = cur.fetchone()
+        cur.close()
+    return dict(zip(DRAFT_KEYS, row)) if row else None
+
+
+def draft_reset(user_id, chat_id, step):
+    """Начинает новый черновик, затирая старый (новый /menu или выбор человека)."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO crew_draft (user_id, chat_id, step, week_shift)
+            VALUES (%s,%s,%s,0)
+            ON CONFLICT (user_id) DO UPDATE SET
+              chat_id=EXCLUDED.chat_id, message_id=NULL, person_id=NULL,
+              title=NULL, due_at=NULL, pick_date=NULL, week_shift=0, kind=NULL,
+              weekdays=NULL, hour=NULL, minute=NULL, due_hour=NULL,
+              due_minute=NULL, step=EXCLUDED.step, updated_at=now()
+        """, (user_id, chat_id, step))
+        cur.close()
+
+
+def draft_set(user_id, **fields):
+    if not fields:
+        return
+    sets = ", ".join(f"{k}=%s" for k in fields)
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(f"UPDATE crew_draft SET {sets}, updated_at=now() WHERE user_id=%s",
+                    list(fields.values()) + [user_id])
+        cur.close()
+
+
+def draft_clear(user_id):
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM crew_draft WHERE user_id=%s", (user_id,))
+        cur.close()
 
 
 # --- разбор срока из обычной речи -----------------------------------------------

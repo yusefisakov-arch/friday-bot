@@ -30,6 +30,7 @@ from crewbot import (
     fix_cmd, fix_list_cmd, fix_del_cmd, today_cmd, debts_cmd, done_cmd,
     cancel_cmd, crew_button, catch_problem_note,
 )
+from crewmenu import menu_cmd, menu_button, catch_draft_input
 from crew import crew_init_db
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application):
     commands = [
+        BotCommand("menu", "➕ Поставить задачу кнопками"),
         BotCommand("radar", "🎯 Что настроено и когда проверял"),
         BotCommand("radar_top", "🔥 Лучшее из того, что висит сейчас"),
         BotCommand("radar_topics", "🗂 Завести темы по районам"),
@@ -121,6 +123,15 @@ async def gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raise ApplicationHandlerStop
 
 
+async def free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Один обработчик на все свободные сообщения. Порядок важен: сначала
+    смотрим, не вводит ли пользователь название задачи (диалог /menu), и лишь
+    затем — пояснение к «Проблеме». Иначе два обработчика дрались бы за текст."""
+    if await catch_draft_input(update, context):
+        return
+    await catch_problem_note(update, context)
+
+
 def main():
     radar_init_db()
     try:
@@ -165,11 +176,13 @@ def main():
     app.add_handler(CommandHandler("debts", debts_cmd))
     app.add_handler(CommandHandler("done", done_cmd))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
+    app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CallbackQueryHandler(crew_button, pattern=r"^crew:"))
-    # последним: ведёт пошаговый разбор «Проблемы» (текст и фото),
-    # всё остальное пропускает мимо
+    app.add_handler(CallbackQueryHandler(menu_button, pattern=r"^new:"))
+    # последним: сначала название задачи (диалог /menu), потом разбор
+    # «Проблемы» (текст и фото); всё остальное пропускается мимо
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND,
-                                   catch_problem_note))
+                                   free_text))
     logger.info(f"Радар запущен, интервал проверки {RADAR_INTERVAL_MINUTES} мин")
     app.run_polling(drop_pending_updates=True)
 
