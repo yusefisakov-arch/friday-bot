@@ -7,7 +7,7 @@ import asyncio
 import logging
 from datetime import timedelta
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 
 from core import db_conn, is_allowed, now_local, ALLOWED_USER_ID
@@ -113,7 +113,7 @@ async def crew_here_cmd(update, context):
         f"Теперь задачи ему ставятся так: `/task {name} починить бойлер в 204, до 18:00`\n"
         f"Или прямо здесь, без имени: `/task починить бойлер в 204, до 18:00`",
         parse_mode=ParseMode.MARKDOWN)
-    logger.info(f"Команда: группа {chat.id} закреплена за «{name}» (#{pid})")
+    logger.info("Команда: группа %s закреплена за человеком #%s", chat.id, pid)
 
 
 async def hq_here_cmd(update, context):
@@ -182,8 +182,11 @@ async def task_cmd(update, context):
     try:
         await send_task_card(context.bot, task, person)
     except Exception as e:
+        logger.error("Задача #%s не отправилась в группу %s: %s",
+                     tid, person["chat_id"], e)
         await update.message.reply_text(
-            f"Задачу записал (#{tid}), но в группу «{person['name']}» не отправилось: {e}")
+            f"Задачу записал (#{tid}), но в группу «{person['name']}» не отправилось. "
+            f"Проверьте, что бот в группе и может писать.")
         return
 
     if update.effective_chat.id != person["chat_id"]:
@@ -378,7 +381,7 @@ async def cancel_cmd(update, context):
 async def crew_button(update, context):
     query = update.callback_query
     parts = (query.data or "").split(":")
-    if len(parts) != 3 or parts[0] != "crew":
+    if len(parts) != 3 or parts[0] != "crew" or not parts[2].isdigit():
         return
     action, tid = parts[1], int(parts[2])
 
@@ -386,6 +389,12 @@ async def crew_button(update, context):
     task = C.task_get(tid)
     if not task:
         await query.answer("Задача не найдена")
+        return
+
+    # Кнопку можно нажать только в том чате, куда ушла карточка задачи —
+    # защита от нажатий по чужой задаче из другого чата.
+    if task["chat_id"] and query.message and query.message.chat_id != task["chat_id"]:
+        await query.answer()
         return
 
     person = C.person_by_id(task["person_id"])
@@ -416,7 +425,8 @@ async def crew_button(update, context):
             chat_id=query.message.chat_id,
             message_thread_id=query.message.message_thread_id,
             text=f"{mention(person) if person else ''} напишите одним сообщением, "
-                 f"что мешает по задаче «{task['title']}» — передам.")
+                 f"что мешает по задаче «{task['title']}» — передам.",
+            reply_markup=ForceReply(selective=bool(person and person.get("username"))))
     else:
         await query.answer()
         return

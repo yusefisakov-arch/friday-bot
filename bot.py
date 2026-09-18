@@ -11,12 +11,13 @@ import asyncio
 import logging
 import os
 
-from telegram import Update, BotCommand
+from telegram import (Update, BotCommand, BotCommandScopeChat,
+                      BotCommandScopeDefault)
 from telegram.ext import (Application, ApplicationHandlerStop, CommandHandler,
                           ContextTypes, CallbackQueryHandler, MessageHandler,
                           TypeHandler, filters)
 
-from core import TELEGRAM_TOKEN, is_allowed
+from core import TELEGRAM_TOKEN, is_allowed, ALLOWED_USER_ID
 from radar999 import (
     radar_init_db, radar_loop, radar_here, radar_status,
     radar_check_cmd, radar_toggle_cmd, radar_top_cmd, radar_sync_filters,
@@ -73,25 +74,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(application: Application):
+    commands = [
+        BotCommand("radar", "🎯 Что настроено и когда проверял"),
+        BotCommand("radar_top", "🔥 Лучшее из того, что висит сейчас"),
+        BotCommand("radar_topics", "🗂 Завести темы по районам"),
+        BotCommand("bind", "📌 Привязать эту тему к району"),
+        BotCommand("radar_dump", "📦 Разложить всё текущее по темам"),
+        BotCommand("radar_redump", "♻️ Забыть отправленное и разложить заново"),
+        BotCommand("radar_check", "Проверить 999.md прямо сейчас"),
+        BotCommand("ch_add", "📡 Подключить телеграм-канал"),
+        BotCommand("ch_list", "📡 Подключённые каналы"),
+        BotCommand("ch_dump", "📡 Выгрузить всё из каналов"),
+        BotCommand("radar_here", "Настроить радар в этой группе"),
+        BotCommand("task", "📋 Поставить задачу"),
+        BotCommand("today", "📋 Что у всех на сегодня"),
+        BotCommand("debts", "📋 Всё просроченное"),
+        BotCommand("crew_list", "📋 Команда и статистика"),
+        BotCommand("start", "Справка"),
+    ]
     try:
-        await application.bot.set_my_commands([
-            BotCommand("radar", "🎯 Что настроено и когда проверял"),
-            BotCommand("radar_top", "🔥 Лучшее из того, что висит сейчас"),
-            BotCommand("radar_topics", "🗂 Завести темы по районам"),
-            BotCommand("bind", "📌 Привязать эту тему к району"),
-            BotCommand("radar_dump", "📦 Разложить всё текущее по темам"),
-            BotCommand("radar_redump", "♻️ Забыть отправленное и разложить заново"),
-            BotCommand("radar_check", "Проверить 999.md прямо сейчас"),
-            BotCommand("ch_add", "📡 Подключить телеграм-канал"),
-            BotCommand("ch_list", "📡 Подключённые каналы"),
-            BotCommand("ch_dump", "📡 Выгрузить всё из каналов"),
-            BotCommand("radar_here", "Настроить радар в этой группе"),
-            BotCommand("task", "📋 Поставить задачу"),
-            BotCommand("today", "📋 Что у всех на сегодня"),
-            BotCommand("debts", "📋 Всё просроченное"),
-            BotCommand("crew_list", "📋 Команда и статистика"),
-            BotCommand("start", "Справка"),
-        ])
+        # Меню команд видит только владелец. Для всех остальных — пустое,
+        # чтобы не раскрывать возможности бота посторонним.
+        await application.bot.set_my_commands([], scope=BotCommandScopeDefault())
+        if ALLOWED_USER_ID:
+            await application.bot.set_my_commands(
+                commands, scope=BotCommandScopeChat(chat_id=ALLOWED_USER_ID))
     except Exception as e:
         logger.warning(f"set_my_commands пропущено: {e}")
     asyncio.create_task(radar_loop(application.bot, RADAR_INTERVAL_MINUTES))
