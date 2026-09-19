@@ -1146,6 +1146,38 @@ async def evening_report(bot):
     await tell_boss(bot, "\n".join(lines).strip())
 
 
+async def weekly_report(bot):
+    """Недельная сводка в Штаб по всем людям — утром в понедельник, раз в неделю."""
+    now = now_local()
+    if now.isoweekday() != 1 or now.hour < C.WEEKLY_REPORT_HOUR:
+        return
+    iso = now.isocalendar()
+    tag = f"{iso[0]}-{iso[1]}"          # год-номер недели
+    if C.state_get("last_weekly") == tag:
+        return
+    C.state_set("last_weekly", tag)
+
+    people = C.people_all()
+    if not people:
+        return
+
+    rows, t_ok, t_late, t_fail, t_open = [], 0, 0, 0, 0
+    for p in people:
+        st = C.person_stats(p["id"], days=7)
+        t_ok += st["on_time"]
+        t_late += st["late"]
+        t_fail += st["failed"]
+        t_open += st["open"]
+        rows.append(f"*{p['name']}* — вовремя {st['on_time']}, с опозданием "
+                    f"{st['late']}, провалено {st['failed']}, открыто {st['open']}")
+
+    lines = ["*Итоги недели* (7 дней)", "",
+             f"Всего: вовремя {t_ok} · с опозданием {t_late} · "
+             f"провалено {t_fail} · открыто {t_open}", ""]
+    lines += rows
+    await tell_boss(bot, "\n".join(lines))
+
+
 async def _migrate_cards_once(bot):
     """Один раз перерисовывает все открытые карточки в новый вид — чтобы
     кнопка «Не успеваю» появилась и на задачах, поставленных до её добавления."""
@@ -1172,6 +1204,7 @@ async def crew_loop(bot):
             await spawn_fixed(bot)
             await chase(bot)
             await evening_report(bot)
+            await weekly_report(bot)
         except Exception:
             logger.exception("Контроль задач: сбой цикла")
         await asyncio.sleep(CHECK_EVERY_SECONDS)
