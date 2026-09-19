@@ -103,6 +103,21 @@ def test_report_deadline_end_of_day_when_no_due():
     assert (d.hour, d.minute) == (23, 59)
 
 
+def test_title_no_dangling_filler():
+    """«...общие зоны выполнить до 21:30» → в названии нет хвоста «выполнить/до»."""
+    due, title = crew.parse_due_explicit("вечерний обход общие зоны выполнить до 21:30")
+    assert due is not None
+    low = title.lower()
+    assert not low.endswith("выполнить") and not low.endswith("до")
+    assert "обход" in low
+
+
+def test_crewmenu_short_title():
+    assert CM._short("короткое") == "короткое"
+    assert CM._short("строка1\nстрока2") == "строка1 строка2"
+    assert CM._short("я" * 80).endswith("…")
+
+
 def test_extend_base_future_due():
     """Перенос считается от срока задачи, если он ещё не прошёл."""
     due = now_local() + timedelta(hours=5)

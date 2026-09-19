@@ -74,6 +74,13 @@ def _date_label(d):
     return f"{WD_SHORT[d.isoweekday() - 1]} {d:%d.%m}"
 
 
+def _short(title, n=60):
+    """Короткое имя задачи для экранов диалога: первая строка, обрезанная.
+    Полное название хранится в черновике и уходит в задачу целиком."""
+    line = " ".join((title or "").split())
+    return line if len(line) <= n else line[:n].rstrip() + "…"
+
+
 def _name(draft):
     if not draft.get("person_id"):
         return "?"
@@ -85,7 +92,7 @@ def _screen(draft):
     """Текст и клавиатура для текущего шага — собираются целиком из черновика."""
     step = draft["step"]
     name = _name(draft)
-    title = draft.get("title") or ""
+    title = _short(draft.get("title") or "")
 
     if step == "wait_title":
         return (f"*{name}.* Что сделать?\n\n"

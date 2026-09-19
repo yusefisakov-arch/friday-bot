@@ -593,8 +593,9 @@ def _strip(text, parts):
             continue
         pattern = r"\s+".join(re.escape(tok) for tok in part.split())
         out = re.sub(pattern, " ", out, flags=re.I)
-    # висящий предлог в конце: «отчёт в», «сдать до»
-    out = re.sub(r"[\s,;]*\b(до|к|в|на)\s*$", "", out.strip(), flags=re.I)
+    # висящий хвост в конце: «отчёт в», «сдать до», «...общие зоны выполнить»
+    tail = r"(до|к|в|на|выполнить|сделать|сдать|надо|нужно)"
+    out = re.sub(rf"([\s,;]*\b{tail}\b)+\s*$", "", out.strip(), flags=re.I)
     out = re.sub(r"[\s]+", " ", out)
     return out.strip(" ,;.-—")
 

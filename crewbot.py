@@ -1015,9 +1015,26 @@ async def evening_report(bot):
     await tell_boss(bot, "\n".join(lines).strip())
 
 
+async def _migrate_cards_once(bot):
+    """Один раз перерисовывает все открытые карточки в новый вид — чтобы
+    кнопка «Не успеваю» появилась и на задачах, поставленных до её добавления."""
+    C.crew_init_db()
+    if C.state_get("cards_btn_v2"):
+        return
+    for task in C.tasks_open():
+        await refresh_card(bot, task["id"])
+        await asyncio.sleep(0.2)
+    C.state_set("cards_btn_v2", "1")
+    logger.info("Старые карточки обновлены под новый набор кнопок")
+
+
 async def crew_loop(bot):
     """Фоновый цикл контроля."""
     await asyncio.sleep(45)
+    try:
+        await _migrate_cards_once(bot)
+    except Exception:
+        logger.exception("Не удалось обновить старые карточки")
     while True:
         try:
             C.crew_init_db()
