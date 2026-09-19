@@ -23,9 +23,10 @@ sys.modules.setdefault("psycopg2", _fake_pg)
 sys.modules.setdefault("psycopg2.pool", _fake_pool)
 
 import crewmenu as CM
+import crew
 
 ALL_STEPS = [
-    "wait_title", "pick_due_day", "pick_due_date", "pick_due_hour", "confirm",
+    "wait_title", "pick_due", "pick_due_date", "confirm",
     "pick_freq", "pick_weekday", "pick_days", "pick_start_hour",
     "pick_fix_due", "pick_fix_due_hour", "final",
 ]
@@ -33,7 +34,7 @@ ALL_STEPS = [
 
 def _draft(step):
     return {"step": step, "person_id": None, "title": "свести кассу",
-            "due_at": None, "pick_date": __import__("datetime").date(2026, 9, 25),
+            "due_at": None, "pick_date": None,
             "week_shift": 0, "weekdays": "24", "hour": 9, "minute": 0,
             "due_hour": 10, "due_minute": 0}
 
@@ -53,15 +54,38 @@ def test_every_screen_is_buttons_only():
 
 
 def test_no_keyboard_time_entry():
-    """Часы выбираются из сетки, минут в вводе нет — только :00 и 23:59."""
-    grid = CM.HOUR_GRID
-    assert grid == [8, 9, 10, 11, 12, 14, 16, 18, 20, 22]
-    # часовая клавиатура: все варианты оканчиваются на 00, кроме конца дня 2359
-    kb = CM._hour_keyboard("hour").inline_keyboard
+    """Часы для постоянных выбираются из сетки — только :00 и 23:59."""
+    kb = CM._hour_keyboard("start").inline_keyboard
     codes = [b.callback_data.split(":")[2] for row in kb for b in row
-             if b.callback_data.startswith("new:hour:")]
+             if b.callback_data.startswith("new:start:")]
     for c in codes:
         assert c.endswith("00") or c == "2359", f"странный час: {c}"
+
+
+def test_stepper_has_day_hour_minute_arrows():
+    """Стрелочный экран срока: день, час и минуты — всё кнопками."""
+    kb = CM._screen(_draft("pick_due"))[1].inline_keyboard
+    codes = {b.callback_data for row in kb for b in row}
+    for need in ("new:d:-1", "new:d:1", "new:h:-1", "new:h:1",
+                 "new:m:-15", "new:m:15", "new:okdue", "new:other"):
+        assert need in codes, f"нет кнопки {need}"
+
+
+def test_typed_time_is_parsed():
+    """Срок, написанный словами, распознаётся и вырезается из названия."""
+    due, title = crew.parse_due_explicit("свести кассу к 17:00")
+    assert due is not None, "«к 17:00» должно распознаться"
+    assert "17" not in title and "касс" in title.lower()
+
+    due2, _ = crew.parse_due_explicit("помыть склад через 2 часа")
+    assert due2 is not None, "«через 2 часа» должно распознаться"
+
+
+def test_no_time_means_buttons():
+    """Без указания срока — None, дальше выбор кнопками."""
+    due, title = crew.parse_due_explicit("просто убрать склад")
+    assert due is None
+    assert title == "просто убрать склад"
 
 
 def test_hhmm_parsing():

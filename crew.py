@@ -656,6 +656,40 @@ def parse_assignment(text, default_person=None):
     return person, title, due
 
 
+def _has_when(text):
+    """Есть ли во фразе явное указание срока или даты. Нужно кнопочному
+    диалогу: если человек написал «к 17:00» — берём срок из текста, если нет —
+    показываем стрелки. Опирается на те же правила, что и parse_due."""
+    low = " " + (text or "").lower() + " "
+    if RE_IN.search(low):
+        return True
+    if re.search(r"\b(сегодня|завтра|послезавтра)\b", low):
+        return True
+    for word in WEEKDAYS:
+        if re.search(r"\b" + word + r"\b", low):
+            return True
+    m = RE_DATE.search(low)
+    if m:
+        d, mo = int(m.group(1)), int(m.group(2))
+        y = int(m.group(3) or now_local().year)
+        if y < 100:
+            y += 2000
+        try:
+            date(y, mo, d)
+            return True
+        except ValueError:
+            pass
+    return bool(_all_times(low))
+
+
+def parse_due_explicit(text):
+    """Как parse_due, но возвращает (None, текст), если срока во фразе нет —
+    тогда его выберут кнопками. Иначе (срок, текст без срока)."""
+    if not _has_when(text):
+        return None, (text or "").strip()
+    return parse_due(text)
+
+
 # --- тексты ---------------------------------------------------------------------
 
 def fmt_due(due):

@@ -9,12 +9,12 @@ Railway перезапускает сервис при каждом деплое
 карточки задачи). Команды /task и /fix остаются рабочими — это запасной путь.
 """
 import logging
-from datetime import datetime, timedelta, date
+from datetime import timedelta, date
 
 from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup as M
 from telegram.constants import ParseMode
 
-from core import is_allowed, now_local, LOCAL_TZ
+from core import is_allowed, now_local
 import crew as C
 from crewbot import send_task_card
 
@@ -26,8 +26,7 @@ WD_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 # Куда ведёт «Назад» с каждого шага.
 BACK = {
-    "pick_due_date": "pick_due_day",
-    "pick_due_hour": "pick_due_day",
+    "pick_due_date": "pick_due",
     "pick_freq": "confirm",
     "pick_weekday": "pick_freq",
     "pick_days": "pick_freq",
@@ -36,6 +35,12 @@ BACK = {
     "pick_fix_due_hour": "pick_fix_due",
     "final": "pick_fix_due",
 }
+
+
+def _default_due():
+    """Точка отсчёта для стрелок: ближайший «круглый» час от текущего."""
+    now = now_local()
+    return now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
 
 # --- вспомогательное ------------------------------------------------------------
@@ -84,20 +89,26 @@ def _screen(draft):
 
     if step == "wait_title":
         return (f"*{name}.* Что сделать?\n\n"
-                "Напишите одним сообщением, без времени — срок выберете кнопками.\n"
-                "Например: «свести заезды и выезды»",
+                "Напишите одним сообщением. Можно сразу со сроком — "
+                "«...к 17:00», «...через 2 часа», «...завтра». "
+                "Если срок не указать — выберете кнопками.",
                 M([[B("Отмена", callback_data="new:cancel")]]))
 
-    if step == "pick_due_day":
-        return (f"*{name}*\n{title}\n\nК какому сроку?", M([
-            [B("Через час", callback_data="new:in:60"),
-             B("Через 2 часа", callback_data="new:in:120"),
-             B("Через 4 часа", callback_data="new:in:240")],
-            [B("Сегодня", callback_data="new:day:0"),
-             B("Завтра", callback_data="new:day:1"),
-             B("Послезавтра", callback_data="new:day:2")],
+    if step == "pick_due":
+        due = draft.get("due_at")
+        text = f"*{name}*\n{title}\n\nСрок: {C.fmt_due(due)}"
+        if due and due <= now_local():
+            text += "  ⚠️ уже прошёл"
+        return text, M([
+            [B("◀ день", callback_data="new:d:-1"),
+             B("день ▶", callback_data="new:d:1")],
+            [B("− час", callback_data="new:h:-1"),
+             B("+ час", callback_data="new:h:1")],
+            [B("−15 мин", callback_data="new:m:-15"),
+             B("+15 мин", callback_data="new:m:15")],
             [B("Другой день", callback_data="new:other")],
-            [B("Отмена", callback_data="new:cancel")]]))
+            [B("Готово", callback_data="new:okdue"),
+             B("Отмена", callback_data="new:cancel")]])
 
     if step == "pick_due_date":
         shift = draft.get("week_shift") or 0
@@ -108,11 +119,6 @@ def _screen(draft):
         kb.append([B("Ещё неделя ›", callback_data="new:week:1")])
         kb.append([B("‹ Назад", callback_data="new:back")])
         return f"*{name}*\n{title}\n\nКакой день?", M(kb)
-
-    if step == "pick_due_hour":
-        d = draft.get("pick_date")
-        when = _date_label(d) if d else ""
-        return f"*{name}* · {title}\n{when}, во сколько?", _hour_keyboard("hour")
 
     if step == "confirm":
         due = draft.get("due_at")
@@ -274,22 +280,27 @@ async def menu_button(update, context):
         await _rerender(query, C.draft_get(user_id))
         return
 
-    # --- выбор срока (разовая) ---
-    if action == "in":
-        mins = int(arg) if arg.isdigit() else 60
-        C.draft_set(user_id, due_at=now_local() + timedelta(minutes=mins),
-                    step="confirm")
-        await _rerender(query, C.draft_get(user_id))
-        return
-
-    if action == "day":
-        n = int(arg) if arg.isdigit() else 0
-        C.draft_set(user_id, pick_date=now_local().date() + timedelta(days=n),
-                    step="pick_due_hour")
+    # --- выбор срока стрелками (разовая) ---
+    if action in ("d", "h", "m"):
+        try:
+            delta = int(arg)
+        except ValueError:
+            await query.answer()
+            return
+        due = draft.get("due_at") or _default_due()
+        if action == "d":
+            due = due + timedelta(days=delta)
+        elif action == "h":
+            due = due + timedelta(hours=delta)
+        else:
+            due = due + timedelta(minutes=delta)
+        C.draft_set(user_id, due_at=due, step="pick_due")
         await _rerender(query, C.draft_get(user_id))
         return
 
     if action == "other":
+        if not draft.get("due_at"):
+            C.draft_set(user_id, due_at=_default_due())
         C.draft_set(user_id, step="pick_due_date", week_shift=0)
         await _rerender(query, C.draft_get(user_id))
         return
@@ -307,20 +318,23 @@ async def menu_button(update, context):
         except ValueError:
             await query.answer()
             return
-        C.draft_set(user_id, pick_date=d, step="pick_due_hour")
+        due = (draft.get("due_at") or _default_due()).replace(
+            year=d.year, month=d.month, day=d.day)
+        C.draft_set(user_id, due_at=due, step="pick_due")
         await _rerender(query, C.draft_get(user_id))
         return
 
-    if action == "hour":
-        hh, mm = _hhmm(arg)
-        d = draft.get("pick_date") or now_local().date()
-        due = datetime(d.year, d.month, d.day, hh, mm, tzinfo=LOCAL_TZ)
-        C.draft_set(user_id, due_at=due, step="confirm")
+    if action == "okdue":
+        if not draft.get("due_at"):
+            C.draft_set(user_id, due_at=_default_due())
+        C.draft_set(user_id, step="confirm")
         await _rerender(query, C.draft_get(user_id))
         return
 
     if action == "due":
-        C.draft_set(user_id, step="pick_due_day")
+        if not draft.get("due_at"):
+            C.draft_set(user_id, due_at=_default_due())
+        C.draft_set(user_id, step="pick_due")
         await _rerender(query, C.draft_get(user_id))
         return
 
@@ -467,7 +481,13 @@ async def catch_draft_input(update, context):
         await msg.reply_text("Не понял, что делать. Напишите задачу словами.")
         return True
 
-    C.draft_set(user_id, title=title[:500], step="pick_due_day")
+    # Срок можно написать прямо в тексте («...к 17:00», «...через 2 часа»).
+    # Нашли — сразу к подтверждению; не нашли — стрелки.
+    due, clean = C.parse_due_explicit(title)
+    if due is not None:
+        C.draft_set(user_id, title=(clean or title)[:500], due_at=due, step="confirm")
+    else:
+        C.draft_set(user_id, title=title[:500], due_at=_default_due(), step="pick_due")
     draft = C.draft_get(user_id)
     text, kb = _screen(draft)
     if draft.get("message_id"):
