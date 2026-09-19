@@ -32,6 +32,10 @@ AWAIT_INSTR = {}
 # (chat_id, user_id) -> {"tid", "step", "done", "photo", "left"}
 REPORT_FLOW = {}
 
+# Исполнитель закрывает задачу по «Готово»: что сделал → фото → в Штаб.
+# (chat_id, user_id) -> {"tid", "step", "what", "photo"}
+DONE_FLOW = {}
+
 
 # --- вспомогательное ------------------------------------------------------------
 
@@ -448,13 +452,17 @@ async def crew_button(update, context):
         C.task_update(tid, status=C.STATUS_TAKEN, taken_at=now_local())
         await query.answer("Записал: взял в работу")
     elif action == "done":
-        C.task_update(tid, status=C.STATUS_DONE, done_at=now_local())
-        await query.answer("Записал: сделано")
-        late = task["due_at"] and now_local() > task["due_at"]
-        if late:
-            await tell_boss(context.bot,
-                            f"✅ *{person['name']}* закрыл с опозданием: {task['title']}\n"
-                            f"Срок был {C.fmt_due(task['due_at'])}")
+        # «Готово» ведёт короткий отчёт: что сделал → фото → закрыть и в Штаб.
+        DONE_FLOW[(query.message.chat_id, user.id)] = {
+            "tid": tid, "step": "what", "what": "", "photo": None}
+        await query.answer("Короткий отчёт")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            message_thread_id=query.message.message_thread_id,
+            text=f"{mention(person) if person else ''} что сделали по задаче "
+                 f"«{_short(task['title'])}»? Опишите одним сообщением.",
+            reply_markup=ForceReply(selective=bool(person and person.get("username"))))
+        return
     elif action == "problem":
         C.task_update(tid, status=C.STATUS_PROBLEM)
         PROBLEM_FLOW[(query.message.chat_id, user.id)] = {
@@ -477,8 +485,9 @@ async def catch_problem_note(update, context):
     """Свободные сообщения по задачам. Порядок разбора:
     1) владелец пишет инструкцию после «Запретить» (может быть и в личке-Штабе);
     2) исполнитель заполняет отчёт после «Отчёт»;
-    3) исполнитель поясняет «Проблему».
-    Вне этих трёх состояний свободного разговора с ботом нет."""
+    3) исполнитель закрывает задачу по «Готово»;
+    4) исполнитель поясняет «Проблему».
+    Вне этих состояний свободного разговора с ботом нет."""
     msg = update.message
     if not msg:
         return
@@ -493,8 +502,12 @@ async def catch_problem_note(update, context):
     if key in REPORT_FLOW:
         await _handle_report_step(context.bot, msg, key, text)
         return
+    # 3) закрытие задачи по «Готово»
+    if key in DONE_FLOW:
+        await _handle_done_step(context.bot, msg, key, text)
+        return
 
-    # 3) разбор «Проблемы» — только в группах
+    # 4) разбор «Проблемы» — только в группах
     if msg.chat.type not in ("group", "supergroup"):
         return
     flow = PROBLEM_FLOW.get(key)
@@ -757,6 +770,70 @@ async def _finish_report(bot, msg, flow):
                                  caption=f"Фото к отчёту по задаче #{tid}")
         except Exception as e:
             logger.error("Фото отчёта #%s не ушло: %s", tid, e)
+    await send_md(bot, chat, report)
+
+
+# --- «Готово» с отчётом о выполнении --------------------------------------------
+
+async def _handle_done_step(bot, msg, key, text):
+    """Короткий отчёт при закрытии задачи: что сделал → фото → закрыть."""
+    flow = DONE_FLOW.get(key)
+    if not flow:
+        return
+    step = flow["step"]
+
+    if step == "what":
+        if not text:
+            await msg.reply_text("Опишите, что сделали.")
+            return
+        flow["what"] = text[:1000]
+        flow["step"] = "photo"
+        await msg.reply_text(
+            "Есть фото результата? Пришлите фото или напишите «нет».",
+            reply_markup=ForceReply(selective=True))
+        return
+
+    if step == "photo":
+        if msg.photo:
+            flow["photo"] = msg.photo[-1].file_id
+        elif text.lower() in ("нет", "no", "-", "пропустить", "skip", "не надо"):
+            flow["photo"] = None
+        else:
+            await msg.reply_text("Пришлите фото или напишите «нет».")
+            return
+        DONE_FLOW.pop(key, None)
+        await _finish_done(bot, msg, flow)
+
+
+async def _finish_done(bot, msg, flow):
+    C.crew_init_db()
+    tid = flow["tid"]
+    task = C.task_get(tid)
+    if not task:
+        return
+    person = C.person_by_id(task["person_id"])
+    late = task["due_at"] and now_local() > task["due_at"]
+    C.task_update(tid, status=C.STATUS_DONE, done_at=now_local(),
+                  report_text=f"Сделано: {flow['what']}"[:800], report_done=True)
+    await refresh_card(bot, tid)
+    await msg.reply_text("Принял, задача закрыта. Спасибо.")
+
+    who = person["name"] if person else "?"
+    mark = "✅ (с опозданием)" if late else "✅"
+    report = (f"{mark} *{who}* закрыл(а) задачу\n"
+              f"{task['title']}  `#{tid}`\n\n"
+              f"*Сделано:*\n{flow['what']}")
+    if late:
+        report += f"\n\nСрок был {C.fmt_due(task['due_at'])}"
+    chat = hq_chat_id()
+    if not chat:
+        return
+    if flow.get("photo"):
+        try:
+            await bot.send_photo(chat_id=chat, photo=flow["photo"],
+                                 caption=f"Фото к задаче #{tid}")
+        except Exception as e:
+            logger.error("Фото к закрытию #%s не ушло: %s", tid, e)
     await send_md(bot, chat, report)
 
 
