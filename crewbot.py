@@ -98,6 +98,13 @@ def mention(person):
     return person["name"]
 
 
+def _short(title, n=50):
+    """Короткая ссылка на задачу для напоминаний: первая строка, обрезанная.
+    Полный текст и так есть в карточке, на которую напоминание отвечает."""
+    line = (title or "").splitlines()[0].strip()
+    return line if len(line) <= n else line[:n].rstrip() + "…"
+
+
 # --- команды --------------------------------------------------------------------
 
 async def crew_here_cmd(update, context):
@@ -794,18 +801,23 @@ async def chase(bot):
             continue
         chat = task["chat_id"] or person["chat_id"]
         who = mention(person)
+        title = _short(task["title"])
+        reply_to = task.get("message_id")
 
         async def say(text):
+            # Отвечаем на карточку: напоминание висит под ней, тап ведёт к
+            # кнопкам, а чат не засоряется полным текстом задачи.
             try:
                 await bot.send_message(chat_id=chat, text=text,
-                                       parse_mode=ParseMode.MARKDOWN)
+                                       parse_mode=ParseMode.MARKDOWN,
+                                       reply_to_message_id=reply_to,
+                                       allow_sending_without_reply=True)
             except Exception as e:
                 logger.error(f"Не отправилось в группу {chat}: {e}")
 
         if action == C.ACT_NUDGE_TAKE:
             C.task_update(task["id"], nudged_take=True)
-            await say(f"{who}, задача «{task['title']}» ждёт. "
-                      f"Нажмите «Взял», когда возьмётесь.")
+            await say(f"{who}, «{title}» ждёт — нажмите «Взял».")
 
         elif action == C.ACT_ESCALATE_TAKE:
             C.task_update(task["id"], told_boss=True)
@@ -816,12 +828,12 @@ async def chase(bot):
 
         elif action == C.ACT_WARN_DUE:
             C.task_update(task["id"], warned_due=True)
-            await say(f"{who}, час до срока по задаче «{task['title']}».")
+            await say(f"{who}, «{title}» — час до срока.")
 
         elif action == C.ACT_ASK_DUE:
             C.task_update(task["id"], asked_due=True)
-            await say(f"{who}, срок по задаче «{task['title']}» прошёл. "
-                      f"Что по ней? Нажмите «Готово» или «Проблема».")
+            await say(f"{who}, «{title}» — срок прошёл. "
+                      f"Нажмите «Готово» или «Проблема».")
 
         elif action == C.ACT_FAIL:
             C.task_update(task["id"], told_boss=True, status=C.STATUS_FAILED)

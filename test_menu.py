@@ -103,6 +103,15 @@ def test_report_deadline_end_of_day_when_no_due():
     assert (d.hour, d.minute) == (23, 59)
 
 
+def test_short_title():
+    """Напоминание берёт только первую строку и обрезает длинное."""
+    assert crewbot._short("свести кассу") == "свести кассу"
+    assert crewbot._short("первая строка\nвторая строка") == "первая строка"
+    long = "а" * 80
+    s = crewbot._short(long)
+    assert len(s) <= 51 and s.endswith("…")
+
+
 def test_hhmm_parsing():
     assert CM._hhmm("0800") == (8, 0)
     assert CM._hhmm("2359") == (23, 59)
