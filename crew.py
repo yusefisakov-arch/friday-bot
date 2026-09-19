@@ -133,6 +133,9 @@ def crew_init_db():
                     "report_nagged BOOLEAN NOT NULL DEFAULT FALSE",
                     "ext_due TIMESTAMPTZ"):
             cur.execute(f"ALTER TABLE crew_tasks ADD COLUMN IF NOT EXISTS {col}")
+        # Ежемесячные задания: число месяца (1–31) или 99 = последний день.
+        cur.execute("ALTER TABLE crew_fix ADD COLUMN IF NOT EXISTS monthday INT")
+        cur.execute("ALTER TABLE crew_draft ADD COLUMN IF NOT EXISTS monthday INT")
         cur.close()
 
 
@@ -350,17 +353,20 @@ def person_stats(person_id, days=30):
 
 
 FIX_KEYS = ("id", "person_id", "title", "hour", "minute", "weekdays",
-            "due_hour", "due_minute", "active", "last_spawn")
+            "due_hour", "due_minute", "active", "last_spawn", "monthday")
 FIX_COLS = ", ".join(FIX_KEYS)
 
 
-def fix_create(person_id, title, hour, minute, weekdays, due_hour=None, due_minute=None):
+def fix_create(person_id, title, hour, minute, weekdays, due_hour=None,
+               due_minute=None, monthday=None):
     with db_conn() as conn:
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO crew_fix (person_id, title, hour, minute, weekdays, "
-            "due_hour, due_minute) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-            (person_id, title, hour, minute, weekdays, due_hour, due_minute))
+            "due_hour, due_minute, monthday) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
+            "RETURNING id",
+            (person_id, title, hour, minute, weekdays, due_hour, due_minute,
+             monthday))
         fid = cur.fetchone()[0]
         cur.close()
     return fid
@@ -404,7 +410,7 @@ def fix_delete(fix_id):
 
 DRAFT_KEYS = ("user_id", "chat_id", "message_id", "person_id", "title", "due_at",
               "pick_date", "week_shift", "kind", "weekdays", "hour", "minute",
-              "due_hour", "due_minute", "step")
+              "due_hour", "due_minute", "step", "monthday")
 DRAFT_COLS = ", ".join(DRAFT_KEYS)
 DRAFT_STALE_MIN = 30
 
@@ -439,7 +445,7 @@ def draft_reset(user_id, chat_id, step):
               chat_id=EXCLUDED.chat_id, message_id=NULL, person_id=NULL,
               title=NULL, due_at=NULL, pick_date=NULL, week_shift=0, kind=NULL,
               weekdays=NULL, hour=NULL, minute=NULL, due_hour=NULL,
-              due_minute=NULL, step=EXCLUDED.step, updated_at=now()
+              due_minute=NULL, monthday=NULL, step=EXCLUDED.step, updated_at=now()
         """, (user_id, chat_id, step))
         cur.close()
 

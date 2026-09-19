@@ -30,7 +30,7 @@ from core import now_local
 
 ALL_STEPS = [
     "wait_title", "pick_due", "pick_due_date", "confirm",
-    "pick_freq", "pick_weekday", "pick_days", "pick_start",
+    "pick_freq", "pick_weekday", "pick_days", "pick_monthday", "pick_start",
     "pick_fix_due", "pick_fixdue_time", "final",
 ]
 
@@ -38,8 +38,8 @@ ALL_STEPS = [
 def _draft(step):
     return {"step": step, "person_id": None, "title": "свести кассу",
             "due_at": None, "pick_date": None,
-            "week_shift": 0, "weekdays": "24", "hour": 9, "minute": 0,
-            "due_hour": 10, "due_minute": 0}
+            "week_shift": 0, "weekdays": "24", "monthday": 15,
+            "hour": 9, "minute": 0, "due_hour": 10, "due_minute": 0}
 
 
 def test_every_screen_is_buttons_only():
@@ -151,6 +151,19 @@ def test_weekdays_label():
     assert CM._weekdays_label("1234567") == "каждый день"
     assert CM._weekdays_label("12345") == "по будням"
     assert CM._weekdays_label("24") == "по Вт, Чт"
+
+
+def test_month_schedule_label():
+    assert CM._sched_label({"monthday": 15}) == "15 числа каждый месяц"
+    assert CM._sched_label({"monthday": 99}) == "в последний день месяца"
+    assert CM._sched_label({"weekdays": "12345", "monthday": None}) == "по будням"
+
+
+def test_monthday_screen_has_arrows_and_last():
+    kb = CM._screen(_draft("pick_monthday"))[1].inline_keyboard
+    codes = {b.callback_data for row in kb for b in row}
+    for need in ("new:md:-1", "new:md:1", "new:mdlast", "new:mdok"):
+        assert need in codes, f"нет {need}"
 
 
 def test_back_targets_are_known_steps():

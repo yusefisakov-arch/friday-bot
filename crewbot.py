@@ -4,6 +4,7 @@
 Telegram. Правила можно проверить тестами, не поднимая ни бота, ни группы.
 """
 import asyncio
+import calendar
 import logging
 from datetime import timedelta
 
@@ -276,8 +277,12 @@ async def fix_list_cmd(update, context):
     lines = ["*Постоянные задания*", ""]
     for f in rows:
         p = C.person_by_id(f["person_id"])
-        days = {"1234567": "каждый день", "12345": "по будням"}.get(
-            f["weekdays"], "по дням " + f["weekdays"])
+        md = f.get("monthday")
+        if md:
+            days = "в последний день месяца" if md >= 99 else f"{md} числа каждый месяц"
+        else:
+            days = {"1234567": "каждый день", "12345": "по будням"}.get(
+                f["weekdays"], "по дням " + f["weekdays"])
         due_txt = (f" → до {f['due_hour']:02d}:{f['due_minute'] or 0:02d}"
                    if f["due_hour"] is not None else "")
         lines.append(f"`#f{f['id']}` *{p['name'] if p else '?'}* — {f['title']}\n"
@@ -870,7 +875,15 @@ async def spawn_fixed(bot):
     weekday = str(now.isoweekday())
 
     for fx in C.fix_all():
-        if weekday not in fx["weekdays"]:
+        md = fx.get("monthday")
+        if md:
+            # ежемесячное: 99 = последний день, иначе N-е число (в коротких
+            # месяцах 31-е сдвигается на последний день).
+            last = calendar.monthrange(now.year, now.month)[1]
+            target = last if md >= 99 else min(md, last)
+            if now.day != target:
+                continue
+        elif weekday not in fx["weekdays"]:
             continue
         if fx["last_spawn"] == today:
             continue

@@ -28,6 +28,7 @@ BACK = {
     "pick_freq": "confirm",
     "pick_weekday": "pick_freq",
     "pick_days": "pick_freq",
+    "pick_monthday": "pick_freq",
     "pick_start": "pick_freq",
     "pick_fix_due": "pick_start",
     "pick_fixdue_time": "pick_fix_due",
@@ -71,6 +72,14 @@ def _weekdays_label(wd):
     if wd == "12345":
         return "по будням"
     return "по " + ", ".join(WD_SHORT[int(d) - 1] for d in wd)
+
+
+def _sched_label(draft):
+    """Как описать расписание постоянного задания: по дням недели или по числу."""
+    md = draft.get("monthday")
+    if md:
+        return "в последний день месяца" if md >= 99 else f"{md} числа каждый месяц"
+    return _weekdays_label(draft.get("weekdays") or "")
 
 
 def _date_label(d):
@@ -147,7 +156,18 @@ def _screen(draft):
              B("По будням", callback_data="new:freq:work")],
             [B("Раз в неделю", callback_data="new:freq:weekly"),
              B("Выбрать дни", callback_data="new:freq:pick")],
+            [B("Раз в месяц", callback_data="new:freq:month")],
             [B("‹ Назад", callback_data="new:back")]]))
+
+    if step == "pick_monthday":
+        md = draft.get("monthday") or 1
+        shown = "последний день" if md >= 99 else f"{md} число"
+        return (f"*{name}* · {title}\nКакого числа: *{shown}*", M([
+            [B("− день", callback_data="new:md:-1"),
+             B("+ день", callback_data="new:md:1")],
+            [B("Последний день месяца", callback_data="new:mdlast")],
+            [B("Готово", callback_data="new:mdok"),
+             B("‹ Назад", callback_data="new:back")]]))
 
     if step == "pick_weekday":
         btns = [B(WD_SHORT[i], callback_data=f"new:wd:{i + 1}") for i in range(7)]
@@ -187,12 +207,11 @@ def _screen(draft):
                 _time_stepper("f"))
 
     if step == "final":
-        wd = draft.get("weekdays") or ""
         h, mi = draft.get("hour") or 0, draft.get("minute") or 0
         dh, dm = draft.get("due_hour"), draft.get("due_minute")
         due_txt = f", сделать до {dh:02d}:{dm or 0:02d}" if dh is not None else ""
         return (f"*Постоянное задание*\n\n*{name}*\n{title}\n"
-                f"{_weekdays_label(wd)}, ставить в {h:02d}:{mi:02d}{due_txt}", M([
+                f"{_sched_label(draft)}, ставить в {h:02d}:{mi:02d}{due_txt}", M([
                     [B("Поставить", callback_data="new:create"),
                      B("Отмена", callback_data="new:cancel")]]))
 
@@ -364,11 +383,43 @@ async def menu_button(update, context):
     if action == "freq":
         if arg in ("daily", "work"):
             wd = "1234567" if arg == "daily" else "12345"
-            C.draft_set(user_id, weekdays=wd, hour=9, minute=0, step="pick_start")
+            C.draft_set(user_id, weekdays=wd, monthday=None, hour=9, minute=0,
+                        step="pick_start")
         elif arg == "weekly":
-            C.draft_set(user_id, weekdays="", step="pick_weekday")
+            C.draft_set(user_id, weekdays="", monthday=None, step="pick_weekday")
         elif arg == "pick":
-            C.draft_set(user_id, weekdays="", step="pick_days")
+            C.draft_set(user_id, weekdays="", monthday=None, step="pick_days")
+        elif arg == "month":
+            C.draft_set(user_id, weekdays="", monthday=1, step="pick_monthday")
+        await _rerender(query, C.draft_get(user_id))
+        return
+
+    if action == "md":
+        try:
+            delta = int(arg)
+        except ValueError:
+            await query.answer()
+            return
+        cur = draft.get("monthday") or 1
+        if cur >= 99:
+            cur = 1  # со «последнего дня» стрелка возвращает к числам
+        nd = ((cur - 1 + delta) % 28) + 1
+        C.draft_set(user_id, monthday=nd, step="pick_monthday")
+        await _rerender(query, C.draft_get(user_id))
+        return
+
+    if action == "mdlast":
+        C.draft_set(user_id, monthday=99, step="pick_monthday")
+        await _rerender(query, C.draft_get(user_id))
+        return
+
+    if action == "mdok":
+        fields = {"step": "pick_start"}
+        if not draft.get("monthday"):
+            fields["monthday"] = 1
+        if draft.get("hour") is None:
+            fields["hour"], fields["minute"] = 9, 0
+        C.draft_set(user_id, **fields)
         await _rerender(query, C.draft_get(user_id))
         return
 
@@ -479,20 +530,22 @@ async def _create_fix(query, draft, user_id):
     person = C.person_by_id(draft["person_id"]) if draft.get("person_id") else None
     title = (draft.get("title") or "").strip()
     wd = draft.get("weekdays") or ""
-    if not person or not title or not wd:
+    md = draft.get("monthday")
+    if not person or not title or (not wd and not md):
         C.draft_clear(user_id)
         await query.answer("Диалог сбился")
         await query.edit_message_text("Диалог сбился. Начните заново: /menu")
         return
     h, mi = draft.get("hour") or 9, draft.get("minute") or 0
     dh, dm = draft.get("due_hour"), draft.get("due_minute")
-    fid = C.fix_create(person["id"], title, h, mi, wd, due_hour=dh, due_minute=dm)
+    fid = C.fix_create(person["id"], title, h, mi, wd, due_hour=dh,
+                       due_minute=dm, monthday=md)
     C.draft_clear(user_id)
     await query.answer("Готово")
     due_txt = f", до {dh:02d}:{dm or 0:02d}" if dh is not None else ""
     await query.edit_message_text(
         f"♻️ Постоянное задание для *{person['name']}*: {title}\n"
-        f"{_weekdays_label(wd)} в {h:02d}:{mi:02d}{due_txt}  `#f{fid}`",
+        f"{_sched_label(draft)} в {h:02d}:{mi:02d}{due_txt}  `#f{fid}`",
         parse_mode=ParseMode.MARKDOWN)
 
 
