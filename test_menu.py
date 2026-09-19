@@ -103,6 +103,19 @@ def test_report_deadline_end_of_day_when_no_due():
     assert (d.hour, d.minute) == (23, 59)
 
 
+def test_extend_base_future_due():
+    """Перенос считается от срока задачи, если он ещё не прошёл."""
+    due = now_local() + timedelta(hours=5)
+    assert crewbot._extend_base({"due_at": due}) == due
+
+
+def test_extend_base_past_uses_now():
+    """Срок прошёл — считаем от текущего момента."""
+    due = now_local() - timedelta(hours=5)
+    base = crewbot._extend_base({"due_at": due})
+    assert abs((base - now_local()).total_seconds()) < 5
+
+
 def test_short_title():
     """Напоминание берёт только первую строку и обрезает длинное."""
     assert crewbot._short("свести кассу") == "свести кассу"

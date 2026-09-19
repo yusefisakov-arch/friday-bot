@@ -42,7 +42,8 @@ def task_buttons(task):
         row.append(InlineKeyboardButton("Взял", callback_data=f"crew:take:{task['id']}"))
     row.append(InlineKeyboardButton("Готово", callback_data=f"crew:done:{task['id']}"))
     row.append(InlineKeyboardButton("Проблема", callback_data=f"crew:problem:{task['id']}"))
-    return InlineKeyboardMarkup([row])
+    second = [InlineKeyboardButton("⏳ Не успеваю", callback_data=f"crew:more:{task['id']}")]
+    return InlineKeyboardMarkup([row, second])
 
 
 async def send_task_card(bot, task, person):
@@ -413,11 +414,20 @@ async def crew_button(update, context):
     if action in ("approve", "reject", "report"):
         await _handle_report_actions(update, context, action, task)
         return
+    # Одобрение/отклонение переноса срока — тоже из Штаба.
+    if action in ("extok", "extno"):
+        await _handle_extension(update, context, action, task)
+        return
 
     # Кнопку можно нажать только в том чате, куда ушла карточка задачи —
     # защита от нажатий по чужой задаче из другого чата.
     if task["chat_id"] and query.message and query.message.chat_id != task["chat_id"]:
         await query.answer()
+        return
+
+    # Просьба о переносе срока — жмёт исполнитель в своей группе.
+    if action in ("more", "mh1", "mh2", "mh4", "meod", "mtom", "mcancel"):
+        await _handle_extension(update, context, action, task)
         return
 
     person = C.person_by_id(task["person_id"])
@@ -743,6 +753,112 @@ async def _finish_report(bot, msg, flow):
         except Exception as e:
             logger.error("Фото отчёта #%s не ушло: %s", tid, e)
     await send_md(bot, chat, report)
+
+
+# --- перенос срока по просьбе исполнителя ---------------------------------------
+
+def _extend_base(task):
+    """От чего считать перенос: от срока задачи, а если он прошёл — от сейчас."""
+    now = now_local()
+    due = task.get("due_at")
+    if due and due.astimezone(LOCAL_TZ) > now:
+        return due.astimezone(LOCAL_TZ)
+    return now
+
+
+async def _handle_extension(update, context, action, task):
+    query = update.callback_query
+    tid = task["id"]
+    person = C.person_by_id(task["person_id"])
+    emp_chat = task["chat_id"] or (person["chat_id"] if person else None)
+
+    # --- решение владельца в Штабе ---
+    if action in ("extok", "extno"):
+        if not is_allowed(query.from_user.id):
+            await query.answer("Не для вас")
+            return
+        new_due = task.get("ext_due")
+        if action == "extok" and new_due:
+            fields = {"due_at": new_due, "ext_due": None,
+                      "warned_due": False, "asked_due": False}
+            if task["status"] != C.STATUS_NEW:
+                fields["told_boss"] = False
+            if task["status"] in (C.STATUS_FAILED, C.STATUS_PROBLEM):
+                fields["status"] = C.STATUS_TAKEN
+            C.task_update(tid, **fields)
+            await refresh_card(context.bot, tid)
+            await _mark_boss_msg(query, f"✅ Перенос одобрен: {C.fmt_due(new_due)}")
+            if emp_chat:
+                await context.bot.send_message(
+                    chat_id=emp_chat,
+                    text=f"✅ Срок перенесён: {C.fmt_due(new_due)}.")
+        else:
+            C.task_update(tid, ext_due=None)
+            await _mark_boss_msg(query, "❌ Перенос отклонён")
+            if emp_chat:
+                await context.bot.send_message(
+                    chat_id=emp_chat,
+                    text=f"❌ Перенос отклонён. Срок прежний: {C.fmt_due(task['due_at'])}.")
+        return
+
+    # --- сотрудник открыл выбор нового срока ---
+    if action == "more":
+        await query.answer()
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("+1 час", callback_data=f"crew:mh1:{tid}"),
+             InlineKeyboardButton("+2 часа", callback_data=f"crew:mh2:{tid}"),
+             InlineKeyboardButton("+4 часа", callback_data=f"crew:mh4:{tid}")],
+            [InlineKeyboardButton("Конец дня", callback_data=f"crew:meod:{tid}"),
+             InlineKeyboardButton("Завтра", callback_data=f"crew:mtom:{tid}")],
+            [InlineKeyboardButton("Отмена", callback_data=f"crew:mcancel:{tid}")]])
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            message_thread_id=query.message.message_thread_id,
+            text=f"{mention(person) if person else ''} на когда перенести "
+                 f"«{_short(task['title'])}»?",
+            reply_markup=kb)
+        return
+
+    if action == "mcancel":
+        await query.answer("Отменено")
+        try:
+            await query.edit_message_text("Перенос отменён.")
+        except Exception:
+            pass
+        return
+
+    # --- сотрудник выбрал новый срок ---
+    if action in ("mh1", "mh2", "mh4"):
+        new_due = _extend_base(task) + timedelta(hours={"mh1": 1, "mh2": 2, "mh4": 4}[action])
+    elif action == "meod":
+        now = now_local()
+        eod = now.replace(hour=23, minute=59, second=0, microsecond=0)
+        new_due = eod if eod > now else eod + timedelta(days=1)
+    elif action == "mtom":
+        new_due = _extend_base(task) + timedelta(days=1)
+    else:
+        await query.answer()
+        return
+
+    C.task_update(tid, ext_due=new_due)
+    await query.answer("Запрос отправлен")
+    try:
+        await query.edit_message_text(
+            f"Запросил перенос на {C.fmt_due(new_due)}. Жду ответа руководителя.")
+    except Exception:
+        pass
+    chat = hq_chat_id()
+    if chat:
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Одобрить", callback_data=f"crew:extok:{tid}"),
+            InlineKeyboardButton("❌ Отклонить", callback_data=f"crew:extno:{tid}")]])
+        who = person["name"] if person else "?"
+        await context.bot.send_message(
+            chat_id=chat,
+            text=f"⏳ *{who}* просит перенести «{task['title']}»\n"
+                 f"Было: {C.fmt_due(task['due_at'])}\n"
+                 f"Просит: {C.fmt_due(new_due)}  `#{tid}`",
+            parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
 
 # --- фоновый контроль -----------------------------------------------------------

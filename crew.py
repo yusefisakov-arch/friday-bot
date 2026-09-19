@@ -130,7 +130,8 @@ def crew_init_db():
                     "report_due TIMESTAMPTZ",
                     "report_text TEXT",
                     "report_done BOOLEAN NOT NULL DEFAULT FALSE",
-                    "report_nagged BOOLEAN NOT NULL DEFAULT FALSE"):
+                    "report_nagged BOOLEAN NOT NULL DEFAULT FALSE",
+                    "ext_due TIMESTAMPTZ"):
             cur.execute(f"ALTER TABLE crew_tasks ADD COLUMN IF NOT EXISTS {col}")
         cur.close()
 
@@ -236,7 +237,7 @@ TASK_KEYS = ("id", "person_id", "title", "due_at", "status", "note", "fix_id",
              "chat_id", "message_id", "created_at", "taken_at", "done_at",
              "nudged_take", "warned_due", "asked_due", "told_boss",
              "boss_note", "report_due", "report_text", "report_done",
-             "report_nagged")
+             "report_nagged", "ext_due")
 TASK_COLS = ", ".join(TASK_KEYS)
 
 
