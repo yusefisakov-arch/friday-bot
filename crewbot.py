@@ -408,6 +408,42 @@ async def cancel_cmd(update, context):
     await update.message.reply_text(f"Снял #{tid}: {task['title']}")
 
 
+async def clear_cmd(update, context):
+    """/clear [N] — удалить последние N сообщений в этом чате (по умолчанию 100).
+
+    Читать историю боты не могут, поэтому идём по номерам сообщений от текущего
+    вниз и удаляем. Свои сообщения бот удаляет всегда; чужие — только если он
+    админ с правом удаления. Чего удалить нельзя — молча пропускаем."""
+    if not is_allowed(update.effective_user.id):
+        return
+    chat_id = update.effective_chat.id
+    last_id = update.message.message_id
+    try:
+        n = int(context.args[0]) if context.args else 100
+    except ValueError:
+        n = 100
+    n = max(1, min(n, 300))
+
+    deleted = 0
+    for mid in range(last_id, max(0, last_id - n), -1):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            deleted += 1
+        except Exception:
+            pass
+        await asyncio.sleep(0.05)
+
+    try:
+        note = await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🧹 Удалил {deleted} сообщений. Меню вернуть: /menu")
+        # само подтверждение убираем через несколько секунд, чтобы не мусорить
+        await asyncio.sleep(4)
+        await context.bot.delete_message(chat_id=chat_id, message_id=note.message_id)
+    except Exception:
+        pass
+
+
 # --- кнопки ---------------------------------------------------------------------
 
 async def crew_button(update, context):

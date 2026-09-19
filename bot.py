@@ -29,7 +29,7 @@ from radar999 import (
 from crewbot import (
     crew_loop, crew_here_cmd, hq_here_cmd, crew_list_cmd, task_cmd,
     fix_cmd, fix_list_cmd, fix_del_cmd, today_cmd, debts_cmd, done_cmd,
-    cancel_cmd, crew_button, catch_problem_note,
+    cancel_cmd, crew_button, catch_problem_note, clear_cmd,
 )
 from crewmenu import menu_cmd, menu_button, catch_draft_input
 from crew import crew_init_db
@@ -189,6 +189,7 @@ def main():
     app.add_handler(CommandHandler("debts", debts_cmd))
     app.add_handler(CommandHandler("done", done_cmd))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
+    app.add_handler(CommandHandler("clear", clear_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CallbackQueryHandler(crew_button, pattern=r"^crew:"))
     app.add_handler(CallbackQueryHandler(menu_button, pattern=r"^new:"))
