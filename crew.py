@@ -23,8 +23,9 @@ TAKE_NUDGE_MIN = 30        # не нажал «Взял» — напоминае
 TAKE_ESCALATE_MIN = 60     # так и не нажал — сообщаем вам
 PRE_DUE_MIN = 60           # за час до срока — предупреждение
 DUE_GRACE_MIN = 60         # столько ждём после срока, прежде чем сообщить вам
+MORNING_REPORT_HOUR = 7    # час утреннего плана на день
 EVENING_REPORT_HOUR = 20   # час вечерней сводки
-WEEKLY_REPORT_HOUR = 9     # час недельной сводки утром в понедельник
+WEEKLY_REPORT_HOUR = 7     # час недельной сводки утром в понедельник
 
 STATUS_NEW = "new"
 STATUS_TAKEN = "taken"

@@ -364,6 +364,54 @@ def render_digest(tasks, title, overdue=False):
     return "\n".join(lines).strip()
 
 
+STATE_WORD = {C.STATUS_NEW: "не взято", C.STATUS_TAKEN: "в работе",
+              C.STATUS_PROBLEM: "проблема"}
+
+
+def render_board():
+    """Живая доска: все открытые задачи по группам со статусом каждой."""
+    tasks = C.tasks_open()
+    if not tasks:
+        return "*Доска задач*\n\nОткрытых задач нет."
+    now = now_local()
+    new_n = sum(1 for t in tasks if t["status"] == C.STATUS_NEW)
+    taken_n = sum(1 for t in tasks if t["status"] == C.STATUS_TAKEN)
+    prob_n = sum(1 for t in tasks if t["status"] == C.STATUS_PROBLEM)
+    lines = ["*Доска задач*",
+             f"Всего {len(tasks)}: не взято {new_n} · в работе {taken_n} · "
+             f"проблем {prob_n}", ""]
+    by_person = {}
+    for t in tasks:
+        by_person.setdefault(t["person_id"], []).append(t)
+    for pid, items in by_person.items():
+        p = C.person_by_id(pid)
+        lines.append(f"*{p['name'] if p else '?'}*")
+        for t in items:
+            icon = C.STATUS_ICON.get(t["status"], "•")
+            tail = C.fmt_due(t["due_at"])
+            if t["due_at"] and t["due_at"].astimezone(now.tzinfo) < now:
+                tail = f"просрочка {C.fmt_overdue(t['due_at'])}"
+            state = STATE_WORD.get(t["status"], "")
+            lines.append(f"  {icon} {_short(t['title'], 40)} — {tail} · "
+                         f"{state}  `#{t['id']}`")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _board_kb():
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔄 Обновить", callback_data="crew:board:0")]])
+
+
+async def board_cmd(update, context):
+    """/board — доска задач по всем группам (в Штабе или в личке)."""
+    if not is_allowed(update.effective_user.id):
+        return
+    C.crew_init_db()
+    await update.message.reply_text(render_board(), parse_mode=ParseMode.MARKDOWN,
+                                    reply_markup=_board_kb())
+
+
 async def done_cmd(update, context):
     """/done 12 — закрыть задачу руками."""
     if not is_allowed(update.effective_user.id):
@@ -454,6 +502,20 @@ async def crew_button(update, context):
     action, tid = parts[1], int(parts[2])
 
     C.crew_init_db()
+
+    # Доска задач — не привязана к конкретной задаче (tid=0), обрабатываем раньше.
+    if action == "board":
+        if not is_allowed(query.from_user.id):
+            await query.answer("Не для вас")
+            return
+        try:
+            await query.edit_message_text(render_board(), parse_mode=ParseMode.MARKDOWN,
+                                          reply_markup=_board_kb())
+        except Exception:
+            pass  # «сообщение не изменилось» — не страшно
+        await query.answer("Обновлено")
+        return
+
     task = C.task_get(tid)
     if not task:
         await query.answer("Задача не найдена")
@@ -1178,6 +1240,23 @@ async def weekly_report(bot):
     await tell_boss(bot, "\n".join(lines))
 
 
+async def morning_report(bot):
+    """Утренний план на день в Штаб по всем группам — раз в день."""
+    now = now_local()
+    if now.hour != C.MORNING_REPORT_HOUR:
+        return
+    today = str(now.date())
+    if C.state_get("last_morning") == today:
+        return
+    C.state_set("last_morning", today)
+
+    tasks = C.tasks_for_day()
+    if not tasks:
+        await tell_boss(bot, "*План на день*\n\nЗадач на сегодня нет.")
+        return
+    await tell_boss(bot, render_digest(tasks, "План на день"))
+
+
 async def _migrate_cards_once(bot):
     """Один раз перерисовывает все открытые карточки в новый вид — чтобы
     кнопка «Не успеваю» появилась и на задачах, поставленных до её добавления."""
@@ -1202,6 +1281,7 @@ async def crew_loop(bot):
         try:
             C.crew_init_db()
             await spawn_fixed(bot)
+            await morning_report(bot)
             await chase(bot)
             await evening_report(bot)
             await weekly_report(bot)

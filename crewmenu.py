@@ -244,9 +244,12 @@ async def menu_cmd(update, context):
             "группу, добавьте меня и напишите там /crew Имя.")
         return
     btns = [B(p["name"], callback_data=f"new:who:{p['id']}") for p in people]
+    kb = _rows(btns, 2)
+    # Доска задач обрабатывается в crew_button (namespace crew:), не в new:.
+    kb.append([B("📋 Доска задач", callback_data="crew:board:0")])
     msg = await update.message.reply_text(
         "*Кому ставим задачу?*", parse_mode=ParseMode.MARKDOWN,
-        reply_markup=M(_rows(btns, 2)))
+        reply_markup=M(kb))
     try:
         await context.bot.pin_chat_message(chat_id=msg.chat_id,
                                            message_id=msg.message_id,
