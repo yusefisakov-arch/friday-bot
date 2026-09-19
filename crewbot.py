@@ -292,7 +292,12 @@ async def fix_list_cmd(update, context):
         lines.append(f"`#f{f['id']}` *{p['name'] if p else '?'}* — {f['title']}\n"
                      f"       {days} в {f['hour']:02d}:{f['minute']:02d}{due_txt}")
     lines.append("\nУдалить: /fix\\_del 3")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    # Кнопки правки времени — по одной на задание.
+    btns = [InlineKeyboardButton(f"✏️ f{f['id']}",
+                                 callback_data=f"new:fedit:{f['id']}") for f in rows]
+    kb = InlineKeyboardMarkup([btns[i:i + 3] for i in range(0, len(btns), 3)])
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN,
+                                    reply_markup=kb)
 
 
 async def fix_del_cmd(update, context):

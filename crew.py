@@ -136,6 +136,8 @@ def crew_init_db():
         # Ежемесячные задания: число месяца (1–31) или 99 = последний день.
         cur.execute("ALTER TABLE crew_fix ADD COLUMN IF NOT EXISTS monthday INT")
         cur.execute("ALTER TABLE crew_draft ADD COLUMN IF NOT EXISTS monthday INT")
+        # Редактирование постоянного задания: id правимого задания в черновике.
+        cur.execute("ALTER TABLE crew_draft ADD COLUMN IF NOT EXISTS edit_fid INT")
         cur.close()
 
 
@@ -359,17 +361,42 @@ FIX_COLS = ", ".join(FIX_KEYS)
 
 def fix_create(person_id, title, hour, minute, weekdays, due_hour=None,
                due_minute=None, monthday=None):
+    # Если время постановки на сегодня уже прошло — считаем сегодня
+    # обработанным, чтобы задание не выскочило сразу, а стартовало со
+    # следующего подходящего дня. Создали заранее (до времени) — поставится сегодня.
+    now = now_local()
+    last_spawn = now.date() if (now.hour, now.minute) >= (hour, minute) else None
     with db_conn() as conn:
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO crew_fix (person_id, title, hour, minute, weekdays, "
-            "due_hour, due_minute, monthday) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
-            "RETURNING id",
+            "due_hour, due_minute, monthday, last_spawn) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
             (person_id, title, hour, minute, weekdays, due_hour, due_minute,
-             monthday))
+             monthday, last_spawn))
         fid = cur.fetchone()[0]
         cur.close()
     return fid
+
+
+def fix_get(fid):
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(f"SELECT {FIX_COLS} FROM crew_fix WHERE id=%s", (fid,))
+        row = cur.fetchone()
+        cur.close()
+    return dict(zip(FIX_KEYS, row)) if row else None
+
+
+def fix_update(fid, **fields):
+    if not fields:
+        return
+    sets = ", ".join(f"{k}=%s" for k in fields)
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(f"UPDATE crew_fix SET {sets} WHERE id=%s",
+                    list(fields.values()) + [fid])
+        cur.close()
 
 
 def fix_all(only_active=True, person_id=None):
@@ -410,7 +437,7 @@ def fix_delete(fix_id):
 
 DRAFT_KEYS = ("user_id", "chat_id", "message_id", "person_id", "title", "due_at",
               "pick_date", "week_shift", "kind", "weekdays", "hour", "minute",
-              "due_hour", "due_minute", "step", "monthday")
+              "due_hour", "due_minute", "step", "monthday", "edit_fid")
 DRAFT_COLS = ", ".join(DRAFT_KEYS)
 DRAFT_STALE_MIN = 30
 
@@ -445,7 +472,8 @@ def draft_reset(user_id, chat_id, step):
               chat_id=EXCLUDED.chat_id, message_id=NULL, person_id=NULL,
               title=NULL, due_at=NULL, pick_date=NULL, week_shift=0, kind=NULL,
               weekdays=NULL, hour=NULL, minute=NULL, due_hour=NULL,
-              due_minute=NULL, monthday=NULL, step=EXCLUDED.step, updated_at=now()
+              due_minute=NULL, monthday=NULL, edit_fid=NULL,
+              step=EXCLUDED.step, updated_at=now()
         """, (user_id, chat_id, step))
         cur.close()
 

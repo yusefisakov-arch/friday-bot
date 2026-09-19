@@ -210,9 +210,11 @@ def _screen(draft):
         h, mi = draft.get("hour") or 0, draft.get("minute") or 0
         dh, dm = draft.get("due_hour"), draft.get("due_minute")
         due_txt = f", сделать до {dh:02d}:{dm or 0:02d}" if dh is not None else ""
-        return (f"*Постоянное задание*\n\n*{name}*\n{title}\n"
+        head = "Изменить задание" if draft.get("edit_fid") else "Постоянное задание"
+        save = "Сохранить" if draft.get("edit_fid") else "Поставить"
+        return (f"*{head}*\n\n*{name}*\n{title}\n"
                 f"{_sched_label(draft)}, ставить в {h:02d}:{mi:02d}{due_txt}", M([
-                    [B("Поставить", callback_data="new:create"),
+                    [B(save, callback_data="new:create"),
                      B("Отмена", callback_data="new:cancel")]]))
 
     return "…", M([[B("Отмена", callback_data="new:cancel")]])
@@ -285,6 +287,30 @@ async def menu_button(update, context):
             parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
         C.draft_set(user_id, message_id=sent.message_id)
         await query.answer()
+        return
+
+    # Правка времени постоянного задания: грузим его в черновик и идём
+    # по тем же стрелкам (постановка → срок → сохранить).
+    if action == "fedit":
+        if not arg.isdigit():
+            await query.answer()
+            return
+        fx = C.fix_get(int(arg))
+        if not fx:
+            await query.answer("Задание не найдено")
+            return
+        C.draft_reset(user_id, query.message.chat_id, "pick_start")
+        C.draft_set(user_id, person_id=fx["person_id"], title=fx["title"],
+                    weekdays=fx["weekdays"], monthday=fx.get("monthday"),
+                    hour=fx["hour"], minute=fx["minute"],
+                    due_hour=fx["due_hour"], due_minute=fx["due_minute"],
+                    kind="fixedit", edit_fid=fx["id"])
+        text, kb = _screen(C.draft_get(user_id))
+        sent = await context.bot.send_message(
+            chat_id=query.message.chat_id, text=text,
+            parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        C.draft_set(user_id, message_id=sent.message_id)
+        await query.answer("Меняем время")
         return
 
     draft = C.draft_get(user_id)
@@ -468,7 +494,13 @@ async def menu_button(update, context):
         return
 
     if action == "sok":
-        C.draft_set(user_id, step="pick_fix_due")
+        # при создании — экран пресетов срока; при правке — сразу стрелки срока
+        nxt = "pick_fixdue_time" if draft.get("edit_fid") else "pick_fix_due"
+        fields = {"step": nxt}
+        if nxt == "pick_fixdue_time" and draft.get("due_hour") is None:
+            h, m = _adj_time(draft.get("hour"), draft.get("minute"), dh=1)
+            fields["due_hour"], fields["due_minute"] = h, m
+        C.draft_set(user_id, **fields)
         await _rerender(query, C.draft_get(user_id))
         return
 
@@ -538,11 +570,23 @@ async def _create_fix(query, draft, user_id):
         return
     h, mi = draft.get("hour") or 9, draft.get("minute") or 0
     dh, dm = draft.get("due_hour"), draft.get("due_minute")
+    due_txt = f", до {dh:02d}:{dm or 0:02d}" if dh is not None else ""
+    edit_fid = draft.get("edit_fid")
+    if edit_fid:
+        # правка времени: last_spawn не трогаем, но если сегодня уже ставили
+        # раньше нового времени — разрешим поставить сегодня заново.
+        C.fix_update(edit_fid, hour=h, minute=mi, due_hour=dh, due_minute=dm)
+        C.draft_clear(user_id)
+        await query.answer("Сохранено")
+        await query.edit_message_text(
+            f"✏️ Обновил постоянное задание для *{person['name']}*: {title}\n"
+            f"{_sched_label(draft)} в {h:02d}:{mi:02d}{due_txt}  `#f{edit_fid}`",
+            parse_mode=ParseMode.MARKDOWN)
+        return
     fid = C.fix_create(person["id"], title, h, mi, wd, due_hour=dh,
                        due_minute=dm, monthday=md)
     C.draft_clear(user_id)
     await query.answer("Готово")
-    due_txt = f", до {dh:02d}:{dm or 0:02d}" if dh is not None else ""
     await query.edit_message_text(
         f"♻️ Постоянное задание для *{person['name']}*: {title}\n"
         f"{_sched_label(draft)} в {h:02d}:{mi:02d}{due_txt}  `#f{fid}`",
