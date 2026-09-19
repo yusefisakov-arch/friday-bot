@@ -9,8 +9,9 @@ from datetime import timedelta
 
 from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 
-from core import db_conn, is_allowed, now_local, send_md, ALLOWED_USER_ID
+from core import db_conn, is_allowed, now_local, send_md, LOCAL_TZ, ALLOWED_USER_ID
 import crew as C
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,13 @@ CHECK_EVERY_SECONDS = 180
 # (chat_id, user_id) -> {"tid", "step", "desc", "photo", "solution"}
 # step: desc -> photo -> solution. По завершении уходит отчёт в Штаб.
 PROBLEM_FLOW = {}
+
+# Владелец пишет инструкцию после «Запретить»: (chat_id, user_id) -> tid
+AWAIT_INSTR = {}
+
+# Исполнитель заполняет отчёт после «Отчёт»:
+# (chat_id, user_id) -> {"tid", "step", "done", "photo", "left"}
+REPORT_FLOW = {}
 
 
 # --- вспомогательное ------------------------------------------------------------
@@ -393,6 +401,12 @@ async def crew_button(update, context):
         await query.answer("Задача не найдена")
         return
 
+    # Одобрение/запрет решения и запрос отчёта — до проверки чата: кнопки
+    # «Одобрить/Запретить» живут в Штабе, а не в группе задачи.
+    if action in ("approve", "reject", "report"):
+        await _handle_report_actions(update, context, action, task)
+        return
+
     # Кнопку можно нажать только в том чате, куда ушла карточка задачи —
     # защита от нажатий по чужой задаче из другого чата.
     if task["chat_id"] and query.message and query.message.chat_id != task["chat_id"]:
@@ -438,21 +452,33 @@ async def crew_button(update, context):
 
 
 async def catch_problem_note(update, context):
-    """Пошаговый разбор «Проблемы»: что случилось → фото → как решить.
-    Ведётся только с тем, кто нажал кнопку; в конце уходит отчёт в Штаб.
-    Свободного разговора с ботом нет — вне активного разбора всё игнорим."""
+    """Свободные сообщения по задачам. Порядок разбора:
+    1) владелец пишет инструкцию после «Запретить» (может быть и в личке-Штабе);
+    2) исполнитель заполняет отчёт после «Отчёт»;
+    3) исполнитель поясняет «Проблему».
+    Вне этих трёх состояний свободного разговора с ботом нет."""
     msg = update.message
     if not msg:
         return
-    # Только в группах и только по активной задаче.
+    key = (msg.chat_id, msg.from_user.id)
+    text = (msg.text or msg.caption or "").strip()
+
+    # 1) инструкция владельца — до ограничения «только группы»: Штаб бывает личкой
+    if key in AWAIT_INSTR:
+        await _handle_instruction(context.bot, msg, key, text)
+        return
+    # 2) отчёт исполнителя
+    if key in REPORT_FLOW:
+        await _handle_report_step(context.bot, msg, key, text)
+        return
+
+    # 3) разбор «Проблемы» — только в группах
     if msg.chat.type not in ("group", "supergroup"):
         return
-    key = (msg.chat_id, msg.from_user.id)
     flow = PROBLEM_FLOW.get(key)
     if not flow:
         return
 
-    text = (msg.text or msg.caption or "").strip()
     step = flow["step"]
 
     if step == "desc":
@@ -514,13 +540,202 @@ async def _finish_problem(bot, msg, flow):
     if not chat:
         logger.warning("Отчёт по проблеме #%s некому отправить (нет Штаба)", tid)
         return
-    await send_md(bot, chat, report)
     if flow.get("photo"):
         try:
             await bot.send_photo(chat_id=chat, photo=flow["photo"],
                                  caption=f"Фото к проблеме по задаче #{tid}")
         except Exception as e:
             logger.error("Фото к проблеме #%s не ушло: %s", tid, e)
+    # Отчёт с решением идёт последним, на нём — кнопки одобрения.
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Одобрить", callback_data=f"crew:approve:{tid}"),
+        InlineKeyboardButton("✍️ Запретить", callback_data=f"crew:reject:{tid}")]])
+    await send_md(bot, chat, report, reply_markup=kb)
+
+
+# --- одобрение решения и отчёт исполнителя --------------------------------------
+
+def _report_deadline(task):
+    """Когда ждём отчёт: к сроку задачи, а если срока нет или он прошёл —
+    к концу текущего дня."""
+    now = now_local()
+    due = task.get("due_at")
+    if due and due.astimezone(LOCAL_TZ) > now:
+        return due
+    return now.replace(hour=23, minute=59, second=0, microsecond=0)
+
+
+async def _send_report_button(bot, task, person, text):
+    """Шлёт исполнителю сообщение с кнопкой «Отчёт» и включает ожидание отчёта.
+    Обычные напоминания по сроку глушим — теперь следим за отчётом."""
+    C.task_update(task["id"], report_due=_report_deadline(task),
+                  report_done=False, report_nagged=False,
+                  status=C.STATUS_TAKEN, warned_due=True, asked_due=True,
+                  told_boss=True)
+    chat = task["chat_id"] or (person["chat_id"] if person else None)
+    if not chat:
+        return
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+        "📋 Отчёт", callback_data=f"crew:report:{task['id']}")]])
+    try:
+        await bot.send_message(chat_id=chat, text=text,
+                               parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    except BadRequest:
+        await bot.send_message(chat_id=chat, text=text, reply_markup=kb)
+    except Exception as e:
+        logger.error("Кнопка «Отчёт» по #%s не ушла: %s", task["id"], e)
+
+
+async def _mark_boss_msg(query, note):
+    """Дописывает строку к сообщению в Штабе и убирает кнопки."""
+    try:
+        await query.edit_message_text((query.message.text or "") + "\n\n" + note)
+    except Exception:
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+
+async def _handle_report_actions(update, context, action, task):
+    query = update.callback_query
+    tid = task["id"]
+    person = C.person_by_id(task["person_id"])
+
+    if action in ("approve", "reject") and not is_allowed(query.from_user.id):
+        await query.answer("Не для вас")
+        return
+
+    if action == "approve":
+        await query.answer("Одобрено")
+        await _send_report_button(
+            context.bot, C.task_get(tid), person,
+            "✅ Руководитель одобрил ваше решение. Действуйте, как предложили.\n"
+            "Как закончите — нажмите «Отчёт».")
+        await _mark_boss_msg(
+            query, f"✅ Одобрено. Жду отчёт до {C.fmt_due(_report_deadline(task))}.")
+        return
+
+    if action == "reject":
+        AWAIT_INSTR[(query.message.chat_id, query.from_user.id)] = tid
+        await query.answer("Напишите инструкцию")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"Что делать по «{task['title']}»? Напишите инструкцию одним "
+                 "сообщением — передам исполнителю.",
+            reply_markup=ForceReply(selective=False))
+        return
+
+    if action == "report":
+        # «Отчёт» жмёт исполнитель в своей группе
+        REPORT_FLOW[(query.message.chat_id, query.from_user.id)] = {
+            "tid": tid, "step": "done", "done": "", "photo": None, "left": ""}
+        await query.answer("Отчёт")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            message_thread_id=query.message.message_thread_id,
+            text=f"{mention(person) if person else ''} отчёт по «{task['title']}».\n"
+                 "Что сделали? Опишите одним сообщением.",
+            reply_markup=ForceReply(selective=bool(person and person.get("username"))))
+        return
+
+
+async def _handle_instruction(bot, msg, key, text):
+    """Владелец написал инструкцию после «Запретить» — шлём её исполнителю."""
+    tid = AWAIT_INSTR.get(key)
+    if not text:
+        await msg.reply_text("Напишите инструкцию словами.")
+        return
+    AWAIT_INSTR.pop(key, None)
+    C.crew_init_db()
+    task = C.task_get(tid)
+    if not task:
+        return
+    person = C.person_by_id(task["person_id"])
+    C.task_update(tid, boss_note=text[:800])
+    await msg.reply_text("Передал исполнителю.")
+    await _send_report_button(
+        bot, C.task_get(tid), person,
+        f"❌ Решение не одобрили.\n*Что делать:* {text}\n\n"
+        "Как сделаете — нажмите «Отчёт».")
+
+
+async def _handle_report_step(bot, msg, key, text):
+    """Пошаговый отчёт исполнителя: что сделал → фото → итог → в Штаб."""
+    flow = REPORT_FLOW.get(key)
+    if not flow:
+        return
+    step = flow["step"]
+
+    if step == "done":
+        if not text:
+            await msg.reply_text("Опишите, что сделали.")
+            return
+        flow["done"] = text[:1000]
+        flow["step"] = "photo"
+        await msg.reply_text(
+            "Есть фото результата? Пришлите фото или напишите «нет».",
+            reply_markup=ForceReply(selective=True))
+        return
+
+    if step == "photo":
+        if msg.photo:
+            flow["photo"] = msg.photo[-1].file_id
+        elif text.lower() in ("нет", "no", "-", "пропустить", "skip", "не надо"):
+            flow["photo"] = None
+        else:
+            await msg.reply_text("Пришлите фото или напишите «нет».")
+            return
+        flow["step"] = "left"
+        await msg.reply_text(
+            "Всё решено или что-то осталось? Напишите коротко.",
+            reply_markup=ForceReply(selective=True))
+        return
+
+    if step == "left":
+        if not text:
+            await msg.reply_text("Напишите: всё решено или что осталось.")
+            return
+        flow["left"] = text[:1000]
+        REPORT_FLOW.pop(key, None)
+        await _finish_report(bot, msg, flow)
+
+
+async def _finish_report(bot, msg, flow):
+    C.crew_init_db()
+    tid = flow["tid"]
+    task = C.task_get(tid)
+    if not task:
+        return
+    person = C.person_by_id(task["person_id"])
+    stored = f"Сделано: {flow['done']}"
+    if flow.get("left"):
+        stored += f"\nИтог: {flow['left']}"
+    C.task_update(tid, report_text=stored[:800], report_done=True,
+                  status=C.STATUS_DONE, done_at=now_local())
+    await refresh_card(bot, tid)
+    await msg.reply_text("Принял отчёт, передал руководителю. Спасибо.")
+
+    who = person["name"] if person else "?"
+    report = (f"📋 *{who}* отчитался по задаче\n"
+              f"{task['title']}  `#{tid}`\n\n"
+              f"*Сделано:*\n{flow['done']}")
+    if flow.get("left"):
+        report += f"\n\n*Итог:*\n{flow['left']}"
+    chat = hq_chat_id()
+    if not chat:
+        return
+    if flow.get("photo"):
+        try:
+            await bot.send_photo(chat_id=chat, photo=flow["photo"],
+                                 caption=f"Фото к отчёту по задаче #{tid}")
+        except Exception as e:
+            logger.error("Фото отчёта #%s не ушло: %s", tid, e)
+    await send_md(bot, chat, report)
 
 
 # --- фоновый контроль -----------------------------------------------------------
@@ -618,6 +833,18 @@ async def chase(bot):
                 f"Просрочка {C.fmt_overdue(task['due_at'])}, ответа нет.  "
                 f"`#{task['id']}`")
 
+        await asyncio.sleep(0.3)
+
+    # Ждём отчёт, а срок отчёта прошёл — сообщаем владельцу (один раз).
+    for task in C.tasks_awaiting_report():
+        C.task_update(task["id"], report_nagged=True)
+        person = C.person_by_id(task["person_id"])
+        await tell_boss(
+            bot,
+            f"⏰ Нет отчёта по задаче\n"
+            f"{task['title']}  `#{task['id']}`\n"
+            f"Исполнитель: {person['name'] if person else '?'}\n"
+            f"Ждали до {C.fmt_due(task['report_due'])}.")
         await asyncio.sleep(0.3)
 
 

@@ -24,6 +24,9 @@ sys.modules.setdefault("psycopg2.pool", _fake_pool)
 
 import crewmenu as CM
 import crew
+import crewbot
+from datetime import timedelta
+from core import now_local
 
 ALL_STEPS = [
     "wait_title", "pick_due", "pick_due_date", "confirm",
@@ -86,6 +89,18 @@ def test_no_time_means_buttons():
     due, title = crew.parse_due_explicit("просто убрать склад")
     assert due is None
     assert title == "просто убрать склад"
+
+
+def test_report_deadline_future_due():
+    """Есть срок задачи в будущем — отчёт ждём к нему."""
+    due = now_local() + timedelta(hours=3)
+    assert crewbot._report_deadline({"due_at": due}) == due
+
+
+def test_report_deadline_end_of_day_when_no_due():
+    """Срока нет — отчёт ждём к концу дня."""
+    d = crewbot._report_deadline({"due_at": None})
+    assert (d.hour, d.minute) == (23, 59)
 
 
 def test_hhmm_parsing():

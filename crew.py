@@ -124,6 +124,14 @@ def crew_init_db():
                 step       TEXT NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )""")
+        # Одобрение решения проблемы и отчёт исполнителя. Добавляем поля через
+        # ALTER, чтобы подхватились и на уже существующей базе.
+        for col in ("boss_note TEXT",
+                    "report_due TIMESTAMPTZ",
+                    "report_text TEXT",
+                    "report_done BOOLEAN NOT NULL DEFAULT FALSE",
+                    "report_nagged BOOLEAN NOT NULL DEFAULT FALSE"):
+            cur.execute(f"ALTER TABLE crew_tasks ADD COLUMN IF NOT EXISTS {col}")
         cur.close()
 
 
@@ -226,7 +234,9 @@ def person_deactivate(chat_id):
 
 TASK_KEYS = ("id", "person_id", "title", "due_at", "status", "note", "fix_id",
              "chat_id", "message_id", "created_at", "taken_at", "done_at",
-             "nudged_take", "warned_due", "asked_due", "told_boss")
+             "nudged_take", "warned_due", "asked_due", "told_boss",
+             "boss_note", "report_due", "report_text", "report_done",
+             "report_nagged")
 TASK_COLS = ", ".join(TASK_KEYS)
 
 
@@ -301,6 +311,20 @@ def tasks_overdue():
         cur.execute(f"SELECT {TASK_COLS} FROM crew_tasks "
                     "WHERE status = ANY(%s) AND due_at < now() "
                     "ORDER BY due_at", (list(OPEN_STATUSES),))
+        rows = cur.fetchall()
+        cur.close()
+    return [dict(zip(TASK_KEYS, r)) for r in rows]
+
+
+def tasks_awaiting_report():
+    """Задачи, где ждут отчёт исполнителя, а срок отчёта уже прошёл и мы
+    ещё не сообщали об этом владельцу."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(f"SELECT {TASK_COLS} FROM crew_tasks "
+                    "WHERE report_due IS NOT NULL AND NOT report_done "
+                    "AND NOT report_nagged AND report_due < now() "
+                    "ORDER BY report_due")
         rows = cur.fetchall()
         cur.close()
     return [dict(zip(TASK_KEYS, r)) for r in rows]
