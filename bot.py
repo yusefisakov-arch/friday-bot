@@ -13,6 +13,7 @@ import os
 
 from telegram import (Update, BotCommand, BotCommandScopeAllChatAdministrators,
                       BotCommandScopeChat, BotCommandScopeDefault)
+from telegram.error import Conflict
 from telegram.ext import (Application, ApplicationHandlerStop, CommandHandler,
                           ContextTypes, CallbackQueryHandler, MessageHandler,
                           TypeHandler, filters)
@@ -123,6 +124,17 @@ async def gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raise ApplicationHandlerStop
 
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Единый обработчик ошибок. Conflict — ожидаемый шум при передеплое
+    (Railway недолго держит старый и новый контейнер сразу), глушим до
+    предупреждения; всё остальное логируем с трейсом, не роняя бота."""
+    err = context.error
+    if isinstance(err, Conflict):
+        logger.warning("Conflict getUpdates (обычно перекрытие при передеплое)")
+        return
+    logger.error("Ошибка в обработчике", exc_info=err)
+
+
 async def free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Один обработчик на все свободные сообщения. Порядок важен: сначала
     смотрим, не вводит ли пользователь название задачи (диалог /menu), и лишь
@@ -145,6 +157,7 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     # Замок: срабатывает раньше всех и отсекает чужую личку.
     app.add_handler(TypeHandler(Update, gate), group=-1)
+    app.add_error_handler(on_error)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("radar", radar_status))
