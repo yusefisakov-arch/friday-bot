@@ -30,8 +30,8 @@ from core import now_local
 
 ALL_STEPS = [
     "wait_title", "pick_due", "pick_due_date", "confirm",
-    "pick_freq", "pick_weekday", "pick_days", "pick_start_hour",
-    "pick_fix_due", "pick_fix_due_hour", "final",
+    "pick_freq", "pick_weekday", "pick_days", "pick_start",
+    "pick_fix_due", "pick_fixdue_time", "final",
 ]
 
 
@@ -56,13 +56,20 @@ def test_every_screen_is_buttons_only():
                 assert btn.url is None, f"{step}: внешняя ссылка на кнопке"
 
 
-def test_no_keyboard_time_entry():
-    """Часы для постоянных выбираются из сетки — только :00 и 23:59."""
-    kb = CM._hour_keyboard("start").inline_keyboard
-    codes = [b.callback_data.split(":")[2] for row in kb for b in row
-             if b.callback_data.startswith("new:start:")]
-    for c in codes:
-        assert c.endswith("00") or c == "2359", f"странный час: {c}"
+def test_recurring_time_is_stepper():
+    """Время постоянных выбирается стрелками (±час/±15м), а не сеткой/вводом."""
+    for step, prefix in (("pick_start", "s"), ("pick_fixdue_time", "f")):
+        kb = CM._screen(_draft(step))[1].inline_keyboard
+        codes = {b.callback_data for row in kb for b in row}
+        for need in (f"new:{prefix}h:-1", f"new:{prefix}h:1",
+                     f"new:{prefix}m:-15", f"new:{prefix}m:15", f"new:{prefix}ok"):
+            assert need in codes, f"{step}: нет {need}"
+
+
+def test_adj_time_wraps_midnight():
+    assert CM._adj_time(23, 45, dm=15) == (0, 0)
+    assert CM._adj_time(0, 0, dh=-1) == (23, 0)
+    assert CM._adj_time(9, 0, dh=2) == (11, 0)
 
 
 def test_stepper_has_day_hour_minute_arrows():
@@ -138,12 +145,6 @@ def test_short_title():
     long = "а" * 80
     s = crewbot._short(long)
     assert len(s) <= 51 and s.endswith("…")
-
-
-def test_hhmm_parsing():
-    assert CM._hhmm("0800") == (8, 0)
-    assert CM._hhmm("2359") == (23, 59)
-    assert CM._hhmm("1400") == (14, 0)
 
 
 def test_weekdays_label():

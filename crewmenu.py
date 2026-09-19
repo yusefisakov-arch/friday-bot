@@ -20,8 +20,6 @@ from crewbot import send_task_card
 
 logger = logging.getLogger(__name__)
 
-# Единая сетка часов для всех экранов выбора времени — чтобы не расходились.
-HOUR_GRID = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22]  # + «Конец дня» = 23:59
 WD_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 # Куда ведёт «Назад» с каждого шага.
@@ -30,9 +28,9 @@ BACK = {
     "pick_freq": "confirm",
     "pick_weekday": "pick_freq",
     "pick_days": "pick_freq",
-    "pick_start_hour": "pick_freq",
-    "pick_fix_due": "pick_start_hour",
-    "pick_fix_due_hour": "pick_fix_due",
+    "pick_start": "pick_freq",
+    "pick_fix_due": "pick_start",
+    "pick_fixdue_time": "pick_fix_due",
     "final": "pick_fix_due",
 }
 
@@ -43,23 +41,28 @@ def _default_due():
     return now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
 
+def _adj_time(h, m, dh=0, dm=0):
+    """Сдвиг времени суток стрелками, с переходом через полночь."""
+    total = ((h or 0) * 60 + (m or 0) + dh * 60 + dm) % (24 * 60)
+    return total // 60, total % 60
+
+
 # --- вспомогательное ------------------------------------------------------------
 
 def _rows(buttons, per_row):
     return [buttons[i:i + per_row] for i in range(0, len(buttons), per_row)]
 
 
-def _hhmm(s):
-    return int(s[:2]), int(s[2:])
-
-
-def _hour_keyboard(prefix):
-    """Сетка часов по три в ряд + «Конец дня» + «Назад». Меняется только префикс."""
-    btns = [B(f"{h:02d}:00", callback_data=f"new:{prefix}:{h:02d}00") for h in HOUR_GRID]
-    rows = _rows(btns, 3)
-    rows.append([B("Конец дня", callback_data=f"new:{prefix}:2359")])
-    rows.append([B("‹ Назад", callback_data="new:back")])
-    return M(rows)
+def _time_stepper(prefix):
+    """Стрелки для времени суток: ±час, ±15 мин, Готово, Назад.
+    prefix «s» — время постановки, «f» — срок постоянного задания."""
+    return M([
+        [B("− час", callback_data=f"new:{prefix}h:-1"),
+         B("+ час", callback_data=f"new:{prefix}h:1")],
+        [B("−15 мин", callback_data=f"new:{prefix}m:-15"),
+         B("+15 мин", callback_data=f"new:{prefix}m:15")],
+        [B("Готово", callback_data=f"new:{prefix}ok"),
+         B("‹ Назад", callback_data="new:back")]])
 
 
 def _weekdays_label(wd):
@@ -164,9 +167,10 @@ def _screen(draft):
                    B("‹ Назад", callback_data="new:back")])
         return f"*{name}*\n{title}\n\nПо каким дням?", M(kb)
 
-    if step == "pick_start_hour":
-        return (f"*{name}* · {title}\nВо сколько ставить задачу?",
-                _hour_keyboard("start"))
+    if step == "pick_start":
+        h, m = draft.get("hour") or 0, draft.get("minute") or 0
+        return (f"*{name}* · {title}\nВо сколько ставить: *{h:02d}:{m:02d}*",
+                _time_stepper("s"))
 
     if step == "pick_fix_due":
         return (f"*{name}* · {title}\nДо скольки сделать?", M([
@@ -174,11 +178,13 @@ def _screen(draft):
              B("+2 часа", callback_data="new:fixdue:120"),
              B("+4 часа", callback_data="new:fixdue:240")],
             [B("Конец дня", callback_data="new:fixdue:eod"),
-             B("Выбрать час", callback_data="new:fixdue:hour")],
+             B("Выбрать точно", callback_data="new:fixdue:hour")],
             [B("‹ Назад", callback_data="new:back")]]))
 
-    if step == "pick_fix_due_hour":
-        return f"*{name}* · {title}\nДо скольки сделать?", _hour_keyboard("fixhour")
+    if step == "pick_fixdue_time":
+        h, m = draft.get("due_hour") or 0, draft.get("due_minute") or 0
+        return (f"*{name}* · {title}\nСделать до: *{h:02d}:{m:02d}*",
+                _time_stepper("f"))
 
     if step == "final":
         wd = draft.get("weekdays") or ""
@@ -356,12 +362,13 @@ async def menu_button(update, context):
         return
 
     if action == "freq":
-        mapping = {"daily": ("1234567", "pick_start_hour"),
-                   "work": ("12345", "pick_start_hour"),
-                   "weekly": ("", "pick_weekday"),
-                   "pick": ("", "pick_days")}
-        wd, step = mapping.get(arg, ("", "pick_freq"))
-        C.draft_set(user_id, weekdays=wd, step=step)
+        if arg in ("daily", "work"):
+            wd = "1234567" if arg == "daily" else "12345"
+            C.draft_set(user_id, weekdays=wd, hour=9, minute=0, step="pick_start")
+        elif arg == "weekly":
+            C.draft_set(user_id, weekdays="", step="pick_weekday")
+        elif arg == "pick":
+            C.draft_set(user_id, weekdays="", step="pick_days")
         await _rerender(query, C.draft_get(user_id))
         return
 
@@ -370,7 +377,7 @@ async def menu_button(update, context):
             await query.answer()
             return
         if draft["step"] == "pick_weekday":
-            C.draft_set(user_id, weekdays=arg, step="pick_start_hour")
+            C.draft_set(user_id, weekdays=arg, hour=9, minute=0, step="pick_start")
         elif draft["step"] == "pick_days":
             chosen = set(draft.get("weekdays") or "")
             chosen.discard(arg) if arg in chosen else chosen.add(arg)
@@ -382,32 +389,55 @@ async def menu_button(update, context):
         if not (draft.get("weekdays") or ""):
             await query.answer("Выберите хотя бы один день")
             return
-        C.draft_set(user_id, step="pick_start_hour")
+        fields = {"step": "pick_start"}
+        if draft.get("hour") is None:
+            fields["hour"], fields["minute"] = 9, 0
+        C.draft_set(user_id, **fields)
         await _rerender(query, C.draft_get(user_id))
         return
 
-    if action == "start":
-        hh, mm = _hhmm(arg)
-        C.draft_set(user_id, hour=hh, minute=mm, step="pick_fix_due")
+    # стрелки времени: постановка (s) и срок (f)
+    if action in ("sh", "sm", "fh", "fm"):
+        try:
+            delta = int(arg)
+        except ValueError:
+            await query.answer()
+            return
+        if action in ("sh", "sm"):
+            h, m = _adj_time(draft.get("hour"), draft.get("minute"),
+                             dh=delta if action == "sh" else 0,
+                             dm=delta if action == "sm" else 0)
+            C.draft_set(user_id, hour=h, minute=m, step="pick_start")
+        else:
+            h, m = _adj_time(draft.get("due_hour"), draft.get("due_minute"),
+                             dh=delta if action == "fh" else 0,
+                             dm=delta if action == "fm" else 0)
+            C.draft_set(user_id, due_hour=h, due_minute=m, step="pick_fixdue_time")
+        await _rerender(query, C.draft_get(user_id))
+        return
+
+    if action == "sok":
+        C.draft_set(user_id, step="pick_fix_due")
         await _rerender(query, C.draft_get(user_id))
         return
 
     if action == "fixdue":
         if arg in ("60", "120", "240"):
-            base = (draft.get("hour") or 0) * 60 + (draft.get("minute") or 0)
-            total = base + int(arg)
-            C.draft_set(user_id, due_hour=(total // 60) % 24, due_minute=total % 60,
-                        step="final")
+            h, m = _adj_time(draft.get("hour"), draft.get("minute"), dh=int(arg) // 60)
+            C.draft_set(user_id, due_hour=h, due_minute=m, step="final")
         elif arg == "eod":
             C.draft_set(user_id, due_hour=23, due_minute=59, step="final")
         elif arg == "hour":
-            C.draft_set(user_id, step="pick_fix_due_hour")
+            fields = {"step": "pick_fixdue_time"}
+            if draft.get("due_hour") is None:
+                h, m = _adj_time(draft.get("hour"), draft.get("minute"), dh=1)
+                fields["due_hour"], fields["due_minute"] = h, m
+            C.draft_set(user_id, **fields)
         await _rerender(query, C.draft_get(user_id))
         return
 
-    if action == "fixhour":
-        hh, mm = _hhmm(arg)
-        C.draft_set(user_id, due_hour=hh, due_minute=mm, step="final")
+    if action == "fok":
+        C.draft_set(user_id, step="final")
         await _rerender(query, C.draft_get(user_id))
         return
 
