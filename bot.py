@@ -31,7 +31,7 @@ from crewbot import (
     fix_cmd, fix_list_cmd, fix_del_cmd, today_cmd, debts_cmd, done_cmd,
     cancel_cmd, crew_button, catch_problem_note, clear_cmd, board_cmd,
 )
-from crewmenu import menu_cmd, menu_button, catch_draft_input
+from crewmenu import menu_cmd, menu_button, catch_draft_input, handle_panel
 from crew import crew_init_db
 
 logger = logging.getLogger(__name__)
@@ -140,6 +140,8 @@ async def free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Один обработчик на все свободные сообщения. Порядок важен: сначала
     смотрим, не вводит ли пользователь название задачи (диалог /menu), и лишь
     затем — пояснение к «Проблеме». Иначе два обработчика дрались бы за текст."""
+    if await handle_panel(update, context):
+        return
     if await catch_draft_input(update, context):
         return
     await catch_problem_note(update, context)

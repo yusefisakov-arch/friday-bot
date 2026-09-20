@@ -11,12 +11,21 @@
 import logging
 from datetime import datetime, timedelta, date
 
-from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup as M
+from telegram import (InlineKeyboardButton as B, InlineKeyboardMarkup as M,
+                      KeyboardButton, ReplyKeyboardMarkup)
 from telegram.constants import ParseMode
 
 from core import is_allowed, now_local, LOCAL_TZ
 import crew as C
-from crewbot import send_task_card, refresh_card
+from crewbot import send_task_card, refresh_card, render_board, _board_kb, \
+    render_tasks, render_weekly
+
+# Метки нижней клавиатуры-панели (кнопки шлют эти тексты).
+PANEL_BOARD = "📋 Доска"
+PANEL_EDIT = "✏️ Изменить задачу"
+PANEL_DAY = "📅 План на день"
+PANEL_WEEK = "📆 Неделя"
+PANEL_LABELS = {PANEL_BOARD, PANEL_EDIT, PANEL_DAY, PANEL_WEEK}
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +49,22 @@ def _default_due():
 
 def _rows(buttons, per_row):
     return [buttons[i:i + per_row] for i in range(0, len(buttons), per_row)]
+
+
+def _panel_kb():
+    """Постоянная нижняя клавиатура Штаба: доска, люди, изменить, отчёты."""
+    people = C.people_all()
+    rows = [[KeyboardButton(PANEL_BOARD), KeyboardButton(PANEL_EDIT)]]
+    rows += _rows([KeyboardButton(p["name"]) for p in people], 2)
+    rows.append([KeyboardButton(PANEL_DAY), KeyboardButton(PANEL_WEEK)])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
+
+
+def _edit_groups_kb():
+    people = C.people_all()
+    kb = _rows([B(p["name"], callback_data=f"new:egrp:{p['id']}") for p in people], 2)
+    kb.append([B("Закрыть", callback_data="new:eclose")])
+    return M(kb)
 
 
 def _hour_grid(prefix, back):
@@ -244,19 +269,51 @@ async def menu_cmd(update, context):
             "Пока некому ставить задачи. Заведите человека: создайте с ним "
             "группу, добавьте меня и напишите там /crew Имя.")
         return
-    btns = [B(p["name"], callback_data=f"new:who:{p['id']}") for p in people]
-    kb = _rows(btns, 2)
-    kb.append([B("📋 Доска задач", callback_data="crew:board:0")])
-    kb.append([B("✏️ Изменить задачу", callback_data="new:edit")])
-    msg = await update.message.reply_text(
-        "*Панель*\nКому ставим задачу?", parse_mode=ParseMode.MARKDOWN,
-        reply_markup=M(kb))
-    try:
-        await context.bot.pin_chat_message(chat_id=msg.chat_id,
-                                           message_id=msg.message_id,
-                                           disable_notification=True)
-    except Exception as e:
-        logger.debug("Меню не закрепилось: %s", e)
+    await update.message.reply_text(
+        "*Панель готова.*\nНажмите имя внизу — поставить задачу. "
+        "Или: 📋 Доска · ✏️ Изменить · 📅 План · 📆 Неделя.",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=_panel_kb())
+
+
+async def handle_panel(update, context):
+    """Кнопки нижней панели шлют текст-метку — обрабатываем как действия.
+    Возвращает True, если сообщение обработано."""
+    msg = update.message
+    if not msg or not msg.text:
+        return False
+    uid = msg.from_user.id
+    if not is_allowed(uid):
+        return False
+    text = msg.text.strip()
+
+    if text == PANEL_BOARD:
+        await msg.reply_text(render_board(), parse_mode=ParseMode.MARKDOWN,
+                             reply_markup=_board_kb())
+        return True
+    if text == PANEL_DAY:
+        await msg.reply_text(render_tasks(C.tasks_for_day(), "🌅 План на день"),
+                             parse_mode=ParseMode.MARKDOWN)
+        return True
+    if text == PANEL_WEEK:
+        await msg.reply_text(render_weekly(), parse_mode=ParseMode.MARKDOWN)
+        return True
+    if text == PANEL_EDIT:
+        await msg.reply_text("✏️ *Изменить задачу*\nВыберите группу:",
+                             parse_mode=ParseMode.MARKDOWN,
+                             reply_markup=_edit_groups_kb())
+        return True
+
+    # Имя человека с панели — начать постановку задачи (если не идёт ввод текста).
+    draft = C.draft_get(uid)
+    if draft and draft.get("step") == "wait_title":
+        return False
+    person = C.person_by_name(text)
+    if person and person["name"].lower() == text.lower():
+        C.draft_reset(uid, msg.chat_id, "wait_title")
+        C.draft_set(uid, person_id=person["id"])
+        await _open_dialog(context, msg.chat_id, uid)
+        return True
+    return False
 
 
 async def _open_dialog(context, chat_id, user_id):
@@ -316,29 +373,20 @@ async def menu_button(update, context):
 
     # ---- «Изменить задачу»: группа → список → выбор → правка ----
     if action == "edit":
-        people = C.people_all()
-        if not people:
+        if not C.people_all():
             await query.answer("Некого выбрать")
             return
-        btns = [B(p["name"], callback_data=f"new:egrp:{p['id']}") for p in people]
-        kb = _rows(btns, 2)
-        kb.append([B("Закрыть", callback_data="new:eclose")])
-        # нажали на панели — открываем отдельным сообщением, панель не трогаем
         await context.bot.send_message(
             chat_id=query.message.chat_id, text="✏️ *Изменить задачу*\nВыберите группу:",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=M(kb))
+            parse_mode=ParseMode.MARKDOWN, reply_markup=_edit_groups_kb())
         await query.answer()
         return
 
     if action == "eback":
-        people = C.people_all()
-        btns = [B(p["name"], callback_data=f"new:egrp:{p['id']}") for p in people]
-        kb = _rows(btns, 2)
-        kb.append([B("Закрыть", callback_data="new:eclose")])
         try:
             await query.edit_message_text("✏️ *Изменить задачу*\nВыберите группу:",
                                           parse_mode=ParseMode.MARKDOWN,
-                                          reply_markup=M(kb))
+                                          reply_markup=_edit_groups_kb())
         except Exception:
             pass
         await query.answer()

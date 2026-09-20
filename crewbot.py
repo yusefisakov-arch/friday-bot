@@ -357,12 +357,9 @@ async def today_cmd(update, context):
     if not is_allowed(update.effective_user.id):
         return
     C.crew_init_db()
-    tasks = C.tasks_for_day()
-    if not tasks:
-        await update.message.reply_text("На сегодня задач нет.")
-        return
-    await update.message.reply_text(render_digest(tasks, "Сегодня"),
-                                    parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        render_tasks(C.tasks_for_day(), "📅 Сегодня"),
+        parse_mode=ParseMode.MARKDOWN)
 
 
 async def debts_cmd(update, context):
@@ -370,64 +367,86 @@ async def debts_cmd(update, context):
     if not is_allowed(update.effective_user.id):
         return
     C.crew_init_db()
-    tasks = C.tasks_overdue()
-    if not tasks:
-        await update.message.reply_text("Просроченного нет. Редкий день.")
-        return
-    await update.message.reply_text(render_digest(tasks, "Просрочено", overdue=True),
-                                    parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        render_tasks(C.tasks_overdue(), "⏰ Просрочено"),
+        parse_mode=ParseMode.MARKDOWN)
 
 
-def render_digest(tasks, title, overdue=False):
-    """Сводка по людям: у кого что и в каком состоянии."""
-    by_person = {}
+STATE_WORD = {
+    C.STATUS_NEW: "🆕 ждёт",
+    C.STATUS_TAKEN: "🔧 в работе",
+    C.STATUS_PROBLEM: "⚠️ проблема",
+    C.STATUS_DONE: "✅ сделано",
+    C.STATUS_FAILED: "❌ провалено",
+    C.STATUS_CANCELLED: "🚫 снята",
+}
+
+
+def _task_line(t, now):
+    """Одна строка задачи: статус — суть — когда. Формат одинаков везде."""
+    if not t.get("message_id") and t.get("send_at"):
+        return f"⏳ отложена · {_short(t['title'], 45)} — уйдёт {C.fmt_due(t['send_at'])}"
+    when = C.fmt_due(t["due_at"])
+    if t["due_at"] and t["status"] in C.OPEN_STATUSES \
+            and t["due_at"].astimezone(now.tzinfo) < now:
+        when = f"просрочка {C.fmt_overdue(t['due_at'])}"
+    return f"{STATE_WORD.get(t['status'], '•')} · {_short(t['title'], 45)} — {when}"
+
+
+def render_tasks(tasks, title):
+    """Единый формат сводки: по людям, статус явно, каждая задача один раз."""
+    seen, uniq = set(), []
     for t in tasks:
+        if t["id"] in seen:
+            continue
+        seen.add(t["id"])
+        uniq.append(t)
+    if not uniq:
+        return f"*{title}*\n\nЗадач нет."
+    now = now_local()
+    by_person = {}
+    for t in uniq:
         by_person.setdefault(t["person_id"], []).append(t)
-
-    lines = [f"*{title}*", ""]
+    lines = [f"*{title}*"]
     for pid, items in by_person.items():
-        person = C.person_by_id(pid)
-        lines.append(f"*{person['name'] if person else '?'}*")
+        p = C.person_by_id(pid)
+        lines.append(f"\n👤 *{p['name'] if p else '?'}*")
         for t in items:
-            icon = C.STATUS_ICON.get(t["status"], "•")
-            tail = C.fmt_due(t["due_at"])
-            if t["due_at"] and t["status"] in C.OPEN_STATUSES and \
-                    t["due_at"].astimezone(now_local().tzinfo) < now_local():
-                tail = f"просрочка {C.fmt_overdue(t['due_at'])}"
-            lines.append(f"  {icon} {t['title']} — {tail}  `#{t['id']}`")
-        lines.append("")
-    return "\n".join(lines).strip()
-
-
-STATE_WORD = {C.STATUS_NEW: "не взято", C.STATUS_TAKEN: "в работе",
-              C.STATUS_PROBLEM: "проблема"}
+            lines.append("  " + _task_line(t, now))
+    counts = {}
+    for t in uniq:
+        counts[t["status"]] = counts.get(t["status"], 0) + 1
+    summary = " · ".join(
+        f"{STATE_WORD.get(s, s).split()[0]} {counts[s]}"
+        for s in (C.STATUS_NEW, C.STATUS_TAKEN, C.STATUS_PROBLEM,
+                  C.STATUS_DONE, C.STATUS_FAILED) if counts.get(s))
+    if summary:
+        lines.append(f"\n_{summary}_")
+    return "\n".join(lines)
 
 
 def render_board():
-    """Живая доска: коротко и по группам. Статус — иконкой, без лишних слов."""
-    tasks = C.tasks_open()
-    if not tasks:
-        return "📋 *Доска задач*\n\nОткрытых задач нет."
-    now = now_local()
-    by_person = {}
-    for t in tasks:
-        by_person.setdefault(t["person_id"], []).append(t)
-    lines = ["📋 *Доска задач*"]
-    for pid, items in by_person.items():
-        p = C.person_by_id(pid)
-        lines.append(f"\n*{p['name'] if p else '?'}*")
-        for t in items:
-            if not t.get("message_id") and t.get("send_at"):
-                lines.append(f"⏳ {_short(t['title'], 45)} · отправка "
-                             f"{C.fmt_due(t['send_at'])}")
-                continue
-            icon = C.STATUS_ICON.get(t["status"], "•")
-            tail = C.fmt_due(t["due_at"])
-            if t["due_at"] and t["due_at"].astimezone(now.tzinfo) < now:
-                tail = f"⏰ {C.fmt_overdue(t['due_at'])}"
-            lines.append(f"{icon} {_short(t['title'], 45)} · {tail}")
-    lines.append("\n_🆕 не взято · ⚙️ в работе · ⚠️ проблема · ⏳ отложено_")
-    return "\n".join(lines)
+    return render_tasks(C.tasks_open(), "📋 Доска задач")
+
+
+def render_weekly():
+    """Итоги недели по людям (за 7 дней)."""
+    people = C.people_all()
+    if not people:
+        return "📆 *Итоги недели*\n\nНикто не заведён."
+    rows, t_ok, t_late, t_fail, t_open = [], 0, 0, 0, 0
+    for p in people:
+        st = C.person_stats(p["id"], days=7)
+        t_ok += st["on_time"]
+        t_late += st["late"]
+        t_fail += st["failed"]
+        t_open += st["open"]
+        rows.append(f"👤 *{p['name']}*\n"
+                    f"  ✅ вовремя {st['on_time']} · ⏰ с опозданием {st['late']} · "
+                    f"❌ провалено {st['failed']} · 🔧 открыто {st['open']}")
+    head = ["📆 *Итоги недели* (7 дней)", "",
+            f"Всего: ✅ {t_ok} · ⏰ {t_late} · ❌ {t_fail} · 🔧 {t_open}", ""]
+    return "\n".join(head + rows)
 
 
 def _board_kb():
@@ -1237,33 +1256,7 @@ async def evening_report(bot):
         return
     C.state_set("last_report", today)
 
-    tasks = C.tasks_for_day()
-    if not tasks:
-        await tell_boss(bot, "*Итоги дня*\n\nЗадач на сегодня не было.")
-        return
-
-    done = [t for t in tasks if t["status"] == C.STATUS_DONE]
-    failed = [t for t in tasks if t["status"] == C.STATUS_FAILED]
-    problem = [t for t in tasks if t["status"] == C.STATUS_PROBLEM]
-    open_ = [t for t in tasks if t["status"] in (C.STATUS_NEW, C.STATUS_TAKEN)]
-
-    lines = ["*Итоги дня*", "",
-             f"Сделано {len(done)} · в работе {len(open_)} · "
-             f"проблем {len(problem)} · провалено {len(failed)}"]
-
-    if failed or problem or open_:
-        lines.append("")
-        for group, label in ((failed, "Провалено"), (problem, "Проблемы"),
-                             (open_, "Осталось")):
-            if not group:
-                continue
-            lines.append(f"*{label}*")
-            for t in group:
-                p = C.person_by_id(t["person_id"])
-                lines.append(f"  • {p['name'] if p else '?'} — {t['title']}  `#{t['id']}`")
-            lines.append("")
-
-    await tell_boss(bot, "\n".join(lines).strip())
+    await tell_boss(bot, render_tasks(C.tasks_for_day(), "🌙 Итоги дня"))
 
 
 async def weekly_report(bot):
@@ -1276,26 +1269,8 @@ async def weekly_report(bot):
     if C.state_get("last_weekly") == tag:
         return
     C.state_set("last_weekly", tag)
-
-    people = C.people_all()
-    if not people:
-        return
-
-    rows, t_ok, t_late, t_fail, t_open = [], 0, 0, 0, 0
-    for p in people:
-        st = C.person_stats(p["id"], days=7)
-        t_ok += st["on_time"]
-        t_late += st["late"]
-        t_fail += st["failed"]
-        t_open += st["open"]
-        rows.append(f"*{p['name']}* — вовремя {st['on_time']}, с опозданием "
-                    f"{st['late']}, провалено {st['failed']}, открыто {st['open']}")
-
-    lines = ["*Итоги недели* (7 дней)", "",
-             f"Всего: вовремя {t_ok} · с опозданием {t_late} · "
-             f"провалено {t_fail} · открыто {t_open}", ""]
-    lines += rows
-    await tell_boss(bot, "\n".join(lines))
+    if C.people_all():
+        await tell_boss(bot, render_weekly())
 
 
 async def morning_report(bot):
@@ -1308,11 +1283,7 @@ async def morning_report(bot):
         return
     C.state_set("last_morning", today)
 
-    tasks = C.tasks_for_day()
-    if not tasks:
-        await tell_boss(bot, "*План на день*\n\nЗадач на сегодня нет.")
-        return
-    await tell_boss(bot, render_digest(tasks, "План на день"))
+    await tell_boss(bot, render_tasks(C.tasks_for_day(), "🌅 План на день"))
 
 
 async def _migrate_cards_once(bot):

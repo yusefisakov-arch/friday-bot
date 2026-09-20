@@ -99,6 +99,18 @@ def test_no_time_means_buttons():
     assert title == "просто убрать склад"
 
 
+def test_task_line_status_and_scheduled():
+    now = now_local()
+    l1 = crewbot._task_line(
+        {"message_id": 1, "send_at": None, "due_at": None,
+         "status": "new", "title": "убрать склад"}, now)
+    assert l1.startswith("🆕") and "убрать" in l1
+    l2 = crewbot._task_line(
+        {"message_id": None, "send_at": now, "due_at": None,
+         "status": "new", "title": "позже"}, now)
+    assert "отложена" in l2
+
+
 def test_report_deadline_future_due():
     """Есть срок задачи в будущем — отчёт ждём к нему."""
     due = now_local() + timedelta(hours=3)
