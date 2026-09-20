@@ -1019,6 +1019,8 @@ async def _finish_done(bot, msg, flow):
     late = task["due_at"] and now_local() > task["due_at"]
     C.task_update(tid, status=C.STATUS_DONE, done_at=now_local(),
                   report_text=f"Сделано: {flow['what']}"[:800], report_done=True)
+    # снять открытые дубли этой же задачи, чтобы не висели как «ждёт»
+    C.cancel_open_siblings(task["person_id"], task["title"], tid)
     await refresh_card(bot, tid)
 
     who = person["name"] if person else "?"
@@ -1197,6 +1199,8 @@ async def spawn_fixed(bot):
             # следующие сутки: «ставить в 23:00, сделать до 02:00»
             due += timedelta(days=1)
 
+        # прошлый незакрытый экземпляр этого задания снимаем — не копим дубли
+        C.cancel_open_for_fix(fx["id"])
         tid = C.task_create(person["id"], fx["title"], due, fix_id=fx["id"])
         C.fix_mark_spawned(fx["id"], today)
         try:
@@ -1340,13 +1344,24 @@ async def _migrate_cards_once(bot):
     logger.info("Старые карточки обновлены под новый набор кнопок")
 
 
+async def _dedup_once():
+    """Одноразово схлопывает накопленные дубли заданий/задач."""
+    C.crew_init_db()
+    if C.state_get("dedup_v1"):
+        return
+    C.cleanup_duplicates()
+    C.state_set("dedup_v1", "1")
+    logger.info("Дубли постоянных заданий и задач схлопнуты")
+
+
 async def crew_loop(bot):
     """Фоновый цикл контроля."""
     await asyncio.sleep(45)
     try:
         await _migrate_cards_once(bot)
+        await _dedup_once()
     except Exception:
-        logger.exception("Не удалось обновить старые карточки")
+        logger.exception("Разовая уборка при старте не удалась")
     while True:
         try:
             C.crew_init_db()

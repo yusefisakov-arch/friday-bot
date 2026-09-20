@@ -388,15 +388,87 @@ def fix_create(person_id, title, hour, minute, weekdays, due_hour=None,
     last_spawn = now.date() if (now.hour, now.minute) >= (hour, minute) else None
     with db_conn() as conn:
         cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO crew_fix (person_id, title, hour, minute, weekdays, "
-            "due_hour, due_minute, monthday, last_spawn) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-            (person_id, title, hour, minute, weekdays, due_hour, due_minute,
-             monthday, last_spawn))
-        fid = cur.fetchone()[0]
+        # Дедуп: если у этого человека уже есть активное задание с тем же
+        # названием — обновляем его, а не плодим дубль.
+        cur.execute("SELECT id FROM crew_fix WHERE active AND person_id=%s "
+                    "AND lower(title)=lower(%s) ORDER BY id LIMIT 1",
+                    (person_id, title))
+        row = cur.fetchone()
+        if row:
+            fid = row[0]
+            cur.execute("UPDATE crew_fix SET title=%s, hour=%s, minute=%s, "
+                        "weekdays=%s, due_hour=%s, due_minute=%s, monthday=%s "
+                        "WHERE id=%s",
+                        (title, hour, minute, weekdays, due_hour, due_minute,
+                         monthday, fid))
+        else:
+            cur.execute(
+                "INSERT INTO crew_fix (person_id, title, hour, minute, weekdays, "
+                "due_hour, due_minute, monthday, last_spawn) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                (person_id, title, hour, minute, weekdays, due_hour, due_minute,
+                 monthday, last_spawn))
+            fid = cur.fetchone()[0]
         cur.close()
     return fid
+
+
+def cancel_open_for_fix(fix_id, keep_id=None):
+    """Снимает открытые экземпляры постоянного задания (кроме keep_id)."""
+    sql = ("UPDATE crew_tasks SET status='cancelled' WHERE fix_id=%s "
+           "AND status = ANY(%s)")
+    args = [fix_id, list(OPEN_STATUSES)]
+    if keep_id:
+        sql += " AND id<>%s"
+        args.append(keep_id)
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, args)
+        cur.close()
+
+
+def cancel_open_siblings(person_id, title, keep_id):
+    """Снимает открытые дубли той же задачи (тот же человек и название)."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE crew_tasks SET status='cancelled' "
+                    "WHERE person_id=%s AND lower(title)=lower(%s) "
+                    "AND status = ANY(%s) AND id<>%s",
+                    (person_id, title, list(OPEN_STATUSES), keep_id))
+        cur.close()
+
+
+def cleanup_duplicates():
+    """Одноразовая уборка накопленных дублей: лишние активные задания в архив,
+    лишние открытые задачи снять, открытые дубли уже сделанного — снять."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        # дубли активных заданий: оставить самое раннее
+        cur.execute("""
+            UPDATE crew_fix SET active=FALSE WHERE id IN (
+              SELECT id FROM (
+                SELECT id, row_number() OVER (
+                    PARTITION BY person_id, lower(title) ORDER BY id) rn
+                FROM crew_fix WHERE active) s WHERE rn > 1)""")
+        # дубли открытых задач: оставить самую «продвинутую»/свежую
+        cur.execute("""
+            UPDATE crew_tasks SET status='cancelled' WHERE id IN (
+              SELECT id FROM (
+                SELECT id, row_number() OVER (
+                    PARTITION BY person_id, lower(title)
+                    ORDER BY (status='taken') DESC, (status='problem') DESC,
+                             id DESC) rn
+                FROM crew_tasks
+                WHERE status IN ('new','taken','problem')) s WHERE rn > 1)""")
+        # открытые, у которых уже есть выполненный сегодня близнец — снять
+        cur.execute("""
+            UPDATE crew_tasks o SET status='cancelled'
+            WHERE o.status IN ('new','taken','problem')
+              AND EXISTS (SELECT 1 FROM crew_tasks d
+                          WHERE d.status='done' AND d.person_id=o.person_id
+                            AND lower(d.title)=lower(o.title)
+                            AND d.done_at > now() - interval '1 day')""")
+        cur.close()
 
 
 def fix_get(fid):
