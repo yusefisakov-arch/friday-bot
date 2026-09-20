@@ -8,9 +8,27 @@ import calendar
 import logging
 from datetime import timedelta
 
-from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (ForceReply, InlineKeyboardButton, InlineKeyboardMarkup,
+                      InputMediaPhoto)
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
+
+# Слова, которыми исполнитель завершает или пропускает шаг с фото.
+PHOTO_STOP = {"нет", "no", "-", "пропустить", "skip", "не надо", "готово",
+              "всё", "все", "хватит", "дальше", "да", "ок", "ok"}
+
+
+async def _send_photos(bot, chat_id, file_ids, caption=None):
+    """Шлёт фото: одно — обычным сообщением, несколько — альбомом (до 10)."""
+    ids = list(file_ids or [])[:10]
+    if not ids:
+        return
+    if len(ids) == 1:
+        await bot.send_photo(chat_id=chat_id, photo=ids[0], caption=caption)
+        return
+    media = [InputMediaPhoto(media=f, caption=caption if i == 0 else None)
+             for i, f in enumerate(ids)]
+    await bot.send_media_group(chat_id=chat_id, media=media)
 
 from core import db_conn, is_allowed, now_local, send_md, LOCAL_TZ, ALLOWED_USER_ID
 import crew as C
@@ -557,7 +575,7 @@ async def crew_button(update, context):
     elif action == "done":
         # «Готово» ведёт короткий отчёт: что сделал → фото → закрыть и в Штаб.
         DONE_FLOW[(query.message.chat_id, user.id)] = {
-            "tid": tid, "step": "what", "what": "", "photo": None}
+            "tid": tid, "step": "what", "what": "", "photos": []}
         await query.answer("Короткий отчёт")
         await context.bot.send_message(
             chat_id=query.message.chat_id,
@@ -569,7 +587,7 @@ async def crew_button(update, context):
     elif action == "problem":
         C.task_update(tid, status=C.STATUS_PROBLEM)
         PROBLEM_FLOW[(query.message.chat_id, user.id)] = {
-            "tid": tid, "step": "desc", "desc": "", "photo": None, "solution": ""}
+            "tid": tid, "step": "desc", "desc": "", "photos": [], "solution": ""}
         await query.answer("Опишите проблему")
         await context.bot.send_message(
             chat_id=query.message.chat_id,
@@ -626,17 +644,19 @@ async def catch_problem_note(update, context):
         flow["desc"] = text[:1000]
         flow["step"] = "photo"
         await msg.reply_text(
-            "Принял. Нужно фото — пришлите его. Если фото не нужно, напишите «нет».",
+            "Принял. Нужны фото — пришлите (можно несколько). Если не нужно — «нет».",
             reply_markup=ForceReply(selective=True))
         return
 
     if step == "photo":
         if msg.photo:
-            flow["photo"] = msg.photo[-1].file_id
-        elif text.lower() in ("нет", "no", "-", "пропустить", "skip", "не надо"):
-            flow["photo"] = None
-        else:
-            await msg.reply_text("Пришлите фото или напишите «нет».")
+            flow.setdefault("photos", []).append(msg.photo[-1].file_id)
+            await msg.reply_text(
+                f"Принял фото ({len(flow['photos'])}). Ещё? Пришлите или "
+                "напишите «готово».", reply_markup=ForceReply(selective=True))
+            return
+        if text.lower() not in PHOTO_STOP:
+            await msg.reply_text("Пришлите фото или напишите «готово» / «нет».")
             return
         flow["step"] = "solution"
         await msg.reply_text(
@@ -678,12 +698,11 @@ async def _finish_problem(bot, msg, flow):
     if not chat:
         logger.warning("Отчёт по проблеме #%s некому отправить (нет Штаба)", tid)
         return
-    if flow.get("photo"):
-        try:
-            await bot.send_photo(chat_id=chat, photo=flow["photo"],
-                                 caption=f"Фото к проблеме по задаче #{tid}")
-        except Exception as e:
-            logger.error("Фото к проблеме #%s не ушло: %s", tid, e)
+    try:
+        await _send_photos(bot, chat, flow.get("photos"),
+                           caption=f"Фото к проблеме по задаче #{tid}")
+    except Exception as e:
+        logger.error("Фото к проблеме #%s не ушло: %s", tid, e)
     # Отчёт с решением идёт последним, на нём — кнопки одобрения.
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Одобрить", callback_data=f"crew:approve:{tid}"),
@@ -771,7 +790,7 @@ async def _handle_report_actions(update, context, action, task):
     if action == "report":
         # «Отчёт» жмёт исполнитель в своей группе
         REPORT_FLOW[(query.message.chat_id, query.from_user.id)] = {
-            "tid": tid, "step": "done", "done": "", "photo": None, "left": ""}
+            "tid": tid, "step": "done", "done": "", "photos": [], "left": ""}
         await query.answer("Отчёт")
         await context.bot.send_message(
             chat_id=query.message.chat_id,
@@ -816,17 +835,19 @@ async def _handle_report_step(bot, msg, key, text):
         flow["done"] = text[:1000]
         flow["step"] = "photo"
         await msg.reply_text(
-            "Есть фото результата? Пришлите фото или напишите «нет».",
+            "Есть фото результата? Пришлите (можно несколько) или «нет».",
             reply_markup=ForceReply(selective=True))
         return
 
     if step == "photo":
         if msg.photo:
-            flow["photo"] = msg.photo[-1].file_id
-        elif text.lower() in ("нет", "no", "-", "пропустить", "skip", "не надо"):
-            flow["photo"] = None
-        else:
-            await msg.reply_text("Пришлите фото или напишите «нет».")
+            flow.setdefault("photos", []).append(msg.photo[-1].file_id)
+            await msg.reply_text(
+                f"Принял фото ({len(flow['photos'])}). Ещё? Пришлите или "
+                "напишите «готово».", reply_markup=ForceReply(selective=True))
+            return
+        if text.lower() not in PHOTO_STOP:
+            await msg.reply_text("Пришлите фото или напишите «готово» / «нет».")
             return
         flow["step"] = "left"
         await msg.reply_text(
@@ -867,12 +888,11 @@ async def _finish_report(bot, msg, flow):
     chat = hq_chat_id()
     if not chat:
         return
-    if flow.get("photo"):
-        try:
-            await bot.send_photo(chat_id=chat, photo=flow["photo"],
-                                 caption=f"Фото к отчёту по задаче #{tid}")
-        except Exception as e:
-            logger.error("Фото отчёта #%s не ушло: %s", tid, e)
+    try:
+        await _send_photos(bot, chat, flow.get("photos"),
+                           caption=f"Фото к отчёту по задаче #{tid}")
+    except Exception as e:
+        logger.error("Фото отчёта #%s не ушло: %s", tid, e)
     await send_md(bot, chat, report)
 
 
@@ -892,17 +912,19 @@ async def _handle_done_step(bot, msg, key, text):
         flow["what"] = text[:1000]
         flow["step"] = "photo"
         await msg.reply_text(
-            "Есть фото результата? Пришлите фото или напишите «нет».",
+            "Есть фото результата? Пришлите (можно несколько) или «нет».",
             reply_markup=ForceReply(selective=True))
         return
 
     if step == "photo":
         if msg.photo:
-            flow["photo"] = msg.photo[-1].file_id
-        elif text.lower() in ("нет", "no", "-", "пропустить", "skip", "не надо"):
-            flow["photo"] = None
-        else:
-            await msg.reply_text("Пришлите фото или напишите «нет».")
+            flow.setdefault("photos", []).append(msg.photo[-1].file_id)
+            await msg.reply_text(
+                f"Принял фото ({len(flow['photos'])}). Ещё? Пришлите или "
+                "напишите «готово».", reply_markup=ForceReply(selective=True))
+            return
+        if text.lower() not in PHOTO_STOP:
+            await msg.reply_text("Пришлите фото или напишите «готово» / «нет».")
             return
         DONE_FLOW.pop(key, None)
         await _finish_done(bot, msg, flow)
@@ -931,12 +953,11 @@ async def _finish_done(bot, msg, flow):
     chat = hq_chat_id()
     if not chat:
         return
-    if flow.get("photo"):
-        try:
-            await bot.send_photo(chat_id=chat, photo=flow["photo"],
-                                 caption=f"Фото к задаче #{tid}")
-        except Exception as e:
-            logger.error("Фото к закрытию #%s не ушло: %s", tid, e)
+    try:
+        await _send_photos(bot, chat, flow.get("photos"),
+                           caption=f"Фото к задаче #{tid}")
+    except Exception as e:
+        logger.error("Фото к закрытию #%s не ушло: %s", tid, e)
     await send_md(bot, chat, report)
 
 

@@ -140,6 +140,10 @@ def crew_init_db():
         cur.execute("ALTER TABLE crew_draft ADD COLUMN IF NOT EXISTS monthday INT")
         # Редактирование постоянного задания: id правимого задания в черновике.
         cur.execute("ALTER TABLE crew_draft ADD COLUMN IF NOT EXISTS edit_fid INT")
+        # Отложенная отправка разовой задачи: когда показать её в группе.
+        cur.execute("ALTER TABLE crew_tasks ADD COLUMN IF NOT EXISTS send_at TIMESTAMPTZ")
+        cur.execute("ALTER TABLE crew_draft ADD COLUMN IF NOT EXISTS send_at TIMESTAMPTZ")
+        cur.execute("ALTER TABLE crew_draft ADD COLUMN IF NOT EXISTS editing TEXT")
         cur.close()
 
 
@@ -244,19 +248,32 @@ TASK_KEYS = ("id", "person_id", "title", "due_at", "status", "note", "fix_id",
              "chat_id", "message_id", "created_at", "taken_at", "done_at",
              "nudged_take", "warned_due", "asked_due", "told_boss",
              "boss_note", "report_due", "report_text", "report_done",
-             "report_nagged", "ext_due")
+             "report_nagged", "ext_due", "send_at")
 TASK_COLS = ", ".join(TASK_KEYS)
 
 
-def task_create(person_id, title, due_at, fix_id=None):
+def task_create(person_id, title, due_at, fix_id=None, send_at=None):
     with db_conn() as conn:
         cur = conn.cursor()
-        cur.execute("INSERT INTO crew_tasks (person_id, title, due_at, fix_id) "
-                    "VALUES (%s,%s,%s,%s) RETURNING id",
-                    (person_id, title, due_at, fix_id))
+        cur.execute("INSERT INTO crew_tasks (person_id, title, due_at, fix_id, "
+                    "send_at) VALUES (%s,%s,%s,%s,%s) RETURNING id",
+                    (person_id, title, due_at, fix_id, send_at))
         tid = cur.fetchone()[0]
         cur.close()
     return tid
+
+
+def tasks_to_deliver():
+    """Отложенные разовые задачи, которым пора появиться в группе."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(f"SELECT {TASK_COLS} FROM crew_tasks "
+                    "WHERE send_at IS NOT NULL AND message_id IS NULL "
+                    "AND status = ANY(%s) AND send_at <= now() "
+                    "ORDER BY send_at", (list(OPEN_STATUSES),))
+        rows = cur.fetchall()
+        cur.close()
+    return [dict(zip(TASK_KEYS, r)) for r in rows]
 
 
 def task_get(task_id):
@@ -439,7 +456,8 @@ def fix_delete(fix_id):
 
 DRAFT_KEYS = ("user_id", "chat_id", "message_id", "person_id", "title", "due_at",
               "pick_date", "week_shift", "kind", "weekdays", "hour", "minute",
-              "due_hour", "due_minute", "step", "monthday", "edit_fid")
+              "due_hour", "due_minute", "step", "monthday", "edit_fid",
+              "send_at", "editing")
 DRAFT_COLS = ", ".join(DRAFT_KEYS)
 DRAFT_STALE_MIN = 30
 
@@ -474,8 +492,8 @@ def draft_reset(user_id, chat_id, step):
               chat_id=EXCLUDED.chat_id, message_id=NULL, person_id=NULL,
               title=NULL, due_at=NULL, pick_date=NULL, week_shift=0, kind=NULL,
               weekdays=NULL, hour=NULL, minute=NULL, due_hour=NULL,
-              due_minute=NULL, monthday=NULL, edit_fid=NULL,
-              step=EXCLUDED.step, updated_at=now()
+              due_minute=NULL, monthday=NULL, edit_fid=NULL, send_at=NULL,
+              editing=NULL, step=EXCLUDED.step, updated_at=now()
         """, (user_id, chat_id, step))
         cur.close()
 
