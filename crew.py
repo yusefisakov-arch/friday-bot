@@ -144,6 +144,7 @@ def crew_init_db():
         cur.execute("ALTER TABLE crew_tasks ADD COLUMN IF NOT EXISTS send_at TIMESTAMPTZ")
         cur.execute("ALTER TABLE crew_draft ADD COLUMN IF NOT EXISTS send_at TIMESTAMPTZ")
         cur.execute("ALTER TABLE crew_draft ADD COLUMN IF NOT EXISTS editing TEXT")
+        cur.execute("ALTER TABLE crew_draft ADD COLUMN IF NOT EXISTS edit_tid INT")
         cur.close()
 
 
@@ -457,7 +458,7 @@ def fix_delete(fix_id):
 DRAFT_KEYS = ("user_id", "chat_id", "message_id", "person_id", "title", "due_at",
               "pick_date", "week_shift", "kind", "weekdays", "hour", "minute",
               "due_hour", "due_minute", "step", "monthday", "edit_fid",
-              "send_at", "editing")
+              "send_at", "editing", "edit_tid")
 DRAFT_COLS = ", ".join(DRAFT_KEYS)
 DRAFT_STALE_MIN = 30
 
@@ -493,7 +494,7 @@ def draft_reset(user_id, chat_id, step):
               title=NULL, due_at=NULL, pick_date=NULL, week_shift=0, kind=NULL,
               weekdays=NULL, hour=NULL, minute=NULL, due_hour=NULL,
               due_minute=NULL, monthday=NULL, edit_fid=NULL, send_at=NULL,
-              editing=NULL, step=EXCLUDED.step, updated_at=now()
+              editing=NULL, edit_tid=NULL, step=EXCLUDED.step, updated_at=now()
         """, (user_id, chat_id, step))
         cur.close()
 

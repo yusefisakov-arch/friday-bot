@@ -16,7 +16,7 @@ from telegram.constants import ParseMode
 
 from core import is_allowed, now_local, LOCAL_TZ
 import crew as C
-from crewbot import send_task_card
+from crewbot import send_task_card, refresh_card
 
 logger = logging.getLogger(__name__)
 
@@ -247,8 +247,10 @@ async def menu_cmd(update, context):
     btns = [B(p["name"], callback_data=f"new:who:{p['id']}") for p in people]
     kb = _rows(btns, 2)
     kb.append([B("📋 Доска задач", callback_data="crew:board:0")])
+    kb.append([B("✏️ Изменить задачу", callback_data="new:edit")])
     msg = await update.message.reply_text(
-        "*Кому ставим задачу?*", parse_mode=ParseMode.MARKDOWN, reply_markup=M(kb))
+        "*Панель*\nКому ставим задачу?", parse_mode=ParseMode.MARKDOWN,
+        reply_markup=M(kb))
     try:
         await context.bot.pin_chat_message(chat_id=msg.chat_id,
                                            message_id=msg.message_id,
@@ -310,6 +312,128 @@ async def menu_button(update, context):
                     kind="fixedit", edit_fid=fx["id"], editing="start")
         await _open_dialog(context, query.message.chat_id, user_id)
         await query.answer("Меняем время")
+        return
+
+    # ---- «Изменить задачу»: группа → список → выбор → правка ----
+    if action == "edit":
+        people = C.people_all()
+        if not people:
+            await query.answer("Некого выбрать")
+            return
+        btns = [B(p["name"], callback_data=f"new:egrp:{p['id']}") for p in people]
+        kb = _rows(btns, 2)
+        kb.append([B("Закрыть", callback_data="new:eclose")])
+        # нажали на панели — открываем отдельным сообщением, панель не трогаем
+        await context.bot.send_message(
+            chat_id=query.message.chat_id, text="✏️ *Изменить задачу*\nВыберите группу:",
+            parse_mode=ParseMode.MARKDOWN, reply_markup=M(kb))
+        await query.answer()
+        return
+
+    if action == "eback":
+        people = C.people_all()
+        btns = [B(p["name"], callback_data=f"new:egrp:{p['id']}") for p in people]
+        kb = _rows(btns, 2)
+        kb.append([B("Закрыть", callback_data="new:eclose")])
+        try:
+            await query.edit_message_text("✏️ *Изменить задачу*\nВыберите группу:",
+                                          parse_mode=ParseMode.MARKDOWN,
+                                          reply_markup=M(kb))
+        except Exception:
+            pass
+        await query.answer()
+        return
+
+    if action == "eclose":
+        try:
+            await query.edit_message_text("Закрыто.")
+        except Exception:
+            pass
+        await query.answer()
+        return
+
+    if action == "egrp":
+        if not arg.isdigit():
+            await query.answer()
+            return
+        p = C.person_by_id(int(arg))
+        tasks = C.tasks_open(int(arg))
+        if not tasks:
+            try:
+                await query.edit_message_text(
+                    f"У *{p['name'] if p else '?'}* нет открытых задач.",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=M([[B("‹ Назад", callback_data="new:eback")]]))
+            except Exception:
+                pass
+            await query.answer()
+            return
+        rows = [[B(f"{C.STATUS_ICON.get(t['status'], '•')} {_short(t['title'], 40)}",
+                   callback_data=f"new:etask:{t['id']}")] for t in tasks]
+        rows.append([B("‹ Назад", callback_data="new:eback")])
+        try:
+            await query.edit_message_text(
+                f"✏️ *{p['name'] if p else '?'}* — выберите задачу:",
+                parse_mode=ParseMode.MARKDOWN, reply_markup=M(rows))
+        except Exception:
+            pass
+        await query.answer()
+        return
+
+    if action == "etask":
+        if not arg.isdigit():
+            await query.answer()
+            return
+        t = C.task_get(int(arg))
+        if not t:
+            await query.answer("Задача не найдена")
+            return
+        text = (f"✏️ {_short(t['title'], 80)}\n"
+                f"Срок: {C.fmt_due(t['due_at'])} · {t['status']}")
+        kb = M([
+            [B("🎯 Изменить срок", callback_data=f"new:edue:{t['id']}")],
+            [B("🚫 Снять задачу", callback_data=f"new:ecancel:{t['id']}")],
+            [B("‹ Назад", callback_data=f"new:egrp:{t['person_id']}")]])
+        try:
+            await query.edit_message_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await query.answer()
+        return
+
+    if action == "edue":
+        if not arg.isdigit():
+            await query.answer()
+            return
+        t = C.task_get(int(arg))
+        if not t:
+            await query.answer("Задача не найдена")
+            return
+        C.draft_reset(user_id, query.message.chat_id, "pd_date")
+        C.draft_set(user_id, person_id=t["person_id"], title=t["title"],
+                    due_at=t["due_at"] or _default_due(), editing="due",
+                    edit_tid=t["id"], message_id=query.message.message_id)
+        await _rerender(query, C.draft_get(user_id))
+        return
+
+    if action == "ecancel":
+        if not arg.isdigit():
+            await query.answer()
+            return
+        t = C.task_get(int(arg))
+        if not t:
+            await query.answer("Задача не найдена")
+            return
+        C.task_update(t["id"], status=C.STATUS_CANCELLED)
+        try:
+            await refresh_card(context.bot, t["id"])
+        except Exception:
+            pass
+        await query.answer("Снял")
+        try:
+            await query.edit_message_text(f"🚫 Снял задачу: {_short(t['title'], 50)}")
+        except Exception:
+            pass
         return
 
     draft = C.draft_get(user_id)
@@ -384,6 +508,21 @@ async def menu_button(update, context):
 
     if action == "pmin":
         cur = (draft.get(_field(draft)) or _default_due()).replace(minute=int(arg))
+        if draft.get("edit_tid"):
+            # правка срока существующей задачи — обновляем и обновляем карточку
+            C.task_update(draft["edit_tid"], due_at=cur,
+                          warned_due=False, asked_due=False)
+            try:
+                await refresh_card(context.bot, draft["edit_tid"])
+            except Exception:
+                pass
+            C.draft_clear(user_id)
+            await query.answer("Срок изменён")
+            try:
+                await query.edit_message_text(f"✅ Срок изменён: {C.fmt_due(cur)}")
+            except Exception:
+                pass
+            return
         C.draft_set(user_id, **{_field(draft): cur, "step": "confirm"})
         await _rerender(query, C.draft_get(user_id))
         return

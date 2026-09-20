@@ -387,38 +387,30 @@ STATE_WORD = {C.STATUS_NEW: "не взято", C.STATUS_TAKEN: "в работе"
 
 
 def render_board():
-    """Живая доска: все открытые задачи по группам со статусом каждой."""
+    """Живая доска: коротко и по группам. Статус — иконкой, без лишних слов."""
     tasks = C.tasks_open()
     if not tasks:
-        return "*Доска задач*\n\nОткрытых задач нет."
+        return "📋 *Доска задач*\n\nОткрытых задач нет."
     now = now_local()
-    new_n = sum(1 for t in tasks if t["status"] == C.STATUS_NEW)
-    taken_n = sum(1 for t in tasks if t["status"] == C.STATUS_TAKEN)
-    prob_n = sum(1 for t in tasks if t["status"] == C.STATUS_PROBLEM)
-    lines = ["*Доска задач*",
-             f"Всего {len(tasks)}: не взято {new_n} · в работе {taken_n} · "
-             f"проблем {prob_n}", ""]
     by_person = {}
     for t in tasks:
         by_person.setdefault(t["person_id"], []).append(t)
+    lines = ["📋 *Доска задач*"]
     for pid, items in by_person.items():
         p = C.person_by_id(pid)
-        lines.append(f"*{p['name'] if p else '?'}*")
+        lines.append(f"\n*{p['name'] if p else '?'}*")
         for t in items:
-            # ещё не доставленная отложенная задача
             if not t.get("message_id") and t.get("send_at"):
-                lines.append(f"  ⏳ {_short(t['title'], 40)} — "
-                             f"отправка {C.fmt_due(t['send_at'])}  `#{t['id']}`")
+                lines.append(f"⏳ {_short(t['title'], 45)} · отправка "
+                             f"{C.fmt_due(t['send_at'])}")
                 continue
             icon = C.STATUS_ICON.get(t["status"], "•")
             tail = C.fmt_due(t["due_at"])
             if t["due_at"] and t["due_at"].astimezone(now.tzinfo) < now:
-                tail = f"просрочка {C.fmt_overdue(t['due_at'])}"
-            state = STATE_WORD.get(t["status"], "")
-            lines.append(f"  {icon} {_short(t['title'], 40)} — {tail} · "
-                         f"{state}  `#{t['id']}`")
-        lines.append("")
-    return "\n".join(lines).strip()
+                tail = f"⏰ {C.fmt_overdue(t['due_at'])}"
+            lines.append(f"{icon} {_short(t['title'], 45)} · {tail}")
+    lines.append("\n_🆕 не взято · ⚙️ в работе · ⚠️ проблема · ⏳ отложено_")
+    return "\n".join(lines)
 
 
 def _board_kb():
