@@ -397,8 +397,8 @@ def render_tasks(tasks, title):
     """Единый формат сводки: по людям, статус явно, каждая задача один раз."""
     seen, uniq = set(), []
     for t in tasks:
-        if t["id"] in seen:
-            continue
+        if t["id"] in seen or t["status"] == C.STATUS_CANCELLED:
+            continue  # снятые в сводке не показываем
         seen.add(t["id"])
         uniq.append(t)
     if not uniq:
