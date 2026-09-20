@@ -405,6 +405,11 @@ def render_board():
         p = C.person_by_id(pid)
         lines.append(f"*{p['name'] if p else '?'}*")
         for t in items:
+            # ещё не доставленная отложенная задача
+            if not t.get("message_id") and t.get("send_at"):
+                lines.append(f"  ⏳ {_short(t['title'], 40)} — "
+                             f"отправка {C.fmt_due(t['send_at'])}  `#{t['id']}`")
+                continue
             icon = C.STATUS_ICON.get(t["status"], "•")
             tail = C.fmt_due(t["due_at"])
             if t["due_at"] and t["due_at"].astimezone(now.tzinfo) < now:
@@ -1069,6 +1074,22 @@ async def _handle_extension(update, context, action, task):
 
 # --- фоновый контроль -----------------------------------------------------------
 
+async def deliver_scheduled(bot):
+    """Доставляет отложенные разовые задачи, когда подошло время отправки.
+    Отсчёт контроля ведём от доставки, поэтому обновляем created_at."""
+    for task in C.tasks_to_deliver():
+        person = C.person_by_id(task["person_id"])
+        if not person or not person["active"]:
+            continue
+        C.task_update(task["id"], created_at=now_local())
+        try:
+            await send_task_card(bot, C.task_get(task["id"]), person)
+            logger.info("Отложенная задача #%s доставлена", task["id"])
+        except Exception as e:
+            logger.error("Отложенная #%s не доставилась: %s", task["id"], e)
+        await asyncio.sleep(0.3)
+
+
 async def spawn_fixed(bot):
     """Ставит постоянные задания, когда подошло их время."""
     now = now_local()
@@ -1122,6 +1143,9 @@ async def chase(bot):
     now = now_local()
 
     for task in C.tasks_open():
+        # Отложенная задача ещё не доставлена (нет карточки) — не трогаем.
+        if not task.get("message_id"):
+            continue
         action = C.decide(task, now)
         if not action:
             continue
@@ -1301,6 +1325,7 @@ async def crew_loop(bot):
     while True:
         try:
             C.crew_init_db()
+            await deliver_scheduled(bot)
             await spawn_fixed(bot)
             await morning_report(bot)
             await chase(bot)

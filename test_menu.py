@@ -29,15 +29,15 @@ from datetime import timedelta
 from core import now_local
 
 ALL_STEPS = [
-    "wait_title", "pick_due", "pick_due_date", "confirm",
-    "pick_freq", "pick_weekday", "pick_days", "pick_monthday", "pick_start",
-    "pick_fix_due", "pick_fixdue_time", "final",
+    "wait_title", "confirm", "pd_date", "pd_hour", "pd_min",
+    "pick_freq", "pick_weekday", "pick_days", "pick_monthday",
+    "tod_hour", "tod_min", "pick_fix_due", "final",
 ]
 
 
 def _draft(step):
     return {"step": step, "person_id": None, "title": "свести кассу",
-            "due_at": None, "pick_date": None,
+            "due_at": None, "send_at": None, "editing": "due",
             "week_shift": 0, "weekdays": "24", "monthday": 15,
             "hour": 9, "minute": 0, "due_hour": 10, "due_minute": 0}
 
@@ -56,29 +56,30 @@ def test_every_screen_is_buttons_only():
                 assert btn.url is None, f"{step}: внешняя ссылка на кнопке"
 
 
-def test_recurring_time_is_stepper():
-    """Время постоянных выбирается стрелками (±час/±15м), а не сеткой/вводом."""
-    for step, prefix in (("pick_start", "s"), ("pick_fixdue_time", "f")):
+def test_hour_grid_is_full_0_23():
+    """Часы выбираются тапом, полная сетка 0–23."""
+    for step, prefix in (("pd_hour", "phour"), ("tod_hour", "thour")):
         kb = CM._screen(_draft(step))[1].inline_keyboard
         codes = {b.callback_data for row in kb for b in row}
-        for need in (f"new:{prefix}h:-1", f"new:{prefix}h:1",
-                     f"new:{prefix}m:-15", f"new:{prefix}m:15", f"new:{prefix}ok"):
-            assert need in codes, f"{step}: нет {need}"
+        for h in range(24):
+            assert f"new:{prefix}:{h}" in codes, f"{step}: нет часа {h}"
 
 
-def test_adj_time_wraps_midnight():
-    assert CM._adj_time(23, 45, dm=15) == (0, 0)
-    assert CM._adj_time(0, 0, dh=-1) == (23, 0)
-    assert CM._adj_time(9, 0, dh=2) == (11, 0)
+def test_min_grid_quarters():
+    """Минуты — :00/:15/:30/:45 тапом."""
+    for step, prefix in (("pd_min", "pmin"), ("tod_min", "tmin")):
+        kb = CM._screen(_draft(step))[1].inline_keyboard
+        codes = {b.callback_data for row in kb for b in row}
+        for m in (0, 15, 30, 45):
+            assert f"new:{prefix}:{m}" in codes, f"{step}: нет минут {m}"
 
 
-def test_stepper_has_day_hour_minute_arrows():
-    """Стрелочный экран срока: день, час и минуты — всё кнопками."""
-    kb = CM._screen(_draft("pick_due"))[1].inline_keyboard
+def test_confirm_has_send_and_due():
+    """Хаб разовой: можно задать и отправку, и срок."""
+    kb = CM._screen(_draft("confirm"))[1].inline_keyboard
     codes = {b.callback_data for row in kb for b in row}
-    for need in ("new:d:-1", "new:d:1", "new:h:-1", "new:h:1",
-                 "new:m:-15", "new:m:15", "new:okdue", "new:other"):
-        assert need in codes, f"нет кнопки {need}"
+    for need in ("new:setsend", "new:setdue", "new:once", "new:fix"):
+        assert need in codes, f"нет {need}"
 
 
 def test_typed_time_is_parsed():
@@ -159,11 +160,11 @@ def test_month_schedule_label():
     assert CM._sched_label({"weekdays": "12345", "monthday": None}) == "по будням"
 
 
-def test_monthday_screen_has_arrows_and_last():
+def test_monthday_grid_has_days_and_last():
     kb = CM._screen(_draft("pick_monthday"))[1].inline_keyboard
     codes = {b.callback_data for row in kb for b in row}
-    for need in ("new:md:-1", "new:md:1", "new:mdlast", "new:mdok"):
-        assert need in codes, f"нет {need}"
+    assert "new:mday:1" in codes and "new:mday:28" in codes
+    assert "new:mday:99" in codes
 
 
 def test_back_targets_are_known_steps():
@@ -172,12 +173,12 @@ def test_back_targets_are_known_steps():
         assert dst in ALL_STEPS, f"BACK ведёт в неизвестный шаг {dst}"
 
 
-def test_date_list_has_seven_days_and_shift():
-    kb = CM._screen(_draft("pick_due_date"))[1].inline_keyboard
-    dates = [b for row in kb for b in row if b.callback_data.startswith("new:date:")]
-    assert len(dates) == 7, "должно быть 7 дней"
-    assert any(b.callback_data == "new:week:1" for row in kb for b in row), \
-        "нет кнопки «Ещё неделя»"
+def test_pd_date_grid_has_days_and_week_nav():
+    kb = CM._screen(_draft("pd_date"))[1].inline_keyboard
+    dates = [b for row in kb for b in row if b.callback_data.startswith("new:pdate:")]
+    assert len(dates) >= 7, "минимум 7 дней"
+    assert any(b.callback_data == "new:pweek:1" for row in kb for b in row), \
+        "нет листания недель"
 
 
 if __name__ == "__main__":

@@ -1,20 +1,20 @@
 """Постановка задач кнопками — надстройка над /task и /fix.
 
-Главное правило: время нигде не вводится с клавиатуры. Пользователь печатает
-только суть задачи словами (шаг wait_title), всё остальное — нажатия. Диалог
-многошаговый, поэтому его состояние живёт в базе (crew_draft), а не в памяти:
-Railway перезапускает сервис при каждом деплое, и словарь в памяти потерялся бы.
+Время нигде не набирается с клавиатуры: выбор тапом. Даты — сеткой с
+листанием недель; часы — полная сетка 0–23; минуты — :00/:15/:30/:45.
+Диалог многошаговый, состояние живёт в базе (crew_draft), чтобы переживать
+передеплой. Callback-пространство new:, чтобы не пересекаться с crew:.
 
-Пространство callback-данных — new:, чтобы не пересекаться с crew: (кнопки
-карточки задачи). Команды /task и /fix остаются рабочими — это запасной путь.
+Разовая задача: можно выбрать, КОГДА отправить её в группу (сейчас или
+позже) и СРОК сдачи. Отложенные доставляет фоновый цикл (crewbot).
 """
 import logging
-from datetime import timedelta, date
+from datetime import datetime, timedelta, date
 
 from telegram import InlineKeyboardButton as B, InlineKeyboardMarkup as M
 from telegram.constants import ParseMode
 
-from core import is_allowed, now_local
+from core import is_allowed, now_local, LOCAL_TZ
 import crew as C
 from crewbot import send_task_card
 
@@ -22,49 +22,64 @@ logger = logging.getLogger(__name__)
 
 WD_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
-# Куда ведёт «Назад» с каждого шага.
+# «Назад» для нешаговых экранов (пикеры навигируются своими pback/tback).
 BACK = {
-    "pick_due_date": "pick_due",
     "pick_freq": "confirm",
     "pick_weekday": "pick_freq",
     "pick_days": "pick_freq",
     "pick_monthday": "pick_freq",
-    "pick_start": "pick_freq",
-    "pick_fix_due": "pick_start",
-    "pick_fixdue_time": "pick_fix_due",
-    "final": "pick_fix_due",
 }
 
 
 def _default_due():
-    """Точка отсчёта для стрелок: ближайший «круглый» час от текущего."""
     now = now_local()
     return now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
 
-def _adj_time(h, m, dh=0, dm=0):
-    """Сдвиг времени суток стрелками, с переходом через полночь."""
-    total = ((h or 0) * 60 + (m or 0) + dh * 60 + dm) % (24 * 60)
-    return total // 60, total % 60
-
-
-# --- вспомогательное ------------------------------------------------------------
+# --- клавиатуры ------------------------------------------------------------------
 
 def _rows(buttons, per_row):
     return [buttons[i:i + per_row] for i in range(0, len(buttons), per_row)]
 
 
-def _time_stepper(prefix):
-    """Стрелки для времени суток: ±час, ±15 мин, Готово, Назад.
-    prefix «s» — время постановки, «f» — срок постоянного задания."""
-    return M([
-        [B("− час", callback_data=f"new:{prefix}h:-1"),
-         B("+ час", callback_data=f"new:{prefix}h:1")],
-        [B("−15 мин", callback_data=f"new:{prefix}m:-15"),
-         B("+15 мин", callback_data=f"new:{prefix}m:15")],
-        [B("Готово", callback_data=f"new:{prefix}ok"),
-         B("‹ Назад", callback_data="new:back")]])
+def _hour_grid(prefix, back):
+    """Полная сетка часов 0–23 по 6 в ряд + Назад."""
+    btns = [B(f"{h:02d}", callback_data=f"new:{prefix}:{h}") for h in range(24)]
+    kb = _rows(btns, 6)
+    kb.append([B("‹ Назад", callback_data=back)])
+    return M(kb)
 
+
+def _min_grid(prefix, back):
+    btns = [B(f":{m:02d}", callback_data=f"new:{prefix}:{m}") for m in (0, 15, 30, 45)]
+    return M([btns, [B("‹ Назад", callback_data=back)]])
+
+
+def _date_grid(draft, editing):
+    shift = draft.get("week_shift") or 0
+    base = now_local().date()
+    start = base + timedelta(days=shift * 7)
+    days = [start + timedelta(days=i) for i in range(7)]
+    rows = []
+    if shift == 0:
+        rows.append([
+            B("Сегодня", callback_data=f"new:pdate:{base.isoformat()}"),
+            B("Завтра", callback_data=f"new:pdate:{(base + timedelta(days=1)).isoformat()}"),
+            B("Послезавтра", callback_data=f"new:pdate:{(base + timedelta(days=2)).isoformat()}")])
+    daybtns = [B(_date_label(d), callback_data=f"new:pdate:{d.isoformat()}") for d in days]
+    rows += _rows(daybtns, 3)
+    nav = []
+    if shift > 0:
+        nav.append(B("‹ Неделя", callback_data="new:pweek:-1"))
+    nav.append(B("Неделя ›", callback_data="new:pweek:1"))
+    rows.append(nav)
+    if editing == "send":
+        rows.append([B("📤 Отправить сейчас", callback_data="new:pnow")])
+    rows.append([B("‹ Назад", callback_data="new:pback")])
+    return M(rows)
+
+
+# --- подписи ---------------------------------------------------------------------
 
 def _weekdays_label(wd):
     if wd == "1234567":
@@ -75,7 +90,6 @@ def _weekdays_label(wd):
 
 
 def _sched_label(draft):
-    """Как описать расписание постоянного задания: по дням недели или по числу."""
     md = draft.get("monthday")
     if md:
         return "в последний день месяца" if md >= 99 else f"{md} числа каждый месяц"
@@ -87,8 +101,6 @@ def _date_label(d):
 
 
 def _short(title, n=60):
-    """Короткое имя задачи для экранов диалога: первая строка, обрезанная.
-    Полное название хранится в черновике и уходит в задачу целиком."""
     line = " ".join((title or "").split())
     return line if len(line) <= n else line[:n].rstrip() + "…"
 
@@ -100,8 +112,14 @@ def _name(draft):
     return p["name"] if p else "?"
 
 
+def _field(draft):
+    """Куда пишет пикер даты/времени сейчас."""
+    return "send_at" if draft.get("editing") == "send" else "due_at"
+
+
+# --- экраны ----------------------------------------------------------------------
+
 def _screen(draft):
-    """Текст и клавиатура для текущего шага — собираются целиком из черновика."""
     step = draft["step"]
     name = _name(draft)
     title = _short(draft.get("title") or "")
@@ -109,46 +127,35 @@ def _screen(draft):
     if step == "wait_title":
         return (f"*{name}.* Что сделать?\n\n"
                 "Напишите одним сообщением. Можно сразу со сроком — "
-                "«...к 17:00», «...через 2 часа», «...завтра». "
-                "Если срок не указать — выберете кнопками.",
+                "«...к 17:00», «...завтра». Если нет — выберете кнопками.",
                 M([[B("Отмена", callback_data="new:cancel")]]))
 
-    if step == "pick_due":
-        due = draft.get("due_at")
-        text = f"*{name}*\n{title}\n\nСрок: {C.fmt_due(due)}"
-        if due and due <= now_local():
-            text += "  ⚠️ уже прошёл"
-        return text, M([
-            [B("◀ день", callback_data="new:d:-1"),
-             B("день ▶", callback_data="new:d:1")],
-            [B("− час", callback_data="new:h:-1"),
-             B("+ час", callback_data="new:h:1")],
-            [B("−15 мин", callback_data="new:m:-15"),
-             B("+15 мин", callback_data="new:m:15")],
-            [B("Другой день", callback_data="new:other")],
-            [B("Готово", callback_data="new:okdue"),
-             B("Отмена", callback_data="new:cancel")]])
-
-    if step == "pick_due_date":
-        shift = draft.get("week_shift") or 0
-        start = now_local().date() + timedelta(days=shift * 7)
-        days = [start + timedelta(days=i) for i in range(7)]
-        btns = [B(_date_label(d), callback_data=f"new:date:{d.isoformat()}") for d in days]
-        kb = _rows(btns, 3)
-        kb.append([B("Ещё неделя ›", callback_data="new:week:1")])
-        kb.append([B("‹ Назад", callback_data="new:back")])
-        return f"*{name}*\n{title}\n\nКакой день?", M(kb)
-
     if step == "confirm":
+        send = draft.get("send_at")
         due = draft.get("due_at")
-        text = f"*{name}*\n{title}\n\nСрок: {C.fmt_due(due)}"
+        send_txt = C.fmt_due(send) if send else "сейчас"
+        text = (f"*{name}*\n{title}\n\n"
+                f"📤 Отправить: {send_txt}\n🎯 Срок: {C.fmt_due(due)}")
         if due and due <= now_local():
-            text += "\n\n⚠️ этот срок уже прошёл"
+            text += "\n\n⚠️ срок уже прошёл"
         return text, M([
-            [B("Разовая", callback_data="new:once"),
-             B("Постоянная", callback_data="new:fix")],
-            [B("Изменить срок", callback_data="new:due"),
-             B("Отмена", callback_data="new:cancel")]])
+            [B("🕐 Когда отправить", callback_data="new:setsend"),
+             B("🎯 Срок", callback_data="new:setdue")],
+            [B("✅ Разовая", callback_data="new:once"),
+             B("♻️ Постоянная", callback_data="new:fix")],
+            [B("Отмена", callback_data="new:cancel")]])
+
+    if step == "pd_date":
+        head = "Когда отправить" if draft.get("editing") == "send" else "Срок"
+        return f"*{name}*\n{title}\n\n{head} — какой день?", _date_grid(
+            draft, draft.get("editing"))
+
+    if step == "pd_hour":
+        head = "Когда отправить" if draft.get("editing") == "send" else "Срок"
+        return f"*{name}*\n{title}\n\n{head} — час:", _hour_grid("phour", "new:pback")
+
+    if step == "pd_min":
+        return f"*{name}*\n{title}\n\nМинуты:", _min_grid("pmin", "new:pback")
 
     if step == "pick_freq":
         return (f"*{name}*\n{title}\n\nКак часто?", M([
@@ -158,16 +165,6 @@ def _screen(draft):
              B("Выбрать дни", callback_data="new:freq:pick")],
             [B("Раз в месяц", callback_data="new:freq:month")],
             [B("‹ Назад", callback_data="new:back")]]))
-
-    if step == "pick_monthday":
-        md = draft.get("monthday") or 1
-        shown = "последний день" if md >= 99 else f"{md} число"
-        return (f"*{name}* · {title}\nКакого числа: *{shown}*", M([
-            [B("− день", callback_data="new:md:-1"),
-             B("+ день", callback_data="new:md:1")],
-            [B("Последний день месяца", callback_data="new:mdlast")],
-            [B("Готово", callback_data="new:mdok"),
-             B("‹ Назад", callback_data="new:back")]]))
 
     if step == "pick_weekday":
         btns = [B(WD_SHORT[i], callback_data=f"new:wd:{i + 1}") for i in range(7)]
@@ -187,10 +184,19 @@ def _screen(draft):
                    B("‹ Назад", callback_data="new:back")])
         return f"*{name}*\n{title}\n\nПо каким дням?", M(kb)
 
-    if step == "pick_start":
-        h, m = draft.get("hour") or 0, draft.get("minute") or 0
-        return (f"*{name}* · {title}\nВо сколько ставить: *{h:02d}:{m:02d}*",
-                _time_stepper("s"))
+    if step == "pick_monthday":
+        btns = [B(str(n), callback_data=f"new:mday:{n}") for n in range(1, 29)]
+        kb = _rows(btns, 7)
+        kb.append([B("Последний день месяца", callback_data="new:mday:99")])
+        kb.append([B("‹ Назад", callback_data="new:back")])
+        return f"*{name}*\n{title}\n\nКакого числа?", M(kb)
+
+    if step == "tod_hour":
+        head = "Во сколько ставить" if draft.get("editing") == "start" else "Сделать до"
+        return f"*{name}* · {title}\n{head} — час:", _hour_grid("thour", "new:tback")
+
+    if step == "tod_min":
+        return f"*{name}* · {title}\nМинуты:", _min_grid("tmin", "new:tback")
 
     if step == "pick_fix_due":
         return (f"*{name}* · {title}\nДо скольки сделать?", M([
@@ -198,13 +204,8 @@ def _screen(draft):
              B("+2 часа", callback_data="new:fixdue:120"),
              B("+4 часа", callback_data="new:fixdue:240")],
             [B("Конец дня", callback_data="new:fixdue:eod"),
-             B("Выбрать точно", callback_data="new:fixdue:hour")],
+             B("Выбрать точно", callback_data="new:fixdue:precise")],
             [B("‹ Назад", callback_data="new:back")]]))
-
-    if step == "pick_fixdue_time":
-        h, m = draft.get("due_hour") or 0, draft.get("due_minute") or 0
-        return (f"*{name}* · {title}\nСделать до: *{h:02d}:{m:02d}*",
-                _time_stepper("f"))
 
     if step == "final":
         h, mi = draft.get("hour") or 0, draft.get("minute") or 0
@@ -233,7 +234,7 @@ async def _rerender(query, draft):
 # --- команда /menu --------------------------------------------------------------
 
 async def menu_cmd(update, context):
-    """/menu — постоянное меню с кнопкой на каждого человека."""
+    """/menu — постоянное меню с кнопкой на каждого человека и доской."""
     if not is_allowed(update.effective_user.id):
         return
     C.crew_init_db()
@@ -245,11 +246,9 @@ async def menu_cmd(update, context):
         return
     btns = [B(p["name"], callback_data=f"new:who:{p['id']}") for p in people]
     kb = _rows(btns, 2)
-    # Доска задач обрабатывается в crew_button (namespace crew:), не в new:.
     kb.append([B("📋 Доска задач", callback_data="crew:board:0")])
     msg = await update.message.reply_text(
-        "*Кому ставим задачу?*", parse_mode=ParseMode.MARKDOWN,
-        reply_markup=M(kb))
+        "*Кому ставим задачу?*", parse_mode=ParseMode.MARKDOWN, reply_markup=M(kb))
     try:
         await context.bot.pin_chat_message(chat_id=msg.chat_id,
                                            message_id=msg.message_id,
@@ -258,7 +257,16 @@ async def menu_cmd(update, context):
         logger.debug("Меню не закрепилось: %s", e)
 
 
-# --- все нажатия new: -----------------------------------------------------------
+async def _open_dialog(context, chat_id, user_id):
+    """Показывает текущий шаг черновика новым сообщением, запоминает его id."""
+    text, kb = _screen(C.draft_get(user_id))
+    sent = await context.bot.send_message(chat_id=chat_id, text=text,
+                                          parse_mode=ParseMode.MARKDOWN,
+                                          reply_markup=kb)
+    C.draft_set(user_id, message_id=sent.message_id)
+
+
+# --- нажатия new: ---------------------------------------------------------------
 
 async def menu_button(update, context):
     query = update.callback_query
@@ -272,8 +280,6 @@ async def menu_button(update, context):
     arg = parts[2] if len(parts) > 2 else ""
     C.crew_init_db()
 
-    # Выбор человека начинает новый диалог отдельным сообщением; постоянное
-    # меню при этом остаётся на месте и годится для следующей задачи.
     if action == "who":
         if not arg.isdigit():
             await query.answer()
@@ -284,16 +290,10 @@ async def menu_button(update, context):
             return
         C.draft_reset(user_id, query.message.chat_id, "wait_title")
         C.draft_set(user_id, person_id=person["id"])
-        text, kb = _screen(C.draft_get(user_id))
-        sent = await context.bot.send_message(
-            chat_id=query.message.chat_id, text=text,
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
-        C.draft_set(user_id, message_id=sent.message_id)
+        await _open_dialog(context, query.message.chat_id, user_id)
         await query.answer()
         return
 
-    # Правка времени постоянного задания: грузим его в черновик и идём
-    # по тем же стрелкам (постановка → срок → сохранить).
     if action == "fedit":
         if not arg.isdigit():
             await query.answer()
@@ -302,17 +302,13 @@ async def menu_button(update, context):
         if not fx:
             await query.answer("Задание не найдено")
             return
-        C.draft_reset(user_id, query.message.chat_id, "pick_start")
+        C.draft_reset(user_id, query.message.chat_id, "tod_hour")
         C.draft_set(user_id, person_id=fx["person_id"], title=fx["title"],
                     weekdays=fx["weekdays"], monthday=fx.get("monthday"),
                     hour=fx["hour"], minute=fx["minute"],
                     due_hour=fx["due_hour"], due_minute=fx["due_minute"],
-                    kind="fixedit", edit_fid=fx["id"])
-        text, kb = _screen(C.draft_get(user_id))
-        sent = await context.bot.send_message(
-            chat_id=query.message.chat_id, text=text,
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
-        C.draft_set(user_id, message_id=sent.message_id)
+                    kind="fixedit", edit_fid=fx["id"], editing="start")
+        await _open_dialog(context, query.message.chat_id, user_id)
         await query.answer("Меняем время")
         return
 
@@ -335,67 +331,67 @@ async def menu_button(update, context):
         return
 
     if action == "back":
-        prev = BACK.get(draft["step"])
-        if prev:
-            C.draft_set(user_id, step=prev)
-        await _rerender(query, C.draft_get(user_id))
-        return
-
-    # --- выбор срока стрелками (разовая) ---
-    if action in ("d", "h", "m"):
-        try:
-            delta = int(arg)
-        except ValueError:
-            await query.answer()
-            return
-        due = draft.get("due_at") or _default_due()
-        if action == "d":
-            due = due + timedelta(days=delta)
-        elif action == "h":
-            due = due + timedelta(hours=delta)
+        if draft["step"] == "pick_fix_due":
+            C.draft_set(user_id, editing="start", step="tod_hour")
         else:
-            due = due + timedelta(minutes=delta)
-        C.draft_set(user_id, due_at=due, step="pick_due")
+            prev = BACK.get(draft["step"])
+            if prev:
+                C.draft_set(user_id, step=prev)
         await _rerender(query, C.draft_get(user_id))
         return
 
-    if action == "other":
-        if not draft.get("due_at"):
-            C.draft_set(user_id, due_at=_default_due())
-        C.draft_set(user_id, step="pick_due_date", week_shift=0)
+    # ---- пикер даты/времени для разовой (send / due) ----
+    if action == "setsend":
+        C.draft_set(user_id, editing="send", week_shift=0, step="pd_date")
         await _rerender(query, C.draft_get(user_id))
         return
 
-    if action == "week":
+    if action == "setdue":
+        C.draft_set(user_id, editing="due", week_shift=0, step="pd_date")
+        await _rerender(query, C.draft_get(user_id))
+        return
+
+    if action == "pnow":
+        C.draft_set(user_id, send_at=None, step="confirm")
+        await _rerender(query, C.draft_get(user_id))
+        return
+
+    if action == "pweek":
         delta = int(arg) if arg.lstrip("-").isdigit() else 1
         shift = max(0, (draft.get("week_shift") or 0) + delta)
-        C.draft_set(user_id, week_shift=shift, step="pick_due_date")
+        C.draft_set(user_id, week_shift=shift, step="pd_date")
         await _rerender(query, C.draft_get(user_id))
         return
 
-    if action == "date":
+    if action == "pdate":
         try:
             d = date.fromisoformat(arg)
         except ValueError:
             await query.answer()
             return
-        due = (draft.get("due_at") or _default_due()).replace(
-            year=d.year, month=d.month, day=d.day)
-        C.draft_set(user_id, due_at=due, step="pick_due")
+        cur = draft.get(_field(draft)) or _default_due()
+        cur = cur.replace(year=d.year, month=d.month, day=d.day)
+        C.draft_set(user_id, **{_field(draft): cur, "step": "pd_hour"})
         await _rerender(query, C.draft_get(user_id))
         return
 
-    if action == "okdue":
-        if not draft.get("due_at"):
-            C.draft_set(user_id, due_at=_default_due())
-        C.draft_set(user_id, step="confirm")
+    if action == "phour":
+        cur = (draft.get(_field(draft)) or _default_due()).replace(
+            hour=int(arg), minute=0)
+        C.draft_set(user_id, **{_field(draft): cur, "step": "pd_min"})
         await _rerender(query, C.draft_get(user_id))
         return
 
-    if action == "due":
-        if not draft.get("due_at"):
-            C.draft_set(user_id, due_at=_default_due())
-        C.draft_set(user_id, step="pick_due")
+    if action == "pmin":
+        cur = (draft.get(_field(draft)) or _default_due()).replace(minute=int(arg))
+        C.draft_set(user_id, **{_field(draft): cur, "step": "confirm"})
+        await _rerender(query, C.draft_get(user_id))
+        return
+
+    if action == "pback":
+        nxt = {"pd_min": "pd_hour", "pd_hour": "pd_date",
+               "pd_date": "confirm"}.get(draft["step"], "confirm")
+        C.draft_set(user_id, step=nxt)
         await _rerender(query, C.draft_get(user_id))
         return
 
@@ -403,7 +399,7 @@ async def menu_button(update, context):
         await _create_once(query, context, draft, user_id)
         return
 
-    # --- постоянная ---
+    # ---- постоянная ----
     if action == "fix":
         C.draft_set(user_id, kind="fix", step="pick_freq")
         await _rerender(query, C.draft_get(user_id))
@@ -412,43 +408,14 @@ async def menu_button(update, context):
     if action == "freq":
         if arg in ("daily", "work"):
             wd = "1234567" if arg == "daily" else "12345"
-            C.draft_set(user_id, weekdays=wd, monthday=None, hour=9, minute=0,
-                        step="pick_start")
+            C.draft_set(user_id, weekdays=wd, monthday=None, editing="start",
+                        step="tod_hour")
         elif arg == "weekly":
             C.draft_set(user_id, weekdays="", monthday=None, step="pick_weekday")
         elif arg == "pick":
             C.draft_set(user_id, weekdays="", monthday=None, step="pick_days")
         elif arg == "month":
-            C.draft_set(user_id, weekdays="", monthday=1, step="pick_monthday")
-        await _rerender(query, C.draft_get(user_id))
-        return
-
-    if action == "md":
-        try:
-            delta = int(arg)
-        except ValueError:
-            await query.answer()
-            return
-        cur = draft.get("monthday") or 1
-        if cur >= 99:
-            cur = 1  # со «последнего дня» стрелка возвращает к числам
-        nd = ((cur - 1 + delta) % 28) + 1
-        C.draft_set(user_id, monthday=nd, step="pick_monthday")
-        await _rerender(query, C.draft_get(user_id))
-        return
-
-    if action == "mdlast":
-        C.draft_set(user_id, monthday=99, step="pick_monthday")
-        await _rerender(query, C.draft_get(user_id))
-        return
-
-    if action == "mdok":
-        fields = {"step": "pick_start"}
-        if not draft.get("monthday"):
-            fields["monthday"] = 1
-        if draft.get("hour") is None:
-            fields["hour"], fields["minute"] = 9, 0
-        C.draft_set(user_id, **fields)
+            C.draft_set(user_id, weekdays="", step="pick_monthday")
         await _rerender(query, C.draft_get(user_id))
         return
 
@@ -457,7 +424,7 @@ async def menu_button(update, context):
             await query.answer()
             return
         if draft["step"] == "pick_weekday":
-            C.draft_set(user_id, weekdays=arg, hour=9, minute=0, step="pick_start")
+            C.draft_set(user_id, weekdays=arg, editing="start", step="tod_hour")
         elif draft["step"] == "pick_days":
             chosen = set(draft.get("weekdays") or "")
             chosen.discard(arg) if arg in chosen else chosen.add(arg)
@@ -469,61 +436,63 @@ async def menu_button(update, context):
         if not (draft.get("weekdays") or ""):
             await query.answer("Выберите хотя бы один день")
             return
-        fields = {"step": "pick_start"}
-        if draft.get("hour") is None:
-            fields["hour"], fields["minute"] = 9, 0
-        C.draft_set(user_id, **fields)
+        C.draft_set(user_id, editing="start", step="tod_hour")
         await _rerender(query, C.draft_get(user_id))
         return
 
-    # стрелки времени: постановка (s) и срок (f)
-    if action in ("sh", "sm", "fh", "fm"):
-        try:
-            delta = int(arg)
-        except ValueError:
+    if action == "mday":
+        if not arg.isdigit():
             await query.answer()
             return
-        if action in ("sh", "sm"):
-            h, m = _adj_time(draft.get("hour"), draft.get("minute"),
-                             dh=delta if action == "sh" else 0,
-                             dm=delta if action == "sm" else 0)
-            C.draft_set(user_id, hour=h, minute=m, step="pick_start")
-        else:
-            h, m = _adj_time(draft.get("due_hour"), draft.get("due_minute"),
-                             dh=delta if action == "fh" else 0,
-                             dm=delta if action == "fm" else 0)
-            C.draft_set(user_id, due_hour=h, due_minute=m, step="pick_fixdue_time")
+        C.draft_set(user_id, monthday=int(arg), editing="start", step="tod_hour")
         await _rerender(query, C.draft_get(user_id))
         return
 
-    if action == "sok":
-        # при создании — экран пресетов срока; при правке — сразу стрелки срока
-        nxt = "pick_fixdue_time" if draft.get("edit_fid") else "pick_fix_due"
-        fields = {"step": nxt}
-        if nxt == "pick_fixdue_time" and draft.get("due_hour") is None:
-            h, m = _adj_time(draft.get("hour"), draft.get("minute"), dh=1)
-            fields["due_hour"], fields["due_minute"] = h, m
-        C.draft_set(user_id, **fields)
+    # ---- пикер времени суток (start / fixdue) ----
+    if action == "thour":
+        if draft.get("editing") == "start":
+            C.draft_set(user_id, hour=int(arg), minute=0, step="tod_min")
+        else:
+            C.draft_set(user_id, due_hour=int(arg), due_minute=0, step="tod_min")
+        await _rerender(query, C.draft_get(user_id))
+        return
+
+    if action == "tmin":
+        if draft.get("editing") == "start":
+            C.draft_set(user_id, minute=int(arg))
+            if draft.get("edit_fid"):
+                C.draft_set(user_id, editing="fixdue", step="tod_hour")
+            else:
+                C.draft_set(user_id, step="pick_fix_due")
+        else:
+            C.draft_set(user_id, due_minute=int(arg), step="final")
+        await _rerender(query, C.draft_get(user_id))
+        return
+
+    if action == "tback":
+        editing = draft.get("editing")
+        if draft["step"] == "tod_min":
+            C.draft_set(user_id, step="tod_hour")
+        elif editing == "fixdue":
+            if draft.get("edit_fid"):
+                C.draft_set(user_id, editing="start", step="tod_hour")
+            else:
+                C.draft_set(user_id, step="pick_fix_due")
+        elif not draft.get("edit_fid"):
+            C.draft_set(user_id, step="pick_freq")
         await _rerender(query, C.draft_get(user_id))
         return
 
     if action == "fixdue":
         if arg in ("60", "120", "240"):
-            h, m = _adj_time(draft.get("hour"), draft.get("minute"), dh=int(arg) // 60)
-            C.draft_set(user_id, due_hour=h, due_minute=m, step="final")
+            total = ((draft.get("hour") or 0) * 60 + (draft.get("minute") or 0)
+                     + int(arg))
+            C.draft_set(user_id, due_hour=(total // 60) % 24, due_minute=total % 60,
+                        step="final")
         elif arg == "eod":
             C.draft_set(user_id, due_hour=23, due_minute=59, step="final")
-        elif arg == "hour":
-            fields = {"step": "pick_fixdue_time"}
-            if draft.get("due_hour") is None:
-                h, m = _adj_time(draft.get("hour"), draft.get("minute"), dh=1)
-                fields["due_hour"], fields["due_minute"] = h, m
-            C.draft_set(user_id, **fields)
-        await _rerender(query, C.draft_get(user_id))
-        return
-
-    if action == "fok":
-        C.draft_set(user_id, step="final")
+        elif arg == "precise":
+            C.draft_set(user_id, editing="fixdue", step="tod_hour")
         await _rerender(query, C.draft_get(user_id))
         return
 
@@ -540,14 +509,23 @@ async def _create_once(query, context, draft, user_id):
     person = C.person_by_id(draft["person_id"]) if draft.get("person_id") else None
     title = (draft.get("title") or "").strip()
     due = draft.get("due_at")
+    send = draft.get("send_at")
     if not person or not title:
         C.draft_clear(user_id)
         await query.answer("Диалог сбился")
         await query.edit_message_text("Диалог сбился. Начните заново: /menu")
         return
-    tid = C.task_create(person["id"], title, due)
+    scheduled = bool(send and send > now_local())
+    tid = C.task_create(person["id"], title, due, send_at=send if scheduled else None)
     C.draft_clear(user_id)
     await query.answer("Готово")
+
+    if scheduled:
+        await query.edit_message_text(
+            f"📤 Запланировал *{person['name']}*: {title}\n"
+            f"Отправлю {C.fmt_due(send)} · срок {C.fmt_due(due)}  `#{tid}`",
+            parse_mode=ParseMode.MARKDOWN)
+        return
     try:
         await send_task_card(context.bot, C.task_get(tid), person)
     except Exception as e:
@@ -576,8 +554,6 @@ async def _create_fix(query, draft, user_id):
     due_txt = f", до {dh:02d}:{dm or 0:02d}" if dh is not None else ""
     edit_fid = draft.get("edit_fid")
     if edit_fid:
-        # правка времени: last_spawn не трогаем, но если сегодня уже ставили
-        # раньше нового времени — разрешим поставить сегодня заново.
         C.fix_update(edit_fid, hour=h, minute=mi, due_hour=dh, due_minute=dm)
         C.draft_clear(user_id)
         await query.answer("Сохранено")
@@ -599,8 +575,7 @@ async def _create_fix(query, draft, user_id):
 # --- ввод названия задачи (единственный текстовый шаг) --------------------------
 
 async def catch_draft_input(update, context):
-    """Ловит название задачи, когда пользователь в шаге wait_title.
-    Возвращает True, если сообщение обработано (дальше его трогать не надо)."""
+    """Ловит название задачи в шаге wait_title. True — если обработано."""
     msg = update.message
     if not msg or not msg.text:
         return False
@@ -618,13 +593,16 @@ async def catch_draft_input(update, context):
         await msg.reply_text("Не понял, что делать. Напишите задачу словами.")
         return True
 
-    # Срок можно написать прямо в тексте («...к 17:00», «...через 2 часа»).
-    # Нашли — сразу к подтверждению; не нашли — стрелки.
+    # Срок можно написать прямо в тексте. Отправка по умолчанию — сейчас;
+    # изменить и срок, и время отправки можно на экране подтверждения.
     due, clean = C.parse_due_explicit(title)
     if due is not None:
-        C.draft_set(user_id, title=(clean or title)[:500], due_at=due, step="confirm")
+        C.draft_set(user_id, title=(clean or title)[:500], due_at=due,
+                    send_at=None, editing="due", step="confirm")
     else:
-        C.draft_set(user_id, title=title[:500], due_at=_default_due(), step="pick_due")
+        C.draft_set(user_id, title=title[:500], due_at=_default_due(),
+                    send_at=None, editing="due", step="confirm")
+
     draft = C.draft_get(user_id)
     text, kb = _screen(draft)
     if draft.get("message_id"):
