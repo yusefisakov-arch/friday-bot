@@ -426,7 +426,48 @@ def render_tasks(tasks, title):
 
 
 def render_board():
-    return render_tasks(C.tasks_open(), "📋 Доска задач")
+    """Доска по статусам: просрочено / проблема / в работе / не взято / сделано.
+    Полный текст задачи, секции разделены."""
+    now = now_local()
+    openz = C.tasks_open()
+    done = [t for t in C.tasks_for_day() if t["status"] == C.STATUS_DONE]
+
+    overdue, problem, working, waiting, scheduled = [], [], [], [], []
+    for t in openz:
+        if not t.get("message_id") and t.get("send_at"):
+            scheduled.append(t)
+        elif t["due_at"] and t["due_at"].astimezone(now.tzinfo) < now:
+            overdue.append(t)
+        elif t["status"] == C.STATUS_PROBLEM:
+            problem.append(t)
+        elif t["status"] == C.STATUS_TAKEN:
+            working.append(t)
+        else:
+            waiting.append(t)
+
+    sections = [("⏰ Просрочено", overdue), ("⚠️ Проблема", problem),
+                ("🔧 В работе", working), ("🆕 Не взято", waiting),
+                ("⏳ Отложенные", scheduled), ("✅ Сделано сегодня", done)]
+    if not any(items for _, items in sections):
+        return "📋 *Доска задач*\n\nЗадач нет."
+
+    blocks = ["📋 *Доска задач*"]
+    for label, items in sections:
+        if not items:
+            continue
+        lines = [f"*{label}* ({len(items)})"]
+        for t in items:
+            p = C.person_by_id(t["person_id"])
+            who = p["name"] if p else "?"
+            if t in scheduled:
+                when = f"уйдёт {C.fmt_due(t['send_at'])}"
+            elif t in overdue:
+                when = f"просрочка {C.fmt_overdue(t['due_at'])}"
+            else:
+                when = C.fmt_due(t["due_at"])
+            lines.append(f"👤 *{who}* · {when}  `#{t['id']}`\n{t['title']}")
+        blocks.append("\n".join(lines))
+    return "\n\n➖➖➖➖➖\n\n".join(blocks)
 
 
 def render_weekly():
