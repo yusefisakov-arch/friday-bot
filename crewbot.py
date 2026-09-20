@@ -18,6 +18,23 @@ PHOTO_STOP = {"нет", "no", "-", "пропустить", "skip", "не над�
               "всё", "все", "хватит", "дальше", "да", "ок", "ok"}
 
 
+async def _ask(msg, flow, text, **kw):
+    """Задаёт вопрос в диалоге и запоминает сообщение как временное (на удаление)."""
+    sent = await msg.reply_text(text, **kw)
+    flow.setdefault("trash", []).append(sent.message_id)
+    return sent
+
+
+async def _cleanup(bot, chat_id, flow):
+    """Убирает все промежуточные сообщения диалога — чтобы не засорять группу.
+    Карточка задачи не в списке, она остаётся и обновляется на месте."""
+    for mid in flow.get("trash", []):
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+
+
 async def _send_photos(bot, chat_id, file_ids, caption=None):
     """Шлёт фото: одно — обычным сообщением, несколько — альбомом (до 10)."""
     ids = list(file_ids or [])[:10]
@@ -571,27 +588,30 @@ async def crew_button(update, context):
         await query.answer("Записал: взял в работу")
     elif action == "done":
         # «Готово» ведёт короткий отчёт: что сделал → фото → закрыть и в Штаб.
-        DONE_FLOW[(query.message.chat_id, user.id)] = {
-            "tid": tid, "step": "what", "what": "", "photos": []}
+        flow = {"tid": tid, "step": "what", "what": "", "photos": [], "trash": []}
+        DONE_FLOW[(query.message.chat_id, user.id)] = flow
         await query.answer("Короткий отчёт")
-        await context.bot.send_message(
+        sent = await context.bot.send_message(
             chat_id=query.message.chat_id,
             message_thread_id=query.message.message_thread_id,
             text=f"{mention(person) if person else ''} что сделали по задаче "
                  f"«{_short(task['title'])}»? Опишите одним сообщением.",
             reply_markup=ForceReply(selective=bool(person and person.get("username"))))
+        flow["trash"].append(sent.message_id)
         return
     elif action == "problem":
         C.task_update(tid, status=C.STATUS_PROBLEM)
-        PROBLEM_FLOW[(query.message.chat_id, user.id)] = {
-            "tid": tid, "step": "desc", "desc": "", "photos": [], "solution": ""}
+        flow = {"tid": tid, "step": "desc", "desc": "", "photos": [],
+                "solution": "", "trash": []}
+        PROBLEM_FLOW[(query.message.chat_id, user.id)] = flow
         await query.answer("Опишите проблему")
-        await context.bot.send_message(
+        sent = await context.bot.send_message(
             chat_id=query.message.chat_id,
             message_thread_id=query.message.message_thread_id,
             text=f"{mention(person) if person else ''} что случилось по задаче "
-                 f"«{task['title']}»? Опишите одним сообщением.",
+                 f"«{_short(task['title'])}»? Опишите одним сообщением.",
             reply_markup=ForceReply(selective=bool(person and person.get("username"))))
+        flow["trash"].append(sent.message_id)
     else:
         await query.answer()
         return
@@ -631,42 +651,43 @@ async def catch_problem_note(update, context):
     flow = PROBLEM_FLOW.get(key)
     if not flow:
         return
+    flow.setdefault("trash", []).append(msg.message_id)
 
     step = flow["step"]
 
     if step == "desc":
         if not text:
-            await msg.reply_text("Опишите словами, в чём проблема.")
+            await _ask(msg, flow, "Опишите словами, в чём проблема.")
             return
         flow["desc"] = text[:1000]
         flow["step"] = "photo"
-        await msg.reply_text(
-            "Принял. Нужны фото — пришлите (можно несколько). Если не нужно — «нет».",
-            reply_markup=ForceReply(selective=True))
+        await _ask(msg, flow,
+                   "Принял. Нужны фото — пришлите (можно несколько). Если нет — «нет».",
+                   reply_markup=ForceReply(selective=True))
         return
 
     if step == "photo":
         if msg.photo:
             flow.setdefault("photos", []).append(msg.photo[-1].file_id)
-            await msg.reply_text(
-                f"Принял фото ({len(flow['photos'])}). Ещё? Пришлите или "
-                "напишите «готово».", reply_markup=ForceReply(selective=True))
+            await _ask(msg, flow,
+                       f"Принял фото ({len(flow['photos'])}). Ещё? Или «готово».",
+                       reply_markup=ForceReply(selective=True))
             return
         if text.lower() not in PHOTO_STOP:
-            await msg.reply_text("Пришлите фото или напишите «готово» / «нет».")
+            await _ask(msg, flow, "Пришлите фото или напишите «готово» / «нет».")
             return
         flow["step"] = "solution"
-        await msg.reply_text(
-            "Хорошо. Как, по-вашему, это решить?",
-            reply_markup=ForceReply(selective=True))
+        await _ask(msg, flow, "Хорошо. Как, по-вашему, это решить?",
+                   reply_markup=ForceReply(selective=True))
         return
 
     if step == "solution":
         if not text:
-            await msg.reply_text("Напишите, как предлагаете решить.")
+            await _ask(msg, flow, "Напишите, как предлагаете решить.")
             return
         flow["solution"] = text[:1000]
         PROBLEM_FLOW.pop(key, None)
+        await _cleanup(context.bot, msg.chat_id, flow)
         await _finish_problem(context.bot, msg, flow)
 
 
@@ -681,7 +702,6 @@ async def _finish_problem(bot, msg, flow):
 
     C.task_update(tid, note=f"{flow['desc']}\n\nРешение: {flow['solution']}"[:500])
     await refresh_card(bot, tid)
-    await msg.reply_text("Готово — передал в штаб. Спасибо.")
 
     who = person["name"] if person else "?"
     report = (
@@ -823,41 +843,42 @@ async def _handle_report_step(bot, msg, key, text):
     flow = REPORT_FLOW.get(key)
     if not flow:
         return
+    flow.setdefault("trash", []).append(msg.message_id)
     step = flow["step"]
 
     if step == "done":
         if not text:
-            await msg.reply_text("Опишите, что сделали.")
+            await _ask(msg, flow, "Опишите, что сделали.")
             return
         flow["done"] = text[:1000]
         flow["step"] = "photo"
-        await msg.reply_text(
-            "Есть фото результата? Пришлите (можно несколько) или «нет».",
-            reply_markup=ForceReply(selective=True))
+        await _ask(msg, flow,
+                   "Есть фото результата? Пришлите (можно несколько) или «нет».",
+                   reply_markup=ForceReply(selective=True))
         return
 
     if step == "photo":
         if msg.photo:
             flow.setdefault("photos", []).append(msg.photo[-1].file_id)
-            await msg.reply_text(
-                f"Принял фото ({len(flow['photos'])}). Ещё? Пришлите или "
-                "напишите «готово».", reply_markup=ForceReply(selective=True))
+            await _ask(msg, flow,
+                       f"Принял фото ({len(flow['photos'])}). Ещё? Или «готово».",
+                       reply_markup=ForceReply(selective=True))
             return
         if text.lower() not in PHOTO_STOP:
-            await msg.reply_text("Пришлите фото или напишите «готово» / «нет».")
+            await _ask(msg, flow, "Пришлите фото или напишите «готово» / «нет».")
             return
         flow["step"] = "left"
-        await msg.reply_text(
-            "Всё решено или что-то осталось? Напишите коротко.",
-            reply_markup=ForceReply(selective=True))
+        await _ask(msg, flow, "Всё решено или что-то осталось? Напишите коротко.",
+                   reply_markup=ForceReply(selective=True))
         return
 
     if step == "left":
         if not text:
-            await msg.reply_text("Напишите: всё решено или что осталось.")
+            await _ask(msg, flow, "Напишите: всё решено или что осталось.")
             return
         flow["left"] = text[:1000]
         REPORT_FLOW.pop(key, None)
+        await _cleanup(bot, msg.chat_id, flow)
         await _finish_report(bot, msg, flow)
 
 
@@ -874,7 +895,6 @@ async def _finish_report(bot, msg, flow):
     C.task_update(tid, report_text=stored[:800], report_done=True,
                   status=C.STATUS_DONE, done_at=now_local())
     await refresh_card(bot, tid)
-    await msg.reply_text("Принял отчёт, передал руководителю. Спасибо.")
 
     who = person["name"] if person else "?"
     report = (f"📋 *{who}* отчитался по задаче\n"
@@ -900,30 +920,32 @@ async def _handle_done_step(bot, msg, key, text):
     flow = DONE_FLOW.get(key)
     if not flow:
         return
+    flow.setdefault("trash", []).append(msg.message_id)
     step = flow["step"]
 
     if step == "what":
         if not text:
-            await msg.reply_text("Опишите, что сделали.")
+            await _ask(msg, flow, "Опишите, что сделали.")
             return
         flow["what"] = text[:1000]
         flow["step"] = "photo"
-        await msg.reply_text(
-            "Есть фото результата? Пришлите (можно несколько) или «нет».",
-            reply_markup=ForceReply(selective=True))
+        await _ask(msg, flow,
+                   "Есть фото результата? Пришлите (можно несколько) или «нет».",
+                   reply_markup=ForceReply(selective=True))
         return
 
     if step == "photo":
         if msg.photo:
             flow.setdefault("photos", []).append(msg.photo[-1].file_id)
-            await msg.reply_text(
-                f"Принял фото ({len(flow['photos'])}). Ещё? Пришлите или "
-                "напишите «готово».", reply_markup=ForceReply(selective=True))
+            await _ask(msg, flow,
+                       f"Принял фото ({len(flow['photos'])}). Ещё? Или «готово».",
+                       reply_markup=ForceReply(selective=True))
             return
         if text.lower() not in PHOTO_STOP:
-            await msg.reply_text("Пришлите фото или напишите «готово» / «нет».")
+            await _ask(msg, flow, "Пришлите фото или напишите «готово» / «нет».")
             return
         DONE_FLOW.pop(key, None)
+        await _cleanup(bot, msg.chat_id, flow)
         await _finish_done(bot, msg, flow)
 
 
@@ -938,7 +960,6 @@ async def _finish_done(bot, msg, flow):
     C.task_update(tid, status=C.STATUS_DONE, done_at=now_local(),
                   report_text=f"Сделано: {flow['what']}"[:800], report_done=True)
     await refresh_card(bot, tid)
-    await msg.reply_text("Принял, задача закрыта. Спасибо.")
 
     who = person["name"] if person else "?"
     mark = "✅ (с опозданием)" if late else "✅"
