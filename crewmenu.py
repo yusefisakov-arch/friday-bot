@@ -416,8 +416,9 @@ async def menu_button(update, context):
                     hour=fx["hour"], minute=fx["minute"],
                     due_hour=fx["due_hour"], due_minute=fx["due_minute"],
                     priority=fx.get("priority") or 1,
-                    kind="fixedit", edit_fid=fx["id"], editing="start")
-        await _open_dialog(context, query.message.chat_id, user_id)
+                    kind="fixedit", edit_fid=fx["id"], editing="start",
+                    message_id=query.message.message_id)   # правим то же сообщение
+        await _rerender(query, C.draft_get(user_id))
         await query.answer("Меняем время")
         return
 
@@ -444,10 +445,10 @@ async def menu_button(update, context):
 
     if action == "eclose":
         try:
-            await query.edit_message_text("Закрыто.")
+            await query.message.delete()   # закрыли — убираем весь диалог
         except Exception:
             pass
-        await query.answer()
+        await query.answer("Закрыто")
         return
 
     if action == "egrp":
@@ -535,16 +536,11 @@ async def menu_button(update, context):
         if not arg.isdigit():
             await query.answer()
             return
-        fx = C.fix_get(int(arg))
         title = C.fix_delete(int(arg))          # деактивирует задание
         C.cancel_open_for_fix(int(arg))         # снять уже поставленные экземпляры
-        await query.answer("Удалено")
+        await query.answer(f"Удалено: {title or '—'}", show_alert=False)
         try:
-            await query.edit_message_text(
-                f"🗑 Удалил постоянное задание: {title or '—'}",
-                reply_markup=M([[B("‹ К группе",
-                                   callback_data=f"new:egrp:{fx['person_id']}")]])
-                if fx else None)
+            await query.message.delete()
         except Exception:
             pass
         return
@@ -577,9 +573,9 @@ async def menu_button(update, context):
             await remove_card(context.bot, C.task_get(t["id"]))
         except Exception:
             pass
-        await query.answer("Снял")
+        await query.answer(f"Снял: {_short(t['title'], 40)}")
         try:
-            await query.edit_message_text(f"🚫 Снял задачу: {_short(t['title'], 50)}")
+            await query.message.delete()
         except Exception:
             pass
         return
@@ -670,9 +666,9 @@ async def menu_button(update, context):
             except Exception:
                 pass
             C.draft_clear(user_id)
-            await query.answer("Срок изменён")
+            await query.answer(f"Срок изменён: {C.fmt_due(cur)}")
             try:
-                await query.edit_message_text(f"✅ Срок изменён: {C.fmt_due(cur)}")
+                await query.message.delete()
             except Exception:
                 pass
             return
@@ -850,11 +846,11 @@ async def _create_fix(query, draft, user_id):
     if edit_fid:
         C.fix_update(edit_fid, hour=h, minute=mi, due_hour=dh, due_minute=dm)
         C.draft_clear(user_id)
-        await query.answer("Сохранено")
-        await query.edit_message_text(
-            f"✏️ Обновил постоянное задание для *{person['name']}*: {title}\n"
-            f"{_sched_label(draft)} в {h:02d}:{mi:02d}{due_txt}  `#f{edit_fid}`",
-            parse_mode=ParseMode.MARKDOWN)
+        await query.answer(f"Сохранено: {h:02d}:{mi:02d}{due_txt}")
+        try:
+            await query.message.delete()   # правка завершена — убираем диалог
+        except Exception:
+            pass
         return
     fid = C.fix_create(person["id"], title, h, mi, wd, due_hour=dh,
                        due_minute=dm, monthday=md, priority=draft.get("priority") or 1)
