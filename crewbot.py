@@ -1346,12 +1346,76 @@ async def _dedup_once():
     logger.info("Дубли постоянных заданий и задач схлопнуты")
 
 
+async def _wipe_chat(bot, chat_id, depth=400):
+    """Чистит чат: от свежего сообщения-маркера идём вниз и удаляем.
+    Бот удаляет свои сообщения всегда, чужие — только моложе 48 ч и если он
+    админ с правом удаления. Что удалить нельзя — пропускаем."""
+    try:
+        marker = await bot.send_message(chat_id=chat_id, text="🧹")
+    except Exception as e:
+        logger.warning("Чат %s недоступен для чистки: %s", chat_id, e)
+        return
+    for mid in range(marker.message_id, max(0, marker.message_id - depth), -1):
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+        await asyncio.sleep(0.04)
+
+
+async def _repost_open_cards(bot, chat_id):
+    """После чистки заново показывает активные задачи этого чата (карточки
+    исчезли вместе с историей) — чтобы кнопки снова работали."""
+    for t in C.tasks_open():
+        if t.get("chat_id") != chat_id or not t.get("message_id"):
+            continue
+        person = C.person_by_id(t["person_id"])
+        if person:
+            try:
+                await send_task_card(bot, t, person)
+            except Exception:
+                pass
+        await asyncio.sleep(0.2)
+
+
+async def _wipe_all(bot):
+    """Полная очистка всех известных чатов (группы людей + Штаб) с возвратом
+    активных карточек. Постоянные задания в БД не трогаются."""
+    chats = {p["chat_id"] for p in C.people_all() if p.get("chat_id")}
+    hq = hq_chat_id()
+    if hq:
+        chats.add(hq)
+    for chat in chats:
+        await _wipe_chat(bot, chat)
+        if chat != hq:
+            await _repost_open_cards(bot, chat)
+    logger.info("Полная очистка чатов выполнена (%d)", len(chats))
+
+
+async def _wipe_all_once(bot):
+    C.crew_init_db()
+    if C.state_get("wiped_v1"):
+        return
+    C.state_set("wiped_v1", "1")   # ставим до чистки: не зациклиться при рестарте
+    await _wipe_all(bot)
+
+
+async def clearall_cmd(update, context):
+    """/clearall — полностью очистить все чаты (Штаб и группы). Только владелец."""
+    if not is_allowed(update.effective_user.id):
+        return
+    C.crew_init_db()
+    await update.message.reply_text("Чищу все чаты…")
+    await _wipe_all(context.bot)
+
+
 async def crew_loop(bot):
     """Фоновый цикл контроля."""
     await asyncio.sleep(45)
     try:
         await _migrate_cards_once(bot)
         await _dedup_once()
+        await _wipe_all_once(bot)
     except Exception:
         logger.exception("Разовая уборка при старте не удалась")
     while True:
