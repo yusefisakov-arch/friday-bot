@@ -439,6 +439,17 @@ def cancel_open_for_fix(fix_id, keep_id=None):
         cur.close()
 
 
+def cancel_open_in_chat(chat_id):
+    """Снимает все открытые задачи в чате — после полной чистки, чтобы не
+    осталось «висящих» задач без карточки (иначе провалятся зря)."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE crew_tasks SET status='cancelled' "
+                    "WHERE chat_id=%s AND status = ANY(%s)",
+                    (chat_id, list(OPEN_STATUSES)))
+        cur.close()
+
+
 def cancel_open_siblings(person_id, title, keep_id):
     """Снимает открытые дубли той же задачи (тот же человек и название)."""
     with db_conn() as conn:

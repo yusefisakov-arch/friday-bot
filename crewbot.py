@@ -1255,13 +1255,8 @@ async def chase(bot):
         prio = task.get("priority") or 1
         C.task_update(task["id"], told_boss=True, status=C.STATUS_FAILED,
                       penalty=prio)
-        # провал: карточку оставляем с ❌ (сотрудник видит штраф), но открепляем
-        await refresh_card(bot, task["id"])
-        try:
-            await bot.unpin_chat_message(chat_id=task["chat_id"],
-                                         message_id=task["message_id"])
-        except Exception:
-            pass
+        # провал: карточку убираем из группы, инфо со штрафом уходит в Штаб
+        await remove_card(bot, C.task_get(task["id"]))
         await tell_boss(
             bot,
             f"❌ Провалено — *{person['name']}* +{prio} штрафной(ых)\n"
@@ -1346,7 +1341,7 @@ async def _dedup_once():
     logger.info("Дубли постоянных заданий и задач схлопнуты")
 
 
-async def _wipe_chat(bot, chat_id, depth=400):
+async def _wipe_chat(bot, chat_id, depth=1500):
     """Чистит чат: от свежего сообщения-маркера идём вниз и удаляем.
     Бот удаляет свои сообщения всегда, чужие — только моложе 48 ч и если он
     админ с правом удаления. Что удалить нельзя — пропускаем."""
@@ -1363,24 +1358,11 @@ async def _wipe_chat(bot, chat_id, depth=400):
         await asyncio.sleep(0.04)
 
 
-async def _repost_open_cards(bot, chat_id):
-    """После чистки заново показывает активные задачи этого чата (карточки
-    исчезли вместе с историей) — чтобы кнопки снова работали."""
-    for t in C.tasks_open():
-        if t.get("chat_id") != chat_id or not t.get("message_id"):
-            continue
-        person = C.person_by_id(t["person_id"])
-        if person:
-            try:
-                await send_task_card(bot, t, person)
-            except Exception:
-                pass
-        await asyncio.sleep(0.2)
-
-
 async def _wipe_all(bot):
-    """Полная очистка всех известных чатов (группы людей + Штаб) с возвратом
-    активных карточек. Постоянные задания в БД не трогаются."""
+    """Полная очистка всех известных чатов (группы людей + Штаб). Открытые
+    задачи снимаются (карточки удалены — чтобы не провалились зря). Новые
+    задачи придут по своему времени, скопом ничего не отправляем. Постоянные
+    задания в БД остаются и выйдут по расписанию."""
     chats = {p["chat_id"] for p in C.people_all() if p.get("chat_id")}
     hq = hq_chat_id()
     if hq:
@@ -1388,15 +1370,15 @@ async def _wipe_all(bot):
     for chat in chats:
         await _wipe_chat(bot, chat)
         if chat != hq:
-            await _repost_open_cards(bot, chat)
+            C.cancel_open_in_chat(chat)
     logger.info("Полная очистка чатов выполнена (%d)", len(chats))
 
 
 async def _wipe_all_once(bot):
     C.crew_init_db()
-    if C.state_get("wiped_v1"):
+    if C.state_get("wiped_v2"):
         return
-    C.state_set("wiped_v1", "1")   # ставим до чистки: не зациклиться при рестарте
+    C.state_set("wiped_v2", "1")   # ставим до чистки: не зациклиться при рестарте
     await _wipe_all(bot)
 
 
