@@ -502,24 +502,23 @@ def render_board():
 
 
 def render_weekly():
-    """Итоги недели по людям (за 7 дней)."""
+    """Итоги недели по людям (за 7 дней) — понятным списком с подписями."""
     people = C.people_all()
     if not people:
         return "📆 *Итоги недели*\n\nНикто не заведён."
-    rows, t_ok, t_late, t_fail, t_pen = [], 0, 0, 0, 0
+    blocks = ["📆 *Итоги недели* — за последние 7 дней"]
+    total_pen = 0
     for p in people:
         st = C.person_stats(p["id"], days=7)
-        t_ok += st["on_time"]
-        t_late += st["late"]
-        t_fail += st["failed"]
-        t_pen += st["penalty"]
-        pen = f" · 🚫 штраф {st['penalty']}" if st["penalty"] else ""
-        rows.append(f"👤 *{p['name']}*\n"
-                    f"  ✅ вовремя {st['on_time']} · ⏰ с опозданием {st['late']} · "
-                    f"❌ провалено {st['failed']}{pen}")
-    head = ["📆 *Итоги недели* (7 дней)", "",
-            f"Всего: ✅ {t_ok} · ⏰ {t_late} · ❌ {t_fail} · 🚫 штрафов {t_pen}", ""]
-    return "\n".join(head + rows)
+        total_pen += st["penalty"]
+        blocks.append(
+            f"👤 *{p['name']}*\n"
+            f"Сделано вовремя: {st['on_time']}\n"
+            f"Сделано с опозданием: {st['late']}\n"
+            f"Провалено: {st['failed']}\n"
+            f"Штрафные баллы: *{st['penalty']}*")
+    blocks.append(f"🚫 Всего штрафных баллов за неделю: *{total_pen}*")
+    return "\n\n".join(blocks)
 
 
 def _board_kb():
