@@ -154,8 +154,17 @@ async def tell_boss(bot, text):
     if not chat:
         logger.warning("Некому сообщить: ни Штаба, ни ALLOWED_USER_ID")
         return
+    # К каждому сообщению в Штаб прикрепляем нижнюю панель — так она всегда
+    # на месте и её не нужно вызывать /menu (переустанавливается сама).
+    kb = None
     try:
-        await bot.send_message(chat_id=chat, text=text, parse_mode=ParseMode.MARKDOWN)
+        from crewmenu import _panel_kb
+        kb = _panel_kb()
+    except Exception:
+        pass
+    try:
+        await bot.send_message(chat_id=chat, text=text, parse_mode=ParseMode.MARKDOWN,
+                               reply_markup=kb)
     except Exception as e:
         logger.error(f"Не смог написать в Штаб: {e}")
 
