@@ -297,10 +297,10 @@ async def menu_cmd(update, context):
 
 
 async def _hq_view(context, msg, key, text, inline=None):
-    """Показывает инфо-экран в одном экземпляре: удаляет прошлый такой же и
-    само нажатие-триггер — чтобы Штаб не засорялся историей просмотров."""
+    """Показывает инфо-экран в ОДНОМ экземпляре на все виды: нажал другую
+    кнопку — прошлый отчёт исчезает. И само нажатие-триггер убираем."""
     chat_id = msg.chat_id
-    prev = C.state_get(f"view_{key}")
+    prev = C.state_get("hqview")   # единая ячейка для доски/плана/итогов
     if prev:
         try:
             await context.bot.delete_message(chat_id, int(prev))
@@ -309,7 +309,7 @@ async def _hq_view(context, msg, key, text, inline=None):
     sent = await context.bot.send_message(
         chat_id, text, parse_mode=ParseMode.MARKDOWN,
         reply_markup=inline)
-    C.state_set(f"view_{key}", sent.message_id)
+    C.state_set("hqview", sent.message_id)
     try:
         await msg.delete()   # убрать синюю кнопку-нажатие
     except Exception:

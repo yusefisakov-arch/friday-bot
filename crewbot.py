@@ -626,8 +626,11 @@ def _detail_kb(days):
 
 
 def render_plan_day():
-    """План на день — список задач на сегодня."""
-    return render_tasks(C.tasks_for_day(), "🌅 План на день")
+    """План на день — только то, что ещё предстоит (открытые + отложенные)."""
+    tasks = [t for t in C.tasks_for_day()
+             if t["status"] in C.OPEN_STATUSES
+             or (not t.get("message_id") and t.get("send_at"))]
+    return render_tasks(tasks, "🌅 План на день")
 
 
 def render_stats_day():
