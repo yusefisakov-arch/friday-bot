@@ -75,7 +75,7 @@ DONE_FLOW = {}
 # --- вспомогательное ------------------------------------------------------------
 
 def task_buttons(task):
-    if task["status"] in (C.STATUS_DONE, C.STATUS_CANCELLED):
+    if task["status"] in (C.STATUS_DONE, C.STATUS_CANCELLED, C.STATUS_FAILED):
         return None
     row = [
         InlineKeyboardButton("✅ Готово", callback_data=f"crew:done:{task['id']}"),
@@ -1266,8 +1266,13 @@ async def chase(bot):
         prio = task.get("priority") or 1
         C.task_update(task["id"], told_boss=True, status=C.STATUS_FAILED,
                       penalty=prio)
-        # провал: карточку убираем из группы, инфо со штрафом уходит в Штаб
-        await remove_card(bot, C.task_get(task["id"]))
+        # провал: карточка остаётся, но показывает «ПРОВАЛЕНО + штраф»; откреп
+        await refresh_card(bot, task["id"])
+        try:
+            await bot.unpin_chat_message(chat_id=task["chat_id"],
+                                         message_id=task["message_id"])
+        except Exception:
+            pass
         await tell_boss(
             bot,
             f"❌ Провалено — *{person['name']}* +{prio} штрафной(ых)\n"

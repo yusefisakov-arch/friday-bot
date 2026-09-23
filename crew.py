@@ -914,8 +914,7 @@ def task_card(task, person):
         lines.append(f"_проблема: {task['note'] or 'без пояснения'}_")
     elif task["status"] == STATUS_FAILED:
         p = task.get("penalty") or 0
-        lines.append(f"_срок прошёл — штраф {p} балл(а)_" if p
-                     else "_срок прошёл, ответа нет_")
+        lines.append(f"❌ *ЗАДАНИЕ ПРОВАЛЕНО* · штраф {p} балл(ов)")
 
     lines.append(f"`#{task['id']}`")
     return "\n".join(lines)
