@@ -77,11 +77,9 @@ DONE_FLOW = {}
 def task_buttons(task):
     if task["status"] in (C.STATUS_DONE, C.STATUS_CANCELLED):
         return None
-    row = []
-    if task["status"] == C.STATUS_NEW:
-        row.append(InlineKeyboardButton("Взял", callback_data=f"crew:take:{task['id']}"))
-    row.append(InlineKeyboardButton("Готово", callback_data=f"crew:done:{task['id']}"))
-    row.append(InlineKeyboardButton("Проблема", callback_data=f"crew:problem:{task['id']}"))
+    row = [
+        InlineKeyboardButton("✅ Готово", callback_data=f"crew:done:{task['id']}"),
+        InlineKeyboardButton("⚠️ Проблема", callback_data=f"crew:problem:{task['id']}")]
     second = [InlineKeyboardButton("⏳ Не успеваю", callback_data=f"crew:more:{task['id']}")]
     return InlineKeyboardMarkup([row, second])
 
@@ -384,13 +382,15 @@ STATE_WORD = {
 
 def _task_line(t, now):
     """Одна строка задачи: статус — суть — когда. Формат одинаков везде."""
+    prio = t.get("priority") or 1
+    tag = f"{C.PRIORITY_ICON.get(prio, '')} " if prio > 1 else ""
     if not t.get("message_id") and t.get("send_at"):
-        return f"⏳ отложена · {_short(t['title'], 45)} — уйдёт {C.fmt_due(t['send_at'])}"
+        return f"⏳ отложена · {tag}{_short(t['title'], 45)} — уйдёт {C.fmt_due(t['send_at'])}"
     when = C.fmt_due(t["due_at"])
     if t["due_at"] and t["status"] in C.OPEN_STATUSES \
             and t["due_at"].astimezone(now.tzinfo) < now:
         when = f"просрочка {C.fmt_overdue(t['due_at'])}"
-    return f"{STATE_WORD.get(t['status'], '•')} · {_short(t['title'], 45)} — {when}"
+    return f"{STATE_WORD.get(t['status'], '•')} · {tag}{_short(t['title'], 45)} — {when}"
 
 
 def render_tasks(tasks, title):
@@ -465,7 +465,9 @@ def render_board():
                 when = f"просрочка {C.fmt_overdue(t['due_at'])}"
             else:
                 when = C.fmt_due(t["due_at"])
-            lines.append(f"👤 *{who}* · {when}  `#{t['id']}`\n{t['title']}")
+            prio = t.get("priority") or 1
+            tag = f"{C.PRIORITY_ICON.get(prio, '')} " if prio > 1 else ""
+            lines.append(f"👤 *{who}* · {when}  `#{t['id']}`\n{tag}{t['title']}")
         blocks.append("\n".join(lines))
     return "\n\n➖➖➖➖➖\n\n".join(blocks)
 
@@ -475,18 +477,19 @@ def render_weekly():
     people = C.people_all()
     if not people:
         return "📆 *Итоги недели*\n\nНикто не заведён."
-    rows, t_ok, t_late, t_fail, t_open = [], 0, 0, 0, 0
+    rows, t_ok, t_late, t_fail, t_pen = [], 0, 0, 0, 0
     for p in people:
         st = C.person_stats(p["id"], days=7)
         t_ok += st["on_time"]
         t_late += st["late"]
         t_fail += st["failed"]
-        t_open += st["open"]
+        t_pen += st["penalty"]
+        pen = f" · 🚫 штраф {st['penalty']}" if st["penalty"] else ""
         rows.append(f"👤 *{p['name']}*\n"
                     f"  ✅ вовремя {st['on_time']} · ⏰ с опозданием {st['late']} · "
-                    f"❌ провалено {st['failed']} · 🔧 открыто {st['open']}")
+                    f"❌ провалено {st['failed']}{pen}")
     head = ["📆 *Итоги недели* (7 дней)", "",
-            f"Всего: ✅ {t_ok} · ⏰ {t_late} · ❌ {t_fail} · 🔧 {t_open}", ""]
+            f"Всего: ✅ {t_ok} · ⏰ {t_late} · ❌ {t_fail} · 🚫 штрафов {t_pen}", ""]
     return "\n".join(head + rows)
 
 
@@ -643,10 +646,7 @@ async def crew_button(update, context):
                       tg_user_id=user.id, username=user.username)
         person = C.person_by_id(task["person_id"])
 
-    if action == "take":
-        C.task_update(tid, status=C.STATUS_TAKEN, taken_at=now_local())
-        await query.answer("Записал: взял в работу")
-    elif action == "done":
+    if action == "done":
         # «Готово» ведёт короткий отчёт: что сделал → фото → закрыть и в Штаб.
         flow = {"tid": tid, "step": "what", "what": "", "photos": [], "trash": []}
         DONE_FLOW[(query.message.chat_id, user.id)] = flow
@@ -1201,7 +1201,8 @@ async def spawn_fixed(bot):
 
         # прошлый незакрытый экземпляр этого задания снимаем — не копим дубли
         C.cancel_open_for_fix(fx["id"])
-        tid = C.task_create(person["id"], fx["title"], due, fix_id=fx["id"])
+        tid = C.task_create(person["id"], fx["title"], due, fix_id=fx["id"],
+                            priority=fx.get("priority") or 1)
         C.fix_mark_spawned(fx["id"], today)
         try:
             await send_task_card(bot, C.task_get(tid), person)
@@ -1212,70 +1213,31 @@ async def spawn_fixed(bot):
 
 
 async def chase(bot):
-    """Сторож: спрашивает исполнителя, а когда ответа нет — сообщает вам.
-
-    Решение принимает crew.decide, здесь только исполнение: что сказать,
-    кому и куда. Так правила надзора проверяются отдельно от Telegram.
-    """
+    """Сторож без напоминаний: молча ждёт срок. Не закрыл и не заявил
+    проблему — провал: штраф по приоритету и сообщение в Штаб. Решение
+    принимает crew.decide, здесь только исполнение."""
     now = now_local()
 
     for task in C.tasks_open():
         # Отложенная задача ещё не доставлена (нет карточки) — не трогаем.
         if not task.get("message_id"):
             continue
-        action = C.decide(task, now)
-        if not action:
+        if C.decide(task, now) != C.ACT_FAIL:
             continue
 
         person = C.person_by_id(task["person_id"])
         if not person:
             continue
-        chat = task["chat_id"] or person["chat_id"]
-        who = mention(person)
-        title = _short(task["title"])
-        reply_to = task.get("message_id")
-
-        async def say(text):
-            # Отвечаем на карточку: напоминание висит под ней, тап ведёт к
-            # кнопкам, а чат не засоряется полным текстом задачи.
-            try:
-                await bot.send_message(chat_id=chat, text=text,
-                                       parse_mode=ParseMode.MARKDOWN,
-                                       reply_to_message_id=reply_to,
-                                       allow_sending_without_reply=True)
-            except Exception as e:
-                logger.error(f"Не отправилось в группу {chat}: {e}")
-
-        if action == C.ACT_NUDGE_TAKE:
-            C.task_update(task["id"], nudged_take=True)
-            await say(f"{who}, «{title}» ждёт — нажмите «Взял».")
-
-        elif action == C.ACT_ESCALATE_TAKE:
-            C.task_update(task["id"], told_boss=True)
-            await tell_boss(bot,
-                            f"🕐 *{person['name']}* не принял задачу за час\n"
-                            f"{task['title']} · срок {C.fmt_due(task['due_at'])}  "
-                            f"`#{task['id']}`")
-
-        elif action == C.ACT_WARN_DUE:
-            C.task_update(task["id"], warned_due=True)
-            await say(f"{who}, «{title}» — час до срока.")
-
-        elif action == C.ACT_ASK_DUE:
-            C.task_update(task["id"], asked_due=True)
-            await say(f"{who}, «{title}» — срок прошёл. "
-                      f"Нажмите «Готово» или «Проблема».")
-
-        elif action == C.ACT_FAIL:
-            C.task_update(task["id"], told_boss=True, status=C.STATUS_FAILED)
-            await refresh_card(bot, task["id"])
-            await tell_boss(
-                bot,
-                f"❌ Тормозит *{person['name']}*\n"
-                f"{task['title']}\n"
-                f"Просрочка {C.fmt_overdue(task['due_at'])}, ответа нет.  "
-                f"`#{task['id']}`")
-
+        prio = task.get("priority") or 1
+        C.task_update(task["id"], told_boss=True, status=C.STATUS_FAILED,
+                      penalty=prio)
+        await refresh_card(bot, task["id"])
+        await tell_boss(
+            bot,
+            f"❌ Провалено — *{person['name']}* +{prio} штрафной(ых)\n"
+            f"{task['title']}\n"
+            f"Срок был {C.fmt_due(task['due_at'])}, ответа нет.  "
+            f"`#{task['id']}`")
         await asyncio.sleep(0.3)
 
     # Ждём отчёт, а срок отчёта прошёл — сообщаем владельцу (один раз).

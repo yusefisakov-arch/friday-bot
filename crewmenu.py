@@ -158,14 +158,17 @@ def _screen(draft):
     if step == "confirm":
         send = draft.get("send_at")
         due = draft.get("due_at")
+        prio = draft.get("priority") or 1
         send_txt = C.fmt_due(send) if send else "сейчас"
         text = (f"*{name}*\n{title}\n\n"
-                f"📤 Отправить: {send_txt}\n🎯 Срок: {C.fmt_due(due)}")
+                f"📤 Отправить: {send_txt}\n🎯 Срок: {C.fmt_due(due)}\n"
+                f"⚑ Важность: {C.PRIORITY_LABEL[prio]} (провал −{prio})")
         if due and due <= now_local():
             text += "\n\n⚠️ срок уже прошёл"
         return text, M([
             [B("🕐 Когда отправить", callback_data="new:setsend"),
              B("🎯 Срок", callback_data="new:setdue")],
+            [B(f"⚑ Важность: {C.PRIORITY_LABEL[prio]}", callback_data="new:prio")],
             [B("✅ Разовая", callback_data="new:once"),
              B("♻️ Постоянная", callback_data="new:fix")],
             [B("Отмена", callback_data="new:cancel")]])
@@ -235,11 +238,14 @@ def _screen(draft):
     if step == "final":
         h, mi = draft.get("hour") or 0, draft.get("minute") or 0
         dh, dm = draft.get("due_hour"), draft.get("due_minute")
+        prio = draft.get("priority") or 1
         due_txt = f", сделать до {dh:02d}:{dm or 0:02d}" if dh is not None else ""
         head = "Изменить задание" if draft.get("edit_fid") else "Постоянное задание"
         save = "Сохранить" if draft.get("edit_fid") else "Поставить"
         return (f"*{head}*\n\n*{name}*\n{title}\n"
-                f"{_sched_label(draft)}, ставить в {h:02d}:{mi:02d}{due_txt}", M([
+                f"{_sched_label(draft)}, ставить в {h:02d}:{mi:02d}{due_txt}\n"
+                f"⚑ Важность: {C.PRIORITY_LABEL[prio]} (провал −{prio})", M([
+                    [B(f"⚑ Важность: {C.PRIORITY_LABEL[prio]}", callback_data="new:prio")],
                     [B(save, callback_data="new:create"),
                      B("Отмена", callback_data="new:cancel")]]))
 
@@ -366,6 +372,7 @@ async def menu_button(update, context):
                     weekdays=fx["weekdays"], monthday=fx.get("monthday"),
                     hour=fx["hour"], minute=fx["minute"],
                     due_hour=fx["due_hour"], due_minute=fx["due_minute"],
+                    priority=fx.get("priority") or 1,
                     kind="fixedit", edit_fid=fx["id"], editing="start")
         await _open_dialog(context, query.message.chat_id, user_id)
         await query.answer("Меняем время")
@@ -509,6 +516,13 @@ async def menu_button(update, context):
             prev = BACK.get(draft["step"])
             if prev:
                 C.draft_set(user_id, step=prev)
+        await _rerender(query, C.draft_get(user_id))
+        return
+
+    if action == "prio":
+        # цикл важности: обычная → важная → приоритетная → обычная
+        cur = draft.get("priority") or 1
+        C.draft_set(user_id, priority=(cur % 3) + 1)
         await _rerender(query, C.draft_get(user_id))
         return
 
@@ -703,7 +717,9 @@ async def _create_once(query, context, draft, user_id):
         await query.edit_message_text("Диалог сбился. Начните заново: /menu")
         return
     scheduled = bool(send and send > now_local())
-    tid = C.task_create(person["id"], title, due, send_at=send if scheduled else None)
+    tid = C.task_create(person["id"], title, due,
+                        send_at=send if scheduled else None,
+                        priority=draft.get("priority") or 1)
     C.draft_clear(user_id)
     await query.answer("Готово")
 
@@ -750,7 +766,7 @@ async def _create_fix(query, draft, user_id):
             parse_mode=ParseMode.MARKDOWN)
         return
     fid = C.fix_create(person["id"], title, h, mi, wd, due_hour=dh,
-                       due_minute=dm, monthday=md)
+                       due_minute=dm, monthday=md, priority=draft.get("priority") or 1)
     C.draft_clear(user_id)
     await query.answer("Готово")
     await query.edit_message_text(

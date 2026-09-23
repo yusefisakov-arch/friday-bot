@@ -37,7 +37,7 @@ ALL_STEPS = [
 
 def _draft(step):
     return {"step": step, "person_id": None, "title": "свести кассу",
-            "due_at": None, "send_at": None, "editing": "due",
+            "due_at": None, "send_at": None, "editing": "due", "priority": 1,
             "week_shift": 0, "weekdays": "24", "monthday": 15,
             "hour": 9, "minute": 0, "due_hour": 10, "due_minute": 0}
 
@@ -74,12 +74,35 @@ def test_min_grid_quarters():
             assert f"new:{prefix}:{m}" in codes, f"{step}: нет минут {m}"
 
 
-def test_confirm_has_send_and_due():
-    """Хаб разовой: можно задать и отправку, и срок."""
+def test_confirm_has_send_due_priority():
+    """Хаб разовой: отправка, срок, важность, тип."""
     kb = CM._screen(_draft("confirm"))[1].inline_keyboard
     codes = {b.callback_data for row in kb for b in row}
-    for need in ("new:setsend", "new:setdue", "new:once", "new:fix"):
+    for need in ("new:setsend", "new:setdue", "new:prio", "new:once", "new:fix"):
         assert need in codes, f"нет {need}"
+
+
+def test_no_take_button_on_card():
+    """На карточке нет кнопки «Взял» — только Готово/Проблема/Не успеваю."""
+    kb = crewbot.task_buttons({"id": 5, "status": "new"}).inline_keyboard
+    codes = {b.callback_data for row in kb for b in row}
+    assert not any("take" in c for c in codes), "кнопка Взял должна быть убрана"
+    assert "crew:done:5" in codes and "crew:problem:5" in codes
+
+
+def test_decide_fail_only_after_due():
+    """decide возвращает FAIL, когда срок прошёл и задача открыта; иначе None."""
+    import crew
+    base = now_local()
+    overdue = {"status": "new", "due_at": base - timedelta(hours=1),
+               "told_boss": False}
+    assert crew.decide(overdue, base) == crew.ACT_FAIL
+    fresh = {"status": "new", "due_at": base + timedelta(hours=1),
+             "told_boss": False}
+    assert crew.decide(fresh, base) is None
+    problem = {"status": "problem", "due_at": base - timedelta(hours=1),
+               "told_boss": False}
+    assert crew.decide(problem, base) is None  # проблема заявлена — не провал
 
 
 def test_typed_time_is_parsed():

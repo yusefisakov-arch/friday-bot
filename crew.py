@@ -17,15 +17,17 @@ from core import db_conn, now_local, LOCAL_TZ
 logger = logging.getLogger(__name__)
 
 # --- сроки контроля -------------------------------------------------------------
-# Числа подобраны так, чтобы бот не дёргал по пустякам: полчаса на то, чтобы
-# просто увидеть задачу, час — прежде чем беспокоить вас.
-TAKE_NUDGE_MIN = 30        # не нажал «Взял» — напоминаем в его группе
-TAKE_ESCALATE_MIN = 60     # так и не нажал — сообщаем вам
-PRE_DUE_MIN = 60           # за час до срока — предупреждение
-DUE_GRACE_MIN = 60         # столько ждём после срока, прежде чем сообщить вам
+# Бот не дёргает сотрудников напоминаниями: даётся срок, а по его истечении,
+# если задача не закрыта и не заявлена проблема, начисляется штраф и сообщается
+# вам. DUE_GRACE_MIN — небольшой запас после срока перед начислением.
+DUE_GRACE_MIN = 10         # запас после срока, прежде чем засчитать провал
 MORNING_REPORT_HOUR = 7    # час утреннего плана на день
 EVENING_REPORT_HOUR = 20   # час вечерней сводки
 WEEKLY_REPORT_HOUR = 7     # час недельной сводки утром в понедельник
+
+# Приоритет задачи и штраф за провал: обычная 1, важная 2, приоритетная 3.
+PRIORITY_LABEL = {1: "Обычная", 2: "Важная", 3: "Приоритетная"}
+PRIORITY_ICON = {1: "▫️", 2: "❗", 3: "‼️"}
 
 STATUS_NEW = "new"
 STATUS_TAKEN = "taken"
@@ -145,6 +147,14 @@ def crew_init_db():
         cur.execute("ALTER TABLE crew_draft ADD COLUMN IF NOT EXISTS send_at TIMESTAMPTZ")
         cur.execute("ALTER TABLE crew_draft ADD COLUMN IF NOT EXISTS editing TEXT")
         cur.execute("ALTER TABLE crew_draft ADD COLUMN IF NOT EXISTS edit_tid INT")
+        # Приоритет (1 обычная / 2 важная / 3 приоритетная) и штраф за провал.
+        cur.execute("ALTER TABLE crew_tasks ADD COLUMN IF NOT EXISTS "
+                    "priority INT NOT NULL DEFAULT 1")
+        cur.execute("ALTER TABLE crew_tasks ADD COLUMN IF NOT EXISTS "
+                    "penalty INT NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE crew_fix ADD COLUMN IF NOT EXISTS "
+                    "priority INT NOT NULL DEFAULT 1")
+        cur.execute("ALTER TABLE crew_draft ADD COLUMN IF NOT EXISTS priority INT")
         cur.close()
 
 
@@ -249,16 +259,16 @@ TASK_KEYS = ("id", "person_id", "title", "due_at", "status", "note", "fix_id",
              "chat_id", "message_id", "created_at", "taken_at", "done_at",
              "nudged_take", "warned_due", "asked_due", "told_boss",
              "boss_note", "report_due", "report_text", "report_done",
-             "report_nagged", "ext_due", "send_at")
+             "report_nagged", "ext_due", "send_at", "priority", "penalty")
 TASK_COLS = ", ".join(TASK_KEYS)
 
 
-def task_create(person_id, title, due_at, fix_id=None, send_at=None):
+def task_create(person_id, title, due_at, fix_id=None, send_at=None, priority=1):
     with db_conn() as conn:
         cur = conn.cursor()
         cur.execute("INSERT INTO crew_tasks (person_id, title, due_at, fix_id, "
-                    "send_at) VALUES (%s,%s,%s,%s,%s) RETURNING id",
-                    (person_id, title, due_at, fix_id, send_at))
+                    "send_at, priority) VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+                    (person_id, title, due_at, fix_id, send_at, priority))
         tid = cur.fetchone()[0]
         cur.close()
     return tid
@@ -365,22 +375,24 @@ def person_stats(person_id, days=30):
             "        (due_at IS NULL OR done_at <= due_at)), "
             "       count(*) FILTER (WHERE status='done' AND done_at > due_at), "
             "       count(*) FILTER (WHERE status='failed'), "
-            "       count(*) FILTER (WHERE status = ANY(%s)) "
+            "       count(*) FILTER (WHERE status = ANY(%s)), "
+            "       COALESCE(sum(penalty), 0) "
             "FROM crew_tasks WHERE person_id=%s AND created_at > now() - %s::interval",
             (list(OPEN_STATUSES), person_id, f"{days} days"))
         row = cur.fetchone()
         cur.close()
     return {"on_time": row[0] or 0, "late": row[1] or 0,
-            "failed": row[2] or 0, "open": row[3] or 0}
+            "failed": row[2] or 0, "open": row[3] or 0, "penalty": row[4] or 0}
 
 
 FIX_KEYS = ("id", "person_id", "title", "hour", "minute", "weekdays",
-            "due_hour", "due_minute", "active", "last_spawn", "monthday")
+            "due_hour", "due_minute", "active", "last_spawn", "monthday",
+            "priority")
 FIX_COLS = ", ".join(FIX_KEYS)
 
 
 def fix_create(person_id, title, hour, minute, weekdays, due_hour=None,
-               due_minute=None, monthday=None):
+               due_minute=None, monthday=None, priority=1):
     # Если время постановки на сегодня уже прошло — считаем сегодня
     # обработанным, чтобы задание не выскочило сразу, а стартовало со
     # следующего подходящего дня. Создали заранее (до времени) — поставится сегодня.
@@ -397,17 +409,17 @@ def fix_create(person_id, title, hour, minute, weekdays, due_hour=None,
         if row:
             fid = row[0]
             cur.execute("UPDATE crew_fix SET title=%s, hour=%s, minute=%s, "
-                        "weekdays=%s, due_hour=%s, due_minute=%s, monthday=%s "
-                        "WHERE id=%s",
+                        "weekdays=%s, due_hour=%s, due_minute=%s, monthday=%s, "
+                        "priority=%s WHERE id=%s",
                         (title, hour, minute, weekdays, due_hour, due_minute,
-                         monthday, fid))
+                         monthday, priority, fid))
         else:
             cur.execute(
                 "INSERT INTO crew_fix (person_id, title, hour, minute, weekdays, "
-                "due_hour, due_minute, monthday, last_spawn) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                "due_hour, due_minute, monthday, last_spawn, priority) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
                 (person_id, title, hour, minute, weekdays, due_hour, due_minute,
-                 monthday, last_spawn))
+                 monthday, last_spawn, priority))
             fid = cur.fetchone()[0]
         cur.close()
     return fid
@@ -530,7 +542,7 @@ def fix_delete(fix_id):
 DRAFT_KEYS = ("user_id", "chat_id", "message_id", "person_id", "title", "due_at",
               "pick_date", "week_shift", "kind", "weekdays", "hour", "minute",
               "due_hour", "due_minute", "step", "monthday", "edit_fid",
-              "send_at", "editing", "edit_tid")
+              "send_at", "editing", "edit_tid", "priority")
 DRAFT_COLS = ", ".join(DRAFT_KEYS)
 DRAFT_STALE_MIN = 30
 
@@ -566,7 +578,8 @@ def draft_reset(user_id, chat_id, step):
               title=NULL, due_at=NULL, pick_date=NULL, week_shift=0, kind=NULL,
               weekdays=NULL, hour=NULL, minute=NULL, due_hour=NULL,
               due_minute=NULL, monthday=NULL, edit_fid=NULL, send_at=NULL,
-              editing=NULL, edit_tid=NULL, step=EXCLUDED.step, updated_at=now()
+              editing=NULL, edit_tid=NULL, priority=NULL,
+              step=EXCLUDED.step, updated_at=now()
         """, (user_id, chat_id, step))
         cur.close()
 
@@ -872,22 +885,26 @@ def fmt_overdue(due):
 
 def task_card(task, person):
     icon = STATUS_ICON.get(task["status"], "•")
-    lines = [f"{icon} *{task['title']}*"]
+    prio = task.get("priority") or 1
+    tag = f"{PRIORITY_ICON.get(prio, '')} " if prio > 1 else ""
+    lines = [f"{icon} {tag}*{task['title']}*"]
 
     who = person["name"]
     if person.get("username"):
         who += f" (@{person['username']})"
     lines.append(f"Кому: {who} · Срок: {fmt_due(task['due_at'])}")
+    if prio > 1:
+        lines.append(f"Важность: {PRIORITY_LABEL[prio]} · провал −{prio} балла")
 
-    if task["status"] == STATUS_TAKEN:
-        lines.append("_взял в работу_")
-    elif task["status"] == STATUS_DONE:
+    if task["status"] == STATUS_DONE:
         late = (task["due_at"] and task["done_at"] and task["done_at"] > task["due_at"])
         lines.append("_сделано с опозданием_" if late else "_сделано вовремя_")
     elif task["status"] == STATUS_PROBLEM:
         lines.append(f"_проблема: {task['note'] or 'без пояснения'}_")
     elif task["status"] == STATUS_FAILED:
-        lines.append("_срок прошёл, ответа нет_")
+        p = task.get("penalty") or 0
+        lines.append(f"_срок прошёл — штраф {p} балл(а)_" if p
+                     else "_срок прошёл, ответа нет_")
 
     lines.append(f"`#{task['id']}`")
     return "\n".join(lines)
@@ -897,41 +914,24 @@ def task_card(task, person):
 # Вынесены отдельной функцией сознательно: это и есть вся логика надзора,
 # её надо уметь проверить, не поднимая ни базу, ни Telegram.
 
-ACT_NUDGE_TAKE = "nudge_take"        # напомнить в группе: задача не принята
-ACT_ESCALATE_TAKE = "escalate_take"  # сказать вам: не принял за час
-ACT_WARN_DUE = "warn_due"            # предупредить: час до срока
-ACT_ASK_DUE = "ask_due"              # срок прошёл, спросить что по ней
-ACT_FAIL = "fail"                    # тишина после срока, сказать вам
+ACT_FAIL = "fail"   # срок прошёл, задача не закрыта и без заявленной проблемы
 
 
 def decide(task, now=None):
-    """Что бот должен сделать с задачей прямо сейчас. None — ничего.
+    """Единственное действие: провал по сроку. Никаких напоминаний сотруднику.
 
-    Порядок важен: сначала то, что касается принятия задачи, потом срок.
-    Каждое действие делается один раз — за этим следят отметки в задаче,
-    поэтому функция и смотрит на них, а не только на часы.
+    Сотрудник получает задачу со сроком. Заявил проблему («Проблема») или
+    закрыл («Готово») — вопросов нет. Промолчал до срока — провал: начисляем
+    штраф и сообщаем в Штаб. Проблему считаем ответом — за неё штрафа нет.
     """
     now = now or now_local()
-    if task["status"] not in OPEN_STATUSES:
-        return None
-
-    age_min = (now - task["created_at"]).total_seconds() / 60
-
-    if task["status"] == STATUS_NEW:
-        if not task["nudged_take"] and age_min >= TAKE_NUDGE_MIN:
-            return ACT_NUDGE_TAKE
-        if not task["told_boss"] and age_min >= TAKE_ESCALATE_MIN:
-            return ACT_ESCALATE_TAKE
-
+    if task["status"] not in (STATUS_NEW, STATUS_TAKEN):
+        return None  # done/problem/failed/cancelled — не трогаем
     if not task["due_at"]:
         return None
-
+    if task["told_boss"]:
+        return None
     left_min = (task["due_at"] - now).total_seconds() / 60
-
-    if not task["warned_due"] and 0 < left_min <= PRE_DUE_MIN:
-        return ACT_WARN_DUE
-    if not task["asked_due"] and left_min <= 0:
-        return ACT_ASK_DUE
-    if not task["told_boss"] and -left_min >= DUE_GRACE_MIN:
+    if -left_min >= DUE_GRACE_MIN:
         return ACT_FAIL
     return None
