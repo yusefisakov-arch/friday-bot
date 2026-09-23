@@ -155,6 +155,8 @@ def crew_init_db():
         cur.execute("ALTER TABLE crew_fix ADD COLUMN IF NOT EXISTS "
                     "priority INT NOT NULL DEFAULT 1")
         cur.execute("ALTER TABLE crew_draft ADD COLUMN IF NOT EXISTS priority INT")
+        # Причина, которую сотрудник пишет при «Не успеваю».
+        cur.execute("ALTER TABLE crew_tasks ADD COLUMN IF NOT EXISTS ext_reason TEXT")
         cur.close()
 
 
@@ -259,7 +261,8 @@ TASK_KEYS = ("id", "person_id", "title", "due_at", "status", "note", "fix_id",
              "chat_id", "message_id", "created_at", "taken_at", "done_at",
              "nudged_take", "warned_due", "asked_due", "told_boss",
              "boss_note", "report_due", "report_text", "report_done",
-             "report_nagged", "ext_due", "send_at", "priority", "penalty")
+             "report_nagged", "ext_due", "send_at", "priority", "penalty",
+             "ext_reason")
 TASK_COLS = ", ".join(TASK_KEYS)
 
 
@@ -347,6 +350,20 @@ def tasks_overdue():
         cur.execute(f"SELECT {TASK_COLS} FROM crew_tasks "
                     "WHERE status = ANY(%s) AND due_at < now() "
                     "ORDER BY due_at", (list(OPEN_STATUSES),))
+        rows = cur.fetchall()
+        cur.close()
+    return [dict(zip(TASK_KEYS, r)) for r in rows]
+
+
+def tasks_for_person_period(person_id, days=1):
+    """Задачи человека за период (по дате создания) — для подробного отчёта."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(f"SELECT {TASK_COLS} FROM crew_tasks "
+                    "WHERE person_id=%s AND created_at > now() - %s::interval "
+                    "AND status <> 'cancelled' "
+                    "ORDER BY COALESCE(due_at, created_at)",
+                    (person_id, f"{days} days"))
         rows = cur.fetchall()
         cur.close()
     return [dict(zip(TASK_KEYS, r)) for r in rows]

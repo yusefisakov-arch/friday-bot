@@ -19,7 +19,7 @@ from core import is_allowed, now_local, LOCAL_TZ
 import crew as C
 from crewbot import send_task_card, refresh_card, remove_card, render_board, \
     _board_kb, render_tasks, render_weekly, render_plan_day, render_stats_day, \
-    render_plan_week
+    render_plan_week, _stats_kb
 
 # Метки нижней клавиатуры-панели (кнопки шлют эти тексты).
 PANEL_BOARD = "📋 Доска"
@@ -330,9 +330,9 @@ async def handle_panel(update, context):
     views = {
         PANEL_BOARD: ("board", render_board, _board_kb()),
         PANEL_PLAN_DAY: ("plan_day", render_plan_day, None),
-        PANEL_STATS_DAY: ("stats_day", render_stats_day, None),
+        PANEL_STATS_DAY: ("stats_day", render_stats_day, _stats_kb(1)),
         PANEL_PLAN_WEEK: ("plan_week", render_plan_week, None),
-        PANEL_STATS_WEEK: ("stats_week", render_weekly, None),
+        PANEL_STATS_WEEK: ("stats_week", render_weekly, _stats_kb(7)),
     }
     if text in views:
         key, render, inline = views[text]
@@ -455,24 +455,32 @@ async def menu_button(update, context):
             await query.answer()
             return
         p = C.person_by_id(int(arg))
+        name = p["name"] if p else "?"
+        fixes = C.fix_all(person_id=int(arg))
         tasks = C.tasks_open(int(arg))
-        if not tasks:
-            try:
-                await query.edit_message_text(
-                    f"У *{p['name'] if p else '?'}* нет открытых задач.",
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=M([[B("‹ Назад", callback_data="new:eback")]]))
-            except Exception:
-                pass
-            await query.answer()
-            return
-        rows = [[B(f"{C.STATUS_ICON.get(t['status'], '•')} {_short(t['title'], 40)}",
-                   callback_data=f"new:etask:{t['id']}")] for t in tasks]
+        rows, lines = [], [f"🕐 *Расписание — {name}*"]
+        if fixes:
+            lines.append("\n*Постоянные (по времени):*")
+            for f in fixes:
+                due_txt = (f" → до {f['due_hour']:02d}:{f['due_minute'] or 0:02d}"
+                           if f["due_hour"] is not None else "")
+                lines.append(f"🔁 {_short(f['title'], 35)} — {_sched_label(f)} "
+                             f"в {f['hour']:02d}:{f['minute']:02d}{due_txt}")
+                rows.append([B(f"✏️ 🔁 {_short(f['title'], 30)}",
+                               callback_data=f"new:fedit:{f['id']}")])
+        if tasks:
+            lines.append("\n*Разовые (открытые):*")
+            for t in tasks:
+                rows.append([B(f"✏️ {C.STATUS_ICON.get(t['status'], '•')} "
+                               f"{_short(t['title'], 30)}",
+                               callback_data=f"new:etask:{t['id']}")])
+        if not fixes and not tasks:
+            lines.append("\n_заданий нет_")
         rows.append([B("‹ Назад", callback_data="new:eback")])
         try:
-            await query.edit_message_text(
-                f"✏️ *{p['name'] if p else '?'}* — выберите задачу:",
-                parse_mode=ParseMode.MARKDOWN, reply_markup=M(rows))
+            await query.edit_message_text("\n".join(lines),
+                                          parse_mode=ParseMode.MARKDOWN,
+                                          reply_markup=M(rows))
         except Exception:
             pass
         await query.answer()

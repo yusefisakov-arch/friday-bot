@@ -71,6 +71,10 @@ REPORT_FLOW = {}
 # (chat_id, user_id) -> {"tid", "step", "what", "photo"}
 DONE_FLOW = {}
 
+# «Не успеваю»: сотрудник пишет причину, потом выбирает новый срок.
+# (chat_id, user_id) -> {"tid", "trash": [...]}
+EXTEND_FLOW = {}
+
 
 # --- вспомогательное ------------------------------------------------------------
 
@@ -530,6 +534,62 @@ def render_stats(days, title):
     return "\n\n".join(blocks)
 
 
+def _detail_verdict(tasks):
+    """Короткий вывод: где человек тормозит (эвристика по провалам/опозданиям)."""
+    failed = [t for t in tasks if t["status"] == C.STATUS_FAILED]
+    late = [t for t in tasks if t["status"] == C.STATUS_DONE and t["due_at"]
+            and t["done_at"] and t["done_at"] > t["due_at"]]
+    if not failed and not late:
+        return "Работает стабильно, срывов нет. 👍"
+    parts = []
+    if failed:
+        # в какое время суток чаще срывы
+        buckets = {"утро (до 12)": 0, "день (12–17)": 0, "вечер (после 17)": 0}
+        for t in failed:
+            if not t["due_at"]:
+                continue
+            h = t["due_at"].astimezone(now_local().tzinfo).hour
+            key = "утро (до 12)" if h < 12 else "день (12–17)" if h < 17 else "вечер (после 17)"
+            buckets[key] += 1
+        worst = max(buckets, key=buckets.get)
+        if buckets[worst]:
+            parts.append(f"чаще срывает задачи на {worst}")
+        parts.append(f"провалено {len(failed)}")
+    if late:
+        parts.append(f"сдаёт с опозданием {len(late)}")
+    return "Слабое место: " + ", ".join(parts) + "."
+
+
+def render_detail(days, title):
+    """Подробный отчёт: по каждому — хронология задач и вывод."""
+    people = C.people_all()
+    if not people:
+        return f"{title}\n\nНикто не заведён."
+    blocks = [title]
+    for p in people:
+        tasks = C.tasks_for_person_period(p["id"], days=days)
+        lines = [f"👤 *{p['name']}*"]
+        if not tasks:
+            lines.append("_задач не было_")
+        for t in tasks:
+            when = C.fmt_due(t["due_at"]) if t["due_at"] else "без срока"
+            lines.append(f"{STATE_WORD.get(t['status'], '•')} · {_short(t['title'], 40)} "
+                         f"— {when}")
+        lines.append(f"\n📌 _{_detail_verdict(tasks)}_")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def _stats_kb(days):
+    return InlineKeyboardMarkup([[InlineKeyboardButton(
+        "📖 Читать подробнее", callback_data=f"crew:detail:{days}")]])
+
+
+def _detail_kb(days):
+    return InlineKeyboardMarkup([[InlineKeyboardButton(
+        "🔽 Свернуть", callback_data=f"crew:short:{days}")]])
+
+
 def render_plan_day():
     """План на день — список задач на сегодня."""
     return render_tasks(C.tasks_for_day(), "🌅 План на день")
@@ -687,6 +747,26 @@ async def crew_button(update, context):
         await query.answer("Обновлено")
         return
 
+    # Подробный/краткий отчёт (tid здесь = число дней: 1 день / 7 неделя).
+    if action in ("detail", "short"):
+        if not is_allowed(query.from_user.id):
+            await query.answer("Не для вас")
+            return
+        days = tid if tid in (1, 7) else 1
+        if action == "detail":
+            title = "🔎 *Подробно — итоги дня*" if days == 1 else "🔎 *Подробно — итоги недели*"
+            text, kb = render_detail(days, title), _detail_kb(days)
+        else:
+            title = "🌙 *Итоги дня*" if days == 1 else "📆 *Итоги недели* — за 7 дней"
+            text, kb = render_stats(days, title), _stats_kb(days)
+        try:
+            await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
+                                          reply_markup=kb)
+        except Exception:
+            pass
+        await query.answer()
+        return
+
     task = C.task_get(tid)
     if not task:
         await query.answer("Задача не найдена")
@@ -779,6 +859,10 @@ async def catch_problem_note(update, context):
     # 3) закрытие задачи по «Готово»
     if key in DONE_FLOW:
         await _handle_done_step(context.bot, msg, key, text)
+        return
+    # 3b) причина «Не успеваю»
+    if key in EXTEND_FLOW:
+        await _handle_extend_reason(context.bot, msg, key, text)
         return
 
     # 4) разбор «Проблемы» — только в группах
@@ -1169,22 +1253,19 @@ async def _handle_extension(update, context, action, task):
                     text=f"❌ Перенос отклонён. Срок прежний: {C.fmt_due(task['due_at'])}.")
         return
 
-    # --- сотрудник открыл выбор нового срока ---
+    # --- сотрудник нажал «Не успеваю» → сначала подробная причина ---
     if action == "more":
-        await query.answer()
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("+1 час", callback_data=f"crew:mh1:{tid}"),
-             InlineKeyboardButton("+2 часа", callback_data=f"crew:mh2:{tid}"),
-             InlineKeyboardButton("+4 часа", callback_data=f"crew:mh4:{tid}")],
-            [InlineKeyboardButton("Конец дня", callback_data=f"crew:meod:{tid}"),
-             InlineKeyboardButton("Завтра", callback_data=f"crew:mtom:{tid}")],
-            [InlineKeyboardButton("Отмена", callback_data=f"crew:mcancel:{tid}")]])
-        await context.bot.send_message(
+        EXTEND_FLOW[(query.message.chat_id, query.from_user.id)] = {
+            "tid": tid, "trash": []}
+        await query.answer("Напишите причину")
+        sent = await context.bot.send_message(
             chat_id=query.message.chat_id,
             message_thread_id=query.message.message_thread_id,
-            text=f"{mention(person) if person else ''} на когда перенести "
-                 f"«{_short(task['title'])}»?",
-            reply_markup=kb)
+            text=f"{mention(person) if person else ''} почему не успеваете по "
+                 f"«{_short(task['title'])}»? Опишите подробно одним сообщением.",
+            reply_markup=ForceReply(selective=bool(person and person.get("username"))))
+        EXTEND_FLOW[(query.message.chat_id, query.from_user.id)]["trash"].append(
+            sent.message_id)
         return
 
     if action == "mcancel":
@@ -1221,12 +1302,51 @@ async def _handle_extension(update, context, action, task):
             InlineKeyboardButton("✅ Одобрить", callback_data=f"crew:extok:{tid}"),
             InlineKeyboardButton("❌ Отклонить", callback_data=f"crew:extno:{tid}")]])
         who = person["name"] if person else "?"
+        reason = C.task_get(tid).get("ext_reason") or "—"
         await context.bot.send_message(
             chat_id=chat,
             text=f"⏳ *{who}* просит перенести «{task['title']}»\n"
                  f"Было: {C.fmt_due(task['due_at'])}\n"
-                 f"Просит: {C.fmt_due(new_due)}  `#{tid}`",
+                 f"Просит: {C.fmt_due(new_due)}  `#{tid}`\n\n"
+                 f"*Причина:*\n{reason}",
             parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+
+async def _handle_extend_reason(bot, msg, key, text):
+    """Сотрудник написал причину «Не успеваю» — сохраняем и показываем выбор срока."""
+    flow = EXTEND_FLOW.get(key)
+    if not flow:
+        return
+    if not text:
+        s = await msg.reply_text("Опишите причину словами.")
+        flow["trash"].append(s.message_id)
+        return
+    tid = flow["tid"]
+    EXTEND_FLOW.pop(key, None)
+    C.crew_init_db()
+    task = C.task_get(tid)
+    if not task:
+        return
+    C.task_update(tid, ext_reason=text[:800])
+    person = C.person_by_id(task["person_id"])
+    # уберём вопрос-подсказку и ответ сотрудника, оставим только выбор срока
+    for mid in flow.get("trash", []) + [msg.message_id]:
+        try:
+            await bot.delete_message(chat_id=msg.chat_id, message_id=mid)
+        except Exception:
+            pass
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("+1 час", callback_data=f"crew:mh1:{tid}"),
+         InlineKeyboardButton("+2 часа", callback_data=f"crew:mh2:{tid}"),
+         InlineKeyboardButton("+4 часа", callback_data=f"crew:mh4:{tid}")],
+        [InlineKeyboardButton("Конец дня", callback_data=f"crew:meod:{tid}"),
+         InlineKeyboardButton("Завтра", callback_data=f"crew:mtom:{tid}")],
+        [InlineKeyboardButton("Отмена", callback_data=f"crew:mcancel:{tid}")]])
+    await bot.send_message(
+        chat_id=msg.chat_id,
+        text=f"{mention(person) if person else ''} принял причину. "
+             f"На когда перенести «{_short(task['title'])}»?",
+        reply_markup=kb)
 
 
 # --- фоновый контроль -----------------------------------------------------------
