@@ -18,14 +18,16 @@ from telegram.constants import ParseMode
 from core import is_allowed, now_local, LOCAL_TZ
 import crew as C
 from crewbot import send_task_card, refresh_card, remove_card, render_board, \
-    _board_kb, render_tasks, render_weekly
+    _board_kb, render_tasks, render_weekly, render_plan_day, render_stats_day, \
+    render_plan_week
 
 # Метки нижней клавиатуры-панели (кнопки шлют эти тексты).
 PANEL_BOARD = "📋 Доска"
 PANEL_EDIT = "✏️ Изменить задачу"
-PANEL_DAY = "📅 План на день"
-PANEL_WEEK = "📆 Неделя"
-PANEL_LABELS = {PANEL_BOARD, PANEL_EDIT, PANEL_DAY, PANEL_WEEK}
+PANEL_PLAN_DAY = "📅 План день"
+PANEL_STATS_DAY = "📊 Итоги день"
+PANEL_PLAN_WEEK = "🗓 План неделя"
+PANEL_STATS_WEEK = "📊 Итоги неделя"
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +54,12 @@ def _rows(buttons, per_row):
 
 
 def _panel_kb():
-    """Постоянная нижняя клавиатура Штаба: доска, люди, изменить, отчёты."""
+    """Постоянная нижняя клавиатура Штаба: доска, люди, изменить, план/итоги."""
     people = C.people_all()
     rows = [[KeyboardButton(PANEL_BOARD), KeyboardButton(PANEL_EDIT)]]
     rows += _rows([KeyboardButton(p["name"]) for p in people], 2)
-    rows.append([KeyboardButton(PANEL_DAY), KeyboardButton(PANEL_WEEK)])
+    rows.append([KeyboardButton(PANEL_PLAN_DAY), KeyboardButton(PANEL_STATS_DAY)])
+    rows.append([KeyboardButton(PANEL_PLAN_WEEK), KeyboardButton(PANEL_STATS_WEEK)])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
@@ -283,8 +286,13 @@ async def menu_cmd(update, context):
             "группу, добавьте меня и напишите там /crew Имя.")
         return
     await update.message.reply_text(
-        "*Панель готова.*\nНажмите имя внизу — поставить задачу. "
-        "Или: 📋 Доска · ✏️ Изменить · 📅 План · 📆 Неделя.",
+        "*Панель готова.*\n"
+        "Имя внизу — поставить задачу.\n"
+        "📋 Доска · ✏️ Изменить · 📅/📊 день · 🗓/📊 неделя\n\n"
+        "_Автоотчёты в Штаб:_\n"
+        "• 07:00 — план на день\n"
+        "• 20:00 — итоги дня\n"
+        "• Пн 07:00 — план недели и итоги прошлой недели",
         parse_mode=ParseMode.MARKDOWN, reply_markup=_panel_kb())
 
 
@@ -303,11 +311,16 @@ async def handle_panel(update, context):
         await msg.reply_text(render_board(), parse_mode=ParseMode.MARKDOWN,
                              reply_markup=_board_kb())
         return True
-    if text == PANEL_DAY:
-        await msg.reply_text(render_tasks(C.tasks_for_day(), "🌅 План на день"),
-                             parse_mode=ParseMode.MARKDOWN)
+    if text == PANEL_PLAN_DAY:
+        await msg.reply_text(render_plan_day(), parse_mode=ParseMode.MARKDOWN)
         return True
-    if text == PANEL_WEEK:
+    if text == PANEL_STATS_DAY:
+        await msg.reply_text(render_stats_day(), parse_mode=ParseMode.MARKDOWN)
+        return True
+    if text == PANEL_PLAN_WEEK:
+        await msg.reply_text(render_plan_week(), parse_mode=ParseMode.MARKDOWN)
+        return True
+    if text == PANEL_STATS_WEEK:
         await msg.reply_text(render_weekly(), parse_mode=ParseMode.MARKDOWN)
         return True
     if text == PANEL_EDIT:

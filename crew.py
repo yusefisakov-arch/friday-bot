@@ -352,6 +352,19 @@ def tasks_overdue():
     return [dict(zip(TASK_KEYS, r)) for r in rows]
 
 
+def tasks_upcoming(days=7):
+    """Открытые задачи со сроком в ближайшие N дней — для плана на неделю."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(f"SELECT {TASK_COLS} FROM crew_tasks "
+                    "WHERE status = ANY(%s) AND due_at IS NOT NULL "
+                    "AND due_at <= now() + %s::interval "
+                    "ORDER BY due_at", (list(OPEN_STATUSES), f"{days} days"))
+        rows = cur.fetchall()
+        cur.close()
+    return [dict(zip(TASK_KEYS, r)) for r in rows]
+
+
 def tasks_awaiting_report():
     """Задачи, где ждут отчёт исполнителя, а срок отчёта уже прошёл и мы
     ещё не сообщали об этом владельцу."""

@@ -501,15 +501,15 @@ def render_board():
     return "\n\n➖➖➖➖➖\n\n".join(blocks)
 
 
-def render_weekly():
-    """Итоги недели по людям (за 7 дней) — понятным списком с подписями."""
+def render_stats(days, title):
+    """Итоги (цифры) по людям за период: вовремя/с опозданием/провалено/штрафы."""
     people = C.people_all()
     if not people:
-        return "📆 *Итоги недели*\n\nНикто не заведён."
-    blocks = ["📆 *Итоги недели* — за последние 7 дней"]
+        return f"{title}\n\nНикто не заведён."
+    blocks = [title]
     total_pen = 0
     for p in people:
-        st = C.person_stats(p["id"], days=7)
+        st = C.person_stats(p["id"], days=days)
         total_pen += st["penalty"]
         blocks.append(
             f"👤 *{p['name']}*\n"
@@ -517,8 +517,47 @@ def render_weekly():
             f"Сделано с опозданием: {st['late']}\n"
             f"Провалено: {st['failed']}\n"
             f"Штрафные баллы: *{st['penalty']}*")
-    blocks.append(f"🚫 Всего штрафных баллов за неделю: *{total_pen}*")
+    blocks.append(f"🚫 Всего штрафных баллов: *{total_pen}*")
     return "\n\n".join(blocks)
+
+
+def render_plan_day():
+    """План на день — список задач на сегодня."""
+    return render_tasks(C.tasks_for_day(), "🌅 План на день")
+
+
+def render_stats_day():
+    return render_stats(1, "🌙 *Итоги дня*")
+
+
+def render_weekly():
+    return render_stats(7, "📆 *Итоги недели* — за 7 дней")
+
+
+_WD = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def render_plan_week():
+    """План на неделю — задачи по дням на ближайшие 7 дней."""
+    tasks = C.tasks_upcoming(7)
+    if not tasks:
+        return "🗓 *План на неделю*\n\nЗадач нет."
+    now = now_local()
+    by_day = {}
+    for t in tasks:
+        d = t["due_at"].astimezone(now.tzinfo).date()
+        by_day.setdefault(d, []).append(t)
+    lines = ["🗓 *План на неделю*"]
+    for d in sorted(by_day):
+        lines.append(f"\n*{_WD[d.isoweekday() - 1]} {d:%d.%m}*")
+        for t in by_day[d]:
+            p = C.person_by_id(t["person_id"])
+            who = p["name"] if p else "?"
+            hhmm = t["due_at"].astimezone(now.tzinfo).strftime("%H:%M")
+            prio = t.get("priority") or 1
+            tag = f"{C.PRIORITY_ICON.get(prio, '')} " if prio > 1 else ""
+            lines.append(f"  {hhmm} · {who}: {tag}{_short(t['title'], 40)}")
+    return "\n".join(lines)
 
 
 def _board_kb():
@@ -1303,11 +1342,12 @@ async def evening_report(bot):
         return
     C.state_set("last_report", today)
 
-    await tell_boss(bot, render_tasks(C.tasks_for_day(), "🌙 Итоги дня"))
+    # вечером — итоги дня (цифры)
+    await tell_boss(bot, render_stats_day())
 
 
 async def weekly_report(bot):
-    """Недельная сводка в Штаб по всем людям — утром в понедельник, раз в неделю."""
+    """Понедельник утром: план на неделю + итоги прошлой недели."""
     now = now_local()
     if now.isoweekday() != 1 or now.hour < C.WEEKLY_REPORT_HOUR:
         return
@@ -1317,6 +1357,7 @@ async def weekly_report(bot):
         return
     C.state_set("last_weekly", tag)
     if C.people_all():
+        await tell_boss(bot, render_plan_week())
         await tell_boss(bot, render_weekly())
 
 
@@ -1330,7 +1371,8 @@ async def morning_report(bot):
         return
     C.state_set("last_morning", today)
 
-    await tell_boss(bot, render_tasks(C.tasks_for_day(), "🌅 План на день"))
+    # утром — план на день (список задач)
+    await tell_boss(bot, render_plan_day())
 
 
 async def _migrate_cards_once(bot):
