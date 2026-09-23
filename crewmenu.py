@@ -466,8 +466,8 @@ async def menu_button(update, context):
                            if f["due_hour"] is not None else "")
                 lines.append(f"🔁 {_short(f['title'], 35)} — {_sched_label(f)} "
                              f"в {f['hour']:02d}:{f['minute']:02d}{due_txt}")
-                rows.append([B(f"✏️ 🔁 {_short(f['title'], 30)}",
-                               callback_data=f"new:fedit:{f['id']}")])
+                rows.append([B(f"🔁 {_short(f['title'], 30)}",
+                               callback_data=f"new:fmenu:{f['id']}")])
         if tasks:
             lines.append("\n*Разовые (открытые):*")
             for t in tasks:
@@ -505,6 +505,48 @@ async def menu_button(update, context):
         except Exception:
             pass
         await query.answer()
+        return
+
+    # меню постоянного задания: изменить время или удалить
+    if action == "fmenu":
+        if not arg.isdigit():
+            await query.answer()
+            return
+        fx = C.fix_get(int(arg))
+        if not fx:
+            await query.answer("Задание не найдено")
+            return
+        due_txt = (f" → до {fx['due_hour']:02d}:{fx['due_minute'] or 0:02d}"
+                   if fx["due_hour"] is not None else "")
+        text = (f"🔁 {_short(fx['title'], 80)}\n"
+                f"{_sched_label(fx)} в {fx['hour']:02d}:{fx['minute']:02d}{due_txt}")
+        kb = M([
+            [B("✏️ Изменить время", callback_data=f"new:fedit:{fx['id']}")],
+            [B("🗑 Удалить задание", callback_data=f"new:fdel:{fx['id']}")],
+            [B("‹ Назад", callback_data=f"new:egrp:{fx['person_id']}")]])
+        try:
+            await query.edit_message_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await query.answer()
+        return
+
+    if action == "fdel":
+        if not arg.isdigit():
+            await query.answer()
+            return
+        fx = C.fix_get(int(arg))
+        title = C.fix_delete(int(arg))          # деактивирует задание
+        C.cancel_open_for_fix(int(arg))         # снять уже поставленные экземпляры
+        await query.answer("Удалено")
+        try:
+            await query.edit_message_text(
+                f"🗑 Удалил постоянное задание: {title or '—'}",
+                reply_markup=M([[B("‹ К группе",
+                                   callback_data=f"new:egrp:{fx['person_id']}")]])
+                if fx else None)
+        except Exception:
+            pass
         return
 
     if action == "edue":

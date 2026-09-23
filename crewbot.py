@@ -1229,6 +1229,7 @@ async def _handle_extension(update, context, action, task):
         if not is_allowed(query.from_user.id):
             await query.answer("Не для вас")
             return
+        C.state_set(f"extmsg_{tid}", "")   # запрос решён — снять привязку
         new_due = task.get("ext_due")
         if action == "extok" and new_due:
             fields = {"due_at": new_due, "ext_due": None,
@@ -1298,18 +1299,26 @@ async def _handle_extension(update, context, action, task):
         pass
     chat = hq_chat_id()
     if chat:
+        # один запрос на задачу: старый в Штабе удаляем, чтобы не копились дубли
+        prev = C.state_get(f"extmsg_{tid}")
+        if prev:
+            try:
+                await context.bot.delete_message(chat, int(prev))
+            except Exception:
+                pass
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Одобрить", callback_data=f"crew:extok:{tid}"),
             InlineKeyboardButton("❌ Отклонить", callback_data=f"crew:extno:{tid}")]])
         who = person["name"] if person else "?"
         reason = C.task_get(tid).get("ext_reason") or "—"
-        await context.bot.send_message(
+        sent = await context.bot.send_message(
             chat_id=chat,
             text=f"⏳ *{who}* просит перенести «{task['title']}»\n"
                  f"Было: {C.fmt_due(task['due_at'])}\n"
                  f"Просит: {C.fmt_due(new_due)}  `#{tid}`\n\n"
                  f"*Причина:*\n{reason}",
             parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        C.state_set(f"extmsg_{tid}", sent.message_id)
 
 
 async def _handle_extend_reason(bot, msg, key, text):
