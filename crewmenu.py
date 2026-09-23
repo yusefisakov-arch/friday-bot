@@ -296,6 +296,26 @@ async def menu_cmd(update, context):
         parse_mode=ParseMode.MARKDOWN, reply_markup=_panel_kb())
 
 
+async def _hq_view(context, msg, key, text, inline=None):
+    """Показывает инфо-экран в одном экземпляре: удаляет прошлый такой же и
+    само нажатие-триггер — чтобы Штаб не засорялся историей просмотров."""
+    chat_id = msg.chat_id
+    prev = C.state_get(f"view_{key}")
+    if prev:
+        try:
+            await context.bot.delete_message(chat_id, int(prev))
+        except Exception:
+            pass
+    sent = await context.bot.send_message(
+        chat_id, text, parse_mode=ParseMode.MARKDOWN,
+        reply_markup=inline)
+    C.state_set(f"view_{key}", sent.message_id)
+    try:
+        await msg.delete()   # убрать синюю кнопку-нажатие
+    except Exception:
+        pass
+
+
 async def handle_panel(update, context):
     """Кнопки нижней панели шлют текст-метку — обрабатываем как действия.
     Возвращает True, если сообщение обработано."""
@@ -307,26 +327,25 @@ async def handle_panel(update, context):
         return False
     text = msg.text.strip()
 
-    if text == PANEL_BOARD:
-        await msg.reply_text(render_board(), parse_mode=ParseMode.MARKDOWN,
-                             reply_markup=_board_kb())
-        return True
-    if text == PANEL_PLAN_DAY:
-        await msg.reply_text(render_plan_day(), parse_mode=ParseMode.MARKDOWN)
-        return True
-    if text == PANEL_STATS_DAY:
-        await msg.reply_text(render_stats_day(), parse_mode=ParseMode.MARKDOWN)
-        return True
-    if text == PANEL_PLAN_WEEK:
-        await msg.reply_text(render_plan_week(), parse_mode=ParseMode.MARKDOWN)
-        return True
-    if text == PANEL_STATS_WEEK:
-        await msg.reply_text(render_weekly(), parse_mode=ParseMode.MARKDOWN)
+    views = {
+        PANEL_BOARD: ("board", render_board, _board_kb()),
+        PANEL_PLAN_DAY: ("plan_day", render_plan_day, None),
+        PANEL_STATS_DAY: ("stats_day", render_stats_day, None),
+        PANEL_PLAN_WEEK: ("plan_week", render_plan_week, None),
+        PANEL_STATS_WEEK: ("stats_week", render_weekly, None),
+    }
+    if text in views:
+        key, render, inline = views[text]
+        await _hq_view(context, msg, key, render(), inline=inline)
         return True
     if text == PANEL_EDIT:
         await msg.reply_text("✏️ *Изменить задачу*\nВыберите группу:",
                              parse_mode=ParseMode.MARKDOWN,
                              reply_markup=_edit_groups_kb())
+        try:
+            await msg.delete()
+        except Exception:
+            pass
         return True
 
     # Имя человека с панели — начать постановку задачи (если не идёт ввод текста).
@@ -338,6 +357,10 @@ async def handle_panel(update, context):
         C.draft_reset(uid, msg.chat_id, "wait_title")
         C.draft_set(uid, person_id=person["id"])
         await _open_dialog(context, msg.chat_id, uid)
+        try:
+            await msg.delete()   # убрать нажатие имени
+        except Exception:
+            pass
         return True
     return False
 
