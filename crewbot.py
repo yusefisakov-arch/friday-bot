@@ -112,7 +112,13 @@ async def remove_card(bot, task):
     try:
         await bot.delete_message(chat_id=chat_id, message_id=mid)
     except Exception as e:
-        logger.debug("Карточку #%s не удалить: %s", task["id"], e)
+        # не удалилось — гасим карточку хотя бы редактированием, и логируем причину
+        logger.warning("Карточку #%s не удалить (%s), гашу правкой", task["id"], e)
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=mid,
+                                        text="✅ Задача закрыта")
+        except Exception:
+            pass
 
 
 async def refresh_card(bot, task_id):
@@ -865,12 +871,16 @@ async def _handle_report_actions(update, context, action, task):
 
     if action == "approve":
         await query.answer("Одобрено")
+        note = task.get("note") or ""
+        sol = note.split("Решение:", 1)[1].strip() if "Решение:" in note else note
         await _send_report_button(
             context.bot, C.task_get(tid), person,
-            "✅ Руководитель одобрил ваше решение. Действуйте, как предложили.\n"
-            "Как закончите — нажмите «Отчёт».")
+            f"✅ *Решение одобрено* по задаче «{task['title']}».\n"
+            f"Ваше решение: {sol}\n\n"
+            "Действуйте, как предложили. Как закончите — нажмите «Отчёт».")
         await _mark_boss_msg(
-            query, f"✅ Одобрено. Жду отчёт до {C.fmt_due(_report_deadline(task))}.")
+            query, f"✅ Одобрено «{task['title']}». Жду отчёт "
+                   f"до {C.fmt_due(_report_deadline(task))}.")
         return
 
     if action == "reject":
@@ -914,10 +924,11 @@ async def _handle_instruction(bot, msg, key, text):
         return
     person = C.person_by_id(task["person_id"])
     C.task_update(tid, boss_note=text[:800])
-    await msg.reply_text("Передал исполнителю.")
+    await msg.reply_text(f"Передал исполнителю по «{task['title']}».")
     await _send_report_button(
         bot, C.task_get(tid), person,
-        f"❌ Решение не одобрили.\n*Что делать:* {text}\n\n"
+        f"❌ *Решение не одобрили* по задаче «{task['title']}».\n"
+        f"*Что делать:* {text}\n\n"
         "Как сделаете — нажмите «Отчёт».")
 
 
@@ -1391,15 +1402,20 @@ async def clearall_cmd(update, context):
     await _wipe_all(context.bot)
 
 
-async def crew_loop(bot):
-    """Фоновый цикл контроля."""
-    await asyncio.sleep(45)
+async def _startup_jobs(bot):
+    """Разовые задания при старте — в фоне, чтобы не тормозить основной цикл
+    (иначе долгая чистка блокировала контроль сроков и штрафы не начислялись)."""
     try:
         await _migrate_cards_once(bot)
         await _dedup_once()
-        await _wipe_all_once(bot)
     except Exception:
         logger.exception("Разовая уборка при старте не удалась")
+
+
+async def crew_loop(bot):
+    """Фоновый цикл контроля."""
+    await asyncio.sleep(20)
+    asyncio.create_task(_startup_jobs(bot))   # не блокируем цикл
     while True:
         try:
             C.crew_init_db()
