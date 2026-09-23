@@ -103,8 +103,43 @@ async def send_task_card(bot, task, person):
     return msg
 
 
+def _track_answer(tid, chat_id, mid):
+    """Запоминает служебное сообщение по задаче в группе — чтобы удалить при
+    закрытии (ответы о переносе и т.п.)."""
+    cur = C.state_get(f"tmsg_{tid}") or ""
+    items = [x for x in cur.split(",") if x]
+    items.append(f"{chat_id}:{mid}")
+    C.state_set(f"tmsg_{tid}", ",".join(items))
+
+
+async def _delete_ref(bot, ref):
+    if ref and ":" in ref:
+        c, m = ref.split(":", 1)
+        try:
+            await bot.delete_message(int(c), int(m))
+        except Exception:
+            pass
+
+
+async def _clear_extwait(bot, tid):
+    """Удаляет сообщение сотрудника «Запросил перенос… жду ответа»."""
+    await _delete_ref(bot, C.state_get(f"extwait_{tid}"))
+    C.state_set(f"extwait_{tid}", "")
+
+
+async def _purge_task_msgs(bot, tid):
+    """Убирает все служебные сообщения по задаче (перенос/запрос) при закрытии."""
+    await _clear_extwait(bot, tid)
+    cur = C.state_get(f"tmsg_{tid}") or ""
+    for item in cur.split(","):
+        await _delete_ref(bot, item)
+    C.state_set(f"tmsg_{tid}", "")
+
+
 async def remove_card(bot, task):
-    """Открепляет и удаляет карточку из группы — задача закрыта, чат чистый."""
+    """Открепляет и удаляет карточку из группы — задача закрыта, чат чистый.
+    Заодно убирает служебные сообщения (перенос/запрос) по этой задаче."""
+    await _purge_task_msgs(bot, task.get("id"))
     chat_id = task.get("chat_id")
     mid = task.get("message_id")
     if not chat_id or not mid:
@@ -1241,17 +1276,22 @@ async def _handle_extension(update, context, action, task):
             C.task_update(tid, **fields)
             await refresh_card(context.bot, tid)
             await _mark_boss_msg(query, f"✅ Перенос одобрен: {C.fmt_due(new_due)}")
+            # убрать «Запросил перенос» у сотрудника, оставить только ответ
+            await _clear_extwait(context.bot, tid)
             if emp_chat:
-                await context.bot.send_message(
+                sent = await context.bot.send_message(
                     chat_id=emp_chat,
                     text=f"✅ Срок перенесён: {C.fmt_due(new_due)}.")
+                _track_answer(tid, emp_chat, sent.message_id)
         else:
             C.task_update(tid, ext_due=None)
             await _mark_boss_msg(query, "❌ Перенос отклонён")
+            await _clear_extwait(context.bot, tid)
             if emp_chat:
-                await context.bot.send_message(
+                sent = await context.bot.send_message(
                     chat_id=emp_chat,
                     text=f"❌ Перенос отклонён. Срок прежний: {C.fmt_due(task['due_at'])}.")
+                _track_answer(tid, emp_chat, sent.message_id)
         return
 
     # --- сотрудник нажал «Не успеваю» → сначала подробная причина ---
@@ -1292,9 +1332,13 @@ async def _handle_extension(update, context, action, task):
 
     C.task_update(tid, ext_due=new_due)
     await query.answer("Запрос отправлен")
+    # прошлый «Запросил перенос» у сотрудника убираем — один pending на задачу
+    await _clear_extwait(context.bot, tid)
     try:
         await query.edit_message_text(
             f"Запросил перенос на {C.fmt_due(new_due)}. Жду ответа руководителя.")
+        C.state_set(f"extwait_{tid}",
+                    f"{query.message.chat_id}:{query.message.message_id}")
     except Exception:
         pass
     chat = hq_chat_id()
