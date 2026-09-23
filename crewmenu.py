@@ -142,6 +142,13 @@ def _field(draft):
     return "send_at" if draft.get("editing") == "send" else "due_at"
 
 
+def _cur_dt(draft):
+    """Текущее значение пикера в МЕСТНОМ времени. Из БД datetime приходит в UTC,
+    и replace(hour=…) без перевода дал бы сдвиг на часовой пояс (+3 в Кишинёве)."""
+    dt = draft.get(_field(draft)) or _default_due()
+    return dt.astimezone(LOCAL_TZ)
+
+
 # --- экраны ----------------------------------------------------------------------
 
 def _screen(draft):
@@ -555,21 +562,19 @@ async def menu_button(update, context):
         except ValueError:
             await query.answer()
             return
-        cur = draft.get(_field(draft)) or _default_due()
-        cur = cur.replace(year=d.year, month=d.month, day=d.day)
+        cur = _cur_dt(draft).replace(year=d.year, month=d.month, day=d.day)
         C.draft_set(user_id, **{_field(draft): cur, "step": "pd_hour"})
         await _rerender(query, C.draft_get(user_id))
         return
 
     if action == "phour":
-        cur = (draft.get(_field(draft)) or _default_due()).replace(
-            hour=int(arg), minute=0)
+        cur = _cur_dt(draft).replace(hour=int(arg), minute=0)
         C.draft_set(user_id, **{_field(draft): cur, "step": "pd_min"})
         await _rerender(query, C.draft_get(user_id))
         return
 
     if action == "pmin":
-        cur = (draft.get(_field(draft)) or _default_due()).replace(minute=int(arg))
+        cur = _cur_dt(draft).replace(minute=int(arg))
         if draft.get("edit_tid"):
             # правка срока существующей задачи — обновляем и обновляем карточку
             C.task_update(draft["edit_tid"], due_at=cur,
