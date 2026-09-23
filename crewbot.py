@@ -89,7 +89,30 @@ async def send_task_card(bot, task, person):
         chat_id=person["chat_id"], text=C.task_card(task, person),
         parse_mode=ParseMode.MARKDOWN, reply_markup=task_buttons(task))
     C.task_update(task["id"], chat_id=person["chat_id"], message_id=msg.message_id)
+    # Активная задача закреплена — висит у сотрудника на виду, пока не закрыта.
+    try:
+        await bot.pin_chat_message(chat_id=person["chat_id"],
+                                   message_id=msg.message_id,
+                                   disable_notification=True)
+    except Exception as e:
+        logger.debug("Карточку #%s не закрепить: %s", task["id"], e)
     return msg
+
+
+async def remove_card(bot, task):
+    """Открепляет и удаляет карточку из группы — задача закрыта, чат чистый."""
+    chat_id = task.get("chat_id")
+    mid = task.get("message_id")
+    if not chat_id or not mid:
+        return
+    try:
+        await bot.unpin_chat_message(chat_id=chat_id, message_id=mid)
+    except Exception:
+        pass
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=mid)
+    except Exception as e:
+        logger.debug("Карточку #%s не удалить: %s", task["id"], e)
 
 
 async def refresh_card(bot, task_id):
@@ -525,7 +548,7 @@ async def done_cmd(update, context):
         await update.message.reply_text("Такой задачи нет.")
         return
     C.task_update(tid, status=C.STATUS_DONE, done_at=now_local())
-    await refresh_card(context.bot, tid)
+    await remove_card(context.bot, C.task_get(tid))
     await update.message.reply_text(f"Закрыл #{tid}: {task['title']}")
 
 
@@ -547,7 +570,7 @@ async def cancel_cmd(update, context):
         await update.message.reply_text("Такой задачи нет.")
         return
     C.task_update(tid, status=C.STATUS_CANCELLED)
-    await refresh_card(context.bot, tid)
+    await remove_card(context.bot, C.task_get(tid))
     await update.message.reply_text(f"Снял #{tid}: {task['title']}")
 
 
@@ -1021,7 +1044,8 @@ async def _finish_done(bot, msg, flow):
                   report_text=f"Сделано: {flow['what']}"[:800], report_done=True)
     # снять открытые дубли этой же задачи, чтобы не висели как «ждёт»
     C.cancel_open_siblings(task["person_id"], task["title"], tid)
-    await refresh_card(bot, tid)
+    # задача выполнена — убираем карточку из группы, чат чистый
+    await remove_card(bot, C.task_get(tid))
 
     who = person["name"] if person else "?"
     mark = "✅ (с опозданием)" if late else "✅"
@@ -1231,7 +1255,13 @@ async def chase(bot):
         prio = task.get("priority") or 1
         C.task_update(task["id"], told_boss=True, status=C.STATUS_FAILED,
                       penalty=prio)
+        # провал: карточку оставляем с ❌ (сотрудник видит штраф), но открепляем
         await refresh_card(bot, task["id"])
+        try:
+            await bot.unpin_chat_message(chat_id=task["chat_id"],
+                                         message_id=task["message_id"])
+        except Exception:
+            pass
         await tell_boss(
             bot,
             f"❌ Провалено — *{person['name']}* +{prio} штрафной(ых)\n"

@@ -17,8 +17,8 @@ from telegram.constants import ParseMode
 
 from core import is_allowed, now_local, LOCAL_TZ
 import crew as C
-from crewbot import send_task_card, refresh_card, render_board, _board_kb, \
-    render_tasks, render_weekly
+from crewbot import send_task_card, refresh_card, remove_card, render_board, \
+    _board_kb, render_tasks, render_weekly
 
 # Метки нижней клавиатуры-панели (кнопки шлют эти тексты).
 PANEL_BOARD = "📋 Доска"
@@ -481,7 +481,7 @@ async def menu_button(update, context):
             return
         C.task_update(t["id"], status=C.STATUS_CANCELLED)
         try:
-            await refresh_card(context.bot, t["id"])
+            await remove_card(context.bot, C.task_get(t["id"]))
         except Exception:
             pass
         await query.answer("Снял")
