@@ -24,6 +24,7 @@ DUE_GRACE_MIN = 10         # запас после срока, прежде че
 MORNING_REPORT_HOUR = 7    # час утреннего плана на день
 EVENING_REPORT_HOUR = 20   # час вечерней сводки
 WEEKLY_REPORT_HOUR = 7     # час недельной сводки утром в понедельник
+DEBRIEF_HOUR = 22          # час разбора дня в группах (вопросы по невыполненному)
 
 # Приоритет задачи и штраф за провал: обычная 1, важная 2, приоритетная 3.
 PRIORITY_LABEL = {1: "Обычная", 2: "Важная", 3: "Приоритетная"}
@@ -350,6 +351,22 @@ def tasks_overdue():
         cur.execute(f"SELECT {TASK_COLS} FROM crew_tasks "
                     "WHERE status = ANY(%s) AND due_at < now() "
                     "ORDER BY due_at", (list(OPEN_STATUSES),))
+        rows = cur.fetchall()
+        cur.close()
+    return [dict(zip(TASK_KEYS, r)) for r in rows]
+
+
+def tasks_unfinished_today(person_id):
+    """Невыполненные за сегодня: проваленные и всё ещё открытые (для разбора дня)."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT {TASK_COLS} FROM crew_tasks "
+            "WHERE person_id=%s AND status = ANY(%s) "
+            "AND (created_at AT TIME ZONE %s)::date = (now() AT TIME ZONE %s)::date "
+            "ORDER BY due_at NULLS LAST, id",
+            (person_id, [STATUS_NEW, STATUS_TAKEN, STATUS_PROBLEM, STATUS_FAILED],
+             str(LOCAL_TZ), str(LOCAL_TZ)))
         rows = cur.fetchall()
         cur.close()
     return [dict(zip(TASK_KEYS, r)) for r in rows]

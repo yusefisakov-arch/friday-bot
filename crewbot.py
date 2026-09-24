@@ -75,6 +75,10 @@ DONE_FLOW = {}
 # (chat_id, user_id) -> {"tid", "trash": [...]}
 EXTEND_FLOW = {}
 
+# Разбор дня: сотрудник объясняет невыполненную задачу.
+# (chat_id, user_id) -> {"tid", "why", "trash": [...]}
+EXPLAIN_FLOW = {}
+
 
 # --- вспомогательное ------------------------------------------------------------
 
@@ -831,6 +835,11 @@ async def crew_button(update, context):
         await _handle_extension(update, context, action, task)
         return
 
+    # Разбор дня: объяснить невыполненную задачу / ответ «сделал позже».
+    if action in ("explain", "latey", "laten"):
+        await _handle_explain(update, context, action, task)
+        return
+
     person = C.person_by_id(task["person_id"])
     user = query.from_user
 
@@ -901,6 +910,10 @@ async def catch_problem_note(update, context):
     # 3b) причина «Не успеваю»
     if key in EXTEND_FLOW:
         await _handle_extend_reason(context.bot, msg, key, text)
+        return
+    # 3c) причина в разборе дня
+    if key in EXPLAIN_FLOW:
+        await _handle_explain_reason(context.bot, msg, key, text)
         return
 
     # 4) разбор «Проблемы» — только в группах
@@ -1405,6 +1418,73 @@ async def _handle_extend_reason(bot, msg, key, text):
         reply_markup=kb)
 
 
+# --- разбор дня: почему не сделал и сделал ли позже -----------------------------
+
+async def _handle_explain(update, context, action, task):
+    query = update.callback_query
+    tid = task["id"]
+    person = C.person_by_id(task["person_id"])
+
+    if action == "explain":
+        EXPLAIN_FLOW[(query.message.chat_id, query.from_user.id)] = {
+            "tid": tid, "why": "", "trash": []}
+        await query.answer("Напишите причину")
+        sent = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            message_thread_id=query.message.message_thread_id,
+            text=f"{mention(person) if person else ''} почему не сделали "
+                 f"«{_short(task['title'])}»? Опишите одним сообщением.",
+            reply_markup=ForceReply(selective=bool(person and person.get("username"))))
+        EXPLAIN_FLOW[(query.message.chat_id, query.from_user.id)]["trash"].append(
+            sent.message_id)
+        return
+
+    # ответ «сделал позже»: да / нет
+    if action in ("latey", "laten"):
+        later = action == "latey"
+        # причину берём из state, сохранённой на шаге текста
+        why = C.state_get(f"explain_{tid}") or "—"
+        C.state_set(f"explain_{tid}", "")
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await query.answer("Спасибо")
+        who = person["name"] if person else "?"
+        await tell_boss(
+            context.bot,
+            f"🌙 *Разбор дня — {who}*\n"
+            f"Задача: {task['title']}  `#{tid}`\n"
+            f"*Почему не сделал:*\n{why}\n\n"
+            f"*Сделал позже:* {'да ✅' if later else 'нет ❌'}")
+        return
+
+
+async def _handle_explain_reason(bot, msg, key, text):
+    """Сотрудник написал, почему не сделал — спрашиваем «сделал ли позже»."""
+    flow = EXPLAIN_FLOW.get(key)
+    if not flow:
+        return
+    if not text:
+        s = await msg.reply_text("Опишите причину словами.")
+        flow["trash"].append(s.message_id)
+        return
+    tid = flow["tid"]
+    EXPLAIN_FLOW.pop(key, None)
+    C.state_set(f"explain_{tid}", text[:800])
+    # убрать вопрос и ответ, оставить только кнопки «сделал позже»
+    for mid in flow.get("trash", []) + [msg.message_id]:
+        try:
+            await bot.delete_message(chat_id=msg.chat_id, message_id=mid)
+        except Exception:
+            pass
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, сделал", callback_data=f"crew:latey:{tid}"),
+        InlineKeyboardButton("❌ Нет", callback_data=f"crew:laten:{tid}")]])
+    await bot.send_message(chat_id=msg.chat_id,
+                           text="Приняли причину. Сделали позже?", reply_markup=kb)
+
+
 # --- фоновый контроль -----------------------------------------------------------
 
 async def deliver_scheduled(bot):
@@ -1560,6 +1640,38 @@ async def morning_report(bot):
     await tell_boss(bot, render_plan_day())
 
 
+async def day_debrief(bot):
+    """В конце дня в каждой группе — разбор невыполненного: по каждой задаче
+    кнопка «Объяснить» (почему не сделал и сделал ли позже). Раз в день."""
+    now = now_local()
+    if now.hour != C.DEBRIEF_HOUR:
+        return
+    today = str(now.date())
+    if C.state_get("last_debrief") == today:
+        return
+    C.state_set("last_debrief", today)
+
+    for person in C.people_all():
+        tasks = C.tasks_unfinished_today(person["id"])
+        if not tasks:
+            continue
+        chat = person["chat_id"]
+        rows = [[InlineKeyboardButton(f"✍️ {_short(t['title'], 35)}",
+                                      callback_data=f"crew:explain:{t['id']}")]
+                for t in tasks]
+        who = mention(person)
+        try:
+            await bot.send_message(
+                chat_id=chat,
+                text=f"🌙 *Разбор дня.* {who}, по этим задачам ответьте: "
+                     f"почему не сделали и сделали ли позже.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup(rows))
+        except Exception as e:
+            logger.error("Разбор дня в группу %s не ушёл: %s", chat, e)
+        await asyncio.sleep(0.3)
+
+
 async def _migrate_cards_once(bot):
     """Один раз перерисовывает все открытые карточки в новый вид — чтобы
     кнопка «Не успеваю» появилась и на задачах, поставленных до её добавления."""
@@ -1655,6 +1767,7 @@ async def crew_loop(bot):
             await morning_report(bot)
             await chase(bot)
             await evening_report(bot)
+            await day_debrief(bot)
             await weekly_report(bot)
         except Exception:
             logger.exception("Контроль задач: сбой цикла")
