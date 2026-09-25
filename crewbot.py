@@ -851,6 +851,9 @@ async def crew_button(update, context):
 
     if action == "done":
         # «Готово» ведёт короткий отчёт: что сделал → фото → закрыть и в Штаб.
+        # Глушим 15-мин напоминание и убираем его, если уже успело прийти.
+        C.task_update(tid, warned_due=True)
+        await _purge_task_msgs(context.bot, tid)
         flow = {"tid": tid, "step": "what", "what": "", "photos": [], "trash": []}
         DONE_FLOW[(query.message.chat_id, user.id)] = flow
         await query.answer("Короткий отчёт")
@@ -1572,11 +1575,13 @@ async def chase(bot):
                 if chat:
                     who = mention(person) if person else ""
                     try:
-                        await bot.send_message(
+                        sent = await bot.send_message(
                             chat_id=chat,
                             text=f"⏰ {who} 15 минут до срока: «{_short(task['title'])}».",
                             reply_to_message_id=task.get("message_id"),
                             allow_sending_without_reply=True)
+                        # запоминаем — удалим при провале/закрытии задачи
+                        _track_answer(task["id"], chat, sent.message_id)
                     except Exception as e:
                         logger.error("Напоминание #%s не ушло: %s", task["id"], e)
                 await asyncio.sleep(0.3)
@@ -1590,7 +1595,8 @@ async def chase(bot):
         prio = task.get("priority") or 1
         C.task_update(task["id"], told_boss=True, status=C.STATUS_FAILED,
                       penalty=prio)
-        # провал: карточка остаётся, но показывает «ПРОВАЛЕНО + штраф»; откреп
+        # провал: убрать напоминание/служебные, карточка остаётся с «ПРОВАЛЕНО»
+        await _purge_task_msgs(bot, task["id"])
         await refresh_card(bot, task["id"])
         try:
             await bot.unpin_chat_message(chat_id=task["chat_id"],
