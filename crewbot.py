@@ -1560,6 +1560,27 @@ async def chase(bot):
         # Отложенная задача ещё не доставлена (нет карточки) — не трогаем.
         if not task.get("message_id"):
             continue
+
+        # Напоминание за 15 минут до срока — один раз (единственное напоминание).
+        due = task.get("due_at")
+        if due and not task.get("warned_due"):
+            left = (due - now).total_seconds() / 60
+            if 0 < left <= C.PRE_DUE_MIN:
+                C.task_update(task["id"], warned_due=True)
+                person = C.person_by_id(task["person_id"])
+                chat = task["chat_id"] or (person["chat_id"] if person else None)
+                if chat:
+                    who = mention(person) if person else ""
+                    try:
+                        await bot.send_message(
+                            chat_id=chat,
+                            text=f"⏰ {who} 15 минут до срока: «{_short(task['title'])}».",
+                            reply_to_message_id=task.get("message_id"),
+                            allow_sending_without_reply=True)
+                    except Exception as e:
+                        logger.error("Напоминание #%s не ушло: %s", task["id"], e)
+                await asyncio.sleep(0.3)
+
         if C.decide(task, now) != C.ACT_FAIL:
             continue
 
