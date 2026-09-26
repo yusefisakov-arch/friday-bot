@@ -524,6 +524,23 @@ def cancel_open_in_chat(chat_id):
         cur.close()
 
 
+def cancel_shown_open_in_chat(chat_id):
+    """Для ЕЖЕДНЕВНОЙ авто-очистки: снимает только уже показанные открытые задачи
+    (у которых есть карточка, message_id IS NOT NULL) — чтобы после удаления
+    сообщений не осталось «висящих» без карточки. Отложенные (ещё не
+    доставленные, message_id IS NULL) НЕ трогаем: они появятся сегодня по
+    своему времени. Постоянные задания (crew_fix) не затрагиваются вовсе."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE crew_tasks SET status='cancelled' "
+                    "WHERE chat_id=%s AND message_id IS NOT NULL "
+                    "AND status = ANY(%s)",
+                    (chat_id, list(OPEN_STATUSES)))
+        n = cur.rowcount
+        cur.close()
+    return n
+
+
 def cancel_open_siblings(person_id, title, keep_id):
     """Снимает открытые дубли той же задачи (тот же человек и название)."""
     with db_conn() as conn:

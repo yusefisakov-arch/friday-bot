@@ -1828,6 +1828,37 @@ async def _startup_jobs(bot):
         logger.exception("Разовая уборка при старте не удалась")
 
 
+async def daily_wipe(bot):
+    """Начало дня (00:0x): рабочие группы обнуляются — удаляются ВСЕ сообщения,
+    чтобы день начинался с чистого листа. Так как чистим каждый день, сообщения
+    максимум суточной давности → бот удалит их без проблем (лимит Telegram 48 ч
+    не мешает). Показанные незакрытые карточки снимаем (чтобы не «висели» без
+    карточки), отложенные и постоянные задания не трогаем — выйдут сегодня по
+    расписанию. Штаб НЕ чистим: там отчёты и заявки на одобрение для владельца."""
+    now = now_local()
+    if now.hour != 0:
+        return
+    today = str(now.date())
+    if C.state_get("last_wipe") == today:
+        return
+    C.state_set("last_wipe", today)   # до чистки — чтобы не повторить при рестарте
+    hq = hq_chat_id()
+    chats = [p["chat_id"] for p in C.people_all()
+             if p.get("chat_id") and p["chat_id"] != hq]
+    for chat in chats:
+        try:
+            await _wipe_chat(bot, chat)
+            C.cancel_shown_open_in_chat(chat)
+        except Exception:
+            logger.exception("Ежедневная очистка чата %s не удалась", chat)
+    # убрать ссылки на удалённый разбор дня — промпт уже стёрт вместе с чатом
+    for p in C.people_all():
+        if p.get("chat_id") and p["chat_id"] != hq:
+            C.state_set(f"dbrf_msg_{p['id']}", "")
+            C.state_set(f"dbrf_tasks_{p['id']}", "")
+    logger.info("Ежедневная очистка рабочих групп выполнена (%d)", len(chats))
+
+
 async def crew_loop(bot):
     """Фоновый цикл контроля."""
     await asyncio.sleep(20)
@@ -1835,6 +1866,7 @@ async def crew_loop(bot):
     while True:
         try:
             C.crew_init_db()
+            await daily_wipe(bot)       # 00:0x: обнулить рабочие группы к новому дню
             await deliver_scheduled(bot)
             await spawn_fixed(bot)
             await morning_report(bot)   # 7:00: итоги за вчера + план на сегодня
