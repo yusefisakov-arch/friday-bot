@@ -1173,7 +1173,8 @@ async def _finish_report(bot, msg, flow):
         stored += f"\nИтог: {flow['left']}"
     C.task_update(tid, report_text=stored[:800], report_done=True,
                   status=C.STATUS_DONE, done_at=now_local())
-    await refresh_card(bot, tid)
+    # задача закрыта отчётом — убираем карточку из группы, чат чистый
+    await remove_card(bot, C.task_get(tid))
 
     who = person["name"] if person else "?"
     report = (f"📋 *{who}* отчитался по задаче\n"
@@ -1442,25 +1443,68 @@ async def _handle_explain(update, context, action, task):
             sent.message_id)
         return
 
-    # ответ «сделал позже»: да / нет
+    # ответ «сделал позже»: да / нет — сохраняем и, когда по всем задачам
+    # человека ответы собраны, шлём ОДИН сводный отчёт в Штаб.
     if action in ("latey", "laten"):
-        later = action == "latey"
-        # причину берём из state, сохранённой на шаге текста
-        why = C.state_get(f"explain_{tid}") or "—"
-        C.state_set(f"explain_{tid}", "")
+        C.state_set(f"dbrf_late_{tid}", "1" if action == "latey" else "0")
         try:
-            await query.message.delete()
+            await query.message.delete()   # убрать «Сделали позже?»
         except Exception:
             pass
         await query.answer("Спасибо")
-        who = person["name"] if person else "?"
-        await tell_boss(
-            context.bot,
-            f"🌙 *Разбор дня — {who}*\n"
-            f"Задача: {task['title']}  `#{tid}`\n"
-            f"*Почему не сделал:*\n{why}\n\n"
-            f"*Сделал позже:* {'да ✅' if later else 'нет ❌'}")
+        await _debrief_maybe_finish(context.bot, task["person_id"])
         return
+
+
+async def _debrief_maybe_finish(bot, pid):
+    """Если по всем задачам разбора отвечено — один сводный отчёт в Штаб и
+    чистим промпт. Иначе обновляем промпт, убирая отвеченные задачи."""
+    raw = C.state_get(f"dbrf_tasks_{pid}") or ""
+    tids = [int(x) for x in raw.split(",") if x]
+    if not tids:
+        return
+    remaining = [t for t in tids if not C.state_get(f"dbrf_late_{t}")]
+    prompt = C.state_get(f"dbrf_msg_{pid}")
+
+    if remaining:
+        # ещё не всё — перерисуем промпт с оставшимися задачами
+        if prompt and ":" in prompt:
+            chat, mid = prompt.split(":", 1)
+            left_tasks = [C.task_get(t) for t in remaining if C.task_get(t)]
+            try:
+                await bot.edit_message_reply_markup(
+                    chat_id=int(chat), message_id=int(mid),
+                    reply_markup=_debrief_kb(left_tasks))
+            except Exception:
+                pass
+        return
+
+    # все ответы собраны — сводный отчёт
+    person = C.person_by_id(pid)
+    who = person["name"] if person else "?"
+    lines = [f"🌙 *Разбор дня — {who}*"]
+    for t in tids:
+        task = C.task_get(t)
+        if not task:
+            continue
+        why = C.state_get(f"dbrf_why_{t}") or "—"
+        later = C.state_get(f"dbrf_late_{t}") == "1"
+        lines.append(f"\n*{_short(task['title'], 50)}*  `#{t}`\n"
+                     f"Почему: {why}\nСделал позже: {'да ✅' if later else 'нет ❌'}")
+    await tell_boss(bot, "\n".join(lines))
+
+    # чистим промпт и состояние
+    if prompt and ":" in prompt:
+        chat, mid = prompt.split(":", 1)
+        try:
+            await bot.delete_message(chat_id=int(chat), message_id=int(mid))
+        except Exception:
+            pass
+    C.state_set(f"dbrf_msg_{pid}", "")
+    C.state_set(f"dbrf_tasks_{pid}", "")
+    for t in tids:
+        C.state_set(f"dbrf_why_{t}", "")
+        C.state_set(f"dbrf_late_{t}", "")
 
 
 async def _handle_explain_reason(bot, msg, key, text):
@@ -1474,7 +1518,7 @@ async def _handle_explain_reason(bot, msg, key, text):
         return
     tid = flow["tid"]
     EXPLAIN_FLOW.pop(key, None)
-    C.state_set(f"explain_{tid}", text[:800])
+    C.state_set(f"dbrf_why_{tid}", text[:800])
     # убрать вопрос и ответ, оставить только кнопки «сделал позже»
     for mid in flow.get("trash", []) + [msg.message_id]:
         try:
@@ -1682,21 +1726,33 @@ async def day_debrief(bot):
         tasks = C.tasks_unfinished_today(person["id"])
         if not tasks:
             continue
-        chat = person["chat_id"]
-        rows = [[InlineKeyboardButton(f"✍️ {_short(t['title'], 35)}",
-                                      callback_data=f"crew:explain:{t['id']}")]
-                for t in tasks]
-        who = mention(person)
+        pid, chat, who = person["id"], person["chat_id"], mention(person)
+        tids = [str(t["id"]) for t in tasks]
+        # сброс прошлых ответов и старого промпта
+        for t in tasks:
+            C.state_set(f"dbrf_why_{t['id']}", "")
+            C.state_set(f"dbrf_late_{t['id']}", "")
         try:
-            await bot.send_message(
-                chat_id=chat,
-                text=f"🌙 *Разбор дня.* {who}, по этим задачам ответьте: "
-                     f"почему не сделали и сделали ли позже.",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=InlineKeyboardMarkup(rows))
+            sent = await bot.send_message(
+                chat_id=chat, text=_debrief_text(who), parse_mode=ParseMode.MARKDOWN,
+                reply_markup=_debrief_kb(tasks))
+            C.state_set(f"dbrf_msg_{pid}", f"{chat}:{sent.message_id}")
+            C.state_set(f"dbrf_tasks_{pid}", ",".join(tids))
         except Exception as e:
             logger.error("Разбор дня в группу %s не ушёл: %s", chat, e)
         await asyncio.sleep(0.3)
+
+
+def _debrief_text(who):
+    return (f"🌙 *Разбор дня.* {who}, по этим задачам ответьте: "
+            f"почему не сделали и сделали ли позже.")
+
+
+def _debrief_kb(tasks):
+    rows = [[InlineKeyboardButton(f"✍️ {_short(t['title'], 35)}",
+                                  callback_data=f"crew:explain:{t['id']}")]
+            for t in tasks]
+    return InlineKeyboardMarkup(rows)
 
 
 async def _migrate_cards_once(bot):
@@ -1770,6 +1826,32 @@ async def clearall_cmd(update, context):
     C.crew_init_db()
     await update.message.reply_text("Чищу все чаты…")
     await _wipe_all(context.bot)
+
+
+async def reset_cmd(update, context):
+    """/reset — чистый старт: снять все открытые задачи, убрать их карточки из
+    групп, отменить недоставленные отложенные. Постоянные задания сохраняются
+    и пойдут заново по расписанию. Только владелец."""
+    if not is_allowed(update.effective_user.id):
+        return
+    C.crew_init_db()
+    await update.message.reply_text("Сбрасываю открытые задачи…")
+    n = 0
+    for task in C.tasks_open():
+        try:
+            await remove_card(context.bot, task)   # убрать карточку + служебные
+        except Exception:
+            pass
+        n += 1
+        await asyncio.sleep(0.1)
+    C.reset_open_tasks()
+    # сброс состояний разбора дня
+    for p in C.people_all():
+        C.state_set(f"dbrf_msg_{p['id']}", "")
+        C.state_set(f"dbrf_tasks_{p['id']}", "")
+    await update.message.reply_text(
+        f"✅ Чистый старт: снято {n} задач. Постоянные задания пойдут заново "
+        "по расписанию.")
 
 
 async def _startup_jobs(bot):

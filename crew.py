@@ -487,6 +487,19 @@ def cancel_open_for_fix(fix_id, keep_id=None):
         cur.close()
 
 
+def reset_open_tasks():
+    """Чистый старт: снимает все открытые задачи (включая недоставленные
+    отложенные). Постоянные задания в crew_fix не трогаются — они спавнятся
+    заново по расписанию с корректным временем."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE crew_tasks SET status='cancelled' WHERE status = ANY(%s)",
+                    (list(OPEN_STATUSES),))
+        n = cur.rowcount
+        cur.close()
+    return n
+
+
 def cancel_open_in_chat(chat_id):
     """Снимает все открытые задачи в чате — после полной чистки, чтобы не
     осталось «висящих» задач без карточки (иначе провалятся зря)."""

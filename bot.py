@@ -30,7 +30,7 @@ from crewbot import (
     crew_loop, crew_here_cmd, hq_here_cmd, crew_list_cmd, task_cmd,
     fix_cmd, fix_list_cmd, fix_del_cmd, today_cmd, debts_cmd, done_cmd,
     cancel_cmd, crew_button, catch_problem_note, clear_cmd, board_cmd,
-    clearall_cmd,
+    clearall_cmd, reset_cmd,
 )
 from crewmenu import menu_cmd, menu_button, catch_draft_input, handle_panel
 from crew import crew_init_db
@@ -195,6 +195,7 @@ def main():
     app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(CommandHandler("clear", clear_cmd))
     app.add_handler(CommandHandler("clearall", clearall_cmd))
+    app.add_handler(CommandHandler("reset", reset_cmd))
     app.add_handler(CommandHandler("board", board_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CallbackQueryHandler(crew_button, pattern=r"^crew:"))
