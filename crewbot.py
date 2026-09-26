@@ -1181,24 +1181,9 @@ async def _finish_report(bot, msg, flow):
         stored += f"\nИтог: {flow['left']}"
     C.task_update(tid, report_text=stored[:800], report_done=True,
                   status=C.STATUS_DONE, done_at=now_local())
-    # задача закрыта отчётом — убираем карточку из группы, чат чистый
+    # задача закрыта отчётом — убираем карточку из группы, чат чистый.
+    # В Штаб real-time НЕ шлём — итог попадёт в дневной отчёт (в 7:00).
     await remove_card(bot, C.task_get(tid))
-
-    who = person["name"] if person else "?"
-    report = (f"📋 *{who}* отчитался по задаче\n"
-              f"{task['title']}  `#{tid}`\n\n"
-              f"*Сделано:*\n{flow['done']}")
-    if flow.get("left"):
-        report += f"\n\n*Итог:*\n{flow['left']}"
-    chat = hq_chat_id()
-    if not chat:
-        return
-    try:
-        await _send_photos(bot, chat, flow.get("photos"),
-                           caption=f"Фото к отчёту по задаче #{tid}")
-    except Exception as e:
-        logger.error("Фото отчёта #%s не ушло: %s", tid, e)
-    await send_md(bot, chat, report)
 
 
 # --- «Готово» с отчётом о выполнении --------------------------------------------
@@ -1249,25 +1234,9 @@ async def _finish_done(bot, msg, flow):
                   report_text=f"Сделано: {flow['what']}"[:800], report_done=True)
     # снять открытые дубли этой же задачи, чтобы не висели как «ждёт»
     C.cancel_open_siblings(task["person_id"], task["title"], tid)
-    # задача выполнена — убираем карточку из группы, чат чистый
+    # задача выполнена — убираем карточку из группы, чат чистый.
+    # В Штаб real-time НЕ шлём — выполнение попадёт в дневной отчёт (в 7:00).
     await remove_card(bot, C.task_get(tid))
-
-    who = person["name"] if person else "?"
-    mark = "✅ (с опозданием)" if late else "✅"
-    report = (f"{mark} *{who}* закрыл(а) задачу\n"
-              f"{task['title']}  `#{tid}`\n\n"
-              f"*Сделано:*\n{flow['what']}")
-    if late:
-        report += f"\n\nСрок был {C.fmt_due(task['due_at'])}"
-    chat = hq_chat_id()
-    if not chat:
-        return
-    try:
-        await _send_photos(bot, chat, flow.get("photos"),
-                           caption=f"Фото к задаче #{tid}")
-    except Exception as e:
-        logger.error("Фото к закрытию #%s не ушло: %s", tid, e)
-    await send_md(bot, chat, report)
 
 
 # --- перенос срока по просьбе исполнителя ---------------------------------------
@@ -1647,7 +1616,8 @@ async def chase(bot):
         prio = task.get("priority") or 1
         C.task_update(task["id"], told_boss=True, status=C.STATUS_FAILED,
                       penalty=prio)
-        # провал: убрать напоминание/служебные, карточка остаётся с «ПРОВАЛЕНО»
+        # провал: убрать напоминание/служебные, карточка остаётся с «ПРОВАЛЕНО».
+        # В Штаб real-time НЕ шлём — провал попадёт в дневной отчёт (в 7:00).
         await _purge_task_msgs(bot, task["id"])
         await refresh_card(bot, task["id"])
         try:
@@ -1655,24 +1625,6 @@ async def chase(bot):
                                          message_id=task["message_id"])
         except Exception:
             pass
-        await tell_boss(
-            bot,
-            f"❌ Провалено — *{person['name']}* +{prio} штрафной(ых)\n"
-            f"{task['title']}\n"
-            f"Срок был {C.fmt_due(task['due_at'])}, ответа нет.  "
-            f"`#{task['id']}`")
-        await asyncio.sleep(0.3)
-
-    # Ждём отчёт, а срок отчёта прошёл — сообщаем владельцу (один раз).
-    for task in C.tasks_awaiting_report():
-        C.task_update(task["id"], report_nagged=True)
-        person = C.person_by_id(task["person_id"])
-        await tell_boss(
-            bot,
-            f"⏰ Нет отчёта по задаче\n"
-            f"{task['title']}  `#{task['id']}`\n"
-            f"Исполнитель: {person['name'] if person else '?'}\n"
-            f"Ждали до {C.fmt_due(task['report_due'])}.")
         await asyncio.sleep(0.3)
 
 
@@ -1706,7 +1658,7 @@ async def weekly_report(bot):
 
 
 async def morning_report(bot):
-    """Утренний план на день в Штаб по всем группам — раз в день."""
+    """Утро 7:00: итоги за вчера + план на сегодня. Раз в день."""
     now = now_local()
     if now.hour != C.MORNING_REPORT_HOUR:
         return
@@ -1715,7 +1667,10 @@ async def morning_report(bot):
         return
     C.state_set("last_morning", today)
 
-    # утром — план на день (список задач)
+    # итоги за прошедший день (что сделано / провалено по каждому)
+    yday = (now - timedelta(days=1)).date()
+    await tell_boss(bot, render_tasks(C.tasks_for_day(yday), "📊 Итоги за вчера"))
+    # план на сегодня
     await tell_boss(bot, render_plan_day())
 
 
@@ -1881,10 +1836,9 @@ async def crew_loop(bot):
             C.crew_init_db()
             await deliver_scheduled(bot)
             await spawn_fixed(bot)
-            await morning_report(bot)
+            await morning_report(bot)   # 7:00: итоги за вчера + план на сегодня
             await chase(bot)
-            await evening_report(bot)
-            await day_debrief(bot)
+            await day_debrief(bot)      # 22:00: разбор невыполненного в группах
             await weekly_report(bot)
         except Exception:
             logger.exception("Контроль задач: сбой цикла")
