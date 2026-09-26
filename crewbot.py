@@ -1026,12 +1026,15 @@ async def _send_report_button(bot, task, person, text):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton(
         "📋 Отчёт", callback_data=f"crew:report:{task['id']}")]])
     try:
-        await bot.send_message(chat_id=chat, text=text,
-                               parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        sent = await bot.send_message(chat_id=chat, text=text,
+                                      parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
     except BadRequest:
-        await bot.send_message(chat_id=chat, text=text, reply_markup=kb)
+        sent = await bot.send_message(chat_id=chat, text=text, reply_markup=kb)
     except Exception as e:
         logger.error("Кнопка «Отчёт» по #%s не ушла: %s", task["id"], e)
+        return
+    # сообщение с кнопкой удалится, когда задача закроется (remove_card → purge)
+    _track_answer(task["id"], chat, sent.message_id)
 
 
 async def _mark_boss_msg(query, note):
@@ -1084,15 +1087,17 @@ async def _handle_report_actions(update, context, action, task):
 
     if action == "report":
         # «Отчёт» жмёт исполнитель в своей группе
-        REPORT_FLOW[(query.message.chat_id, query.from_user.id)] = {
-            "tid": tid, "step": "done", "done": "", "photos": [], "left": ""}
+        flow = {"tid": tid, "step": "done", "done": "", "photos": [],
+                "left": "", "trash": []}
+        REPORT_FLOW[(query.message.chat_id, query.from_user.id)] = flow
         await query.answer("Отчёт")
-        await context.bot.send_message(
+        sent = await context.bot.send_message(
             chat_id=query.message.chat_id,
             message_thread_id=query.message.message_thread_id,
             text=f"{mention(person) if person else ''} отчёт по «{task['title']}».\n"
                  "Что сделали? Опишите одним сообщением.",
             reply_markup=ForceReply(selective=bool(person and person.get("username"))))
+        flow["trash"].append(sent.message_id)
         return
 
 
