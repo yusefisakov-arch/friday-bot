@@ -1798,23 +1798,24 @@ async def reset_cmd(update, context):
     if not is_allowed(update.effective_user.id):
         return
     C.crew_init_db()
-    await update.message.reply_text("Сбрасываю открытые задачи…")
+    await update.message.reply_text("Сбрасываю задачи и чищу карточки…")
     n = 0
-    for task in C.tasks_open():
+    # убрать карточки всех живых задач в группах — и открытые, и «ПРОВАЛЕНО»
+    for task in C.tasks_with_live_cards():
         try:
-            await remove_card(context.bot, task)   # убрать карточку + служебные
+            await remove_card(context.bot, task)
         except Exception:
             pass
         n += 1
         await asyncio.sleep(0.1)
-    C.reset_open_tasks()
+    C.reset_open_tasks()   # открытые → cancelled (проваленные уже закрыты)
     # сброс состояний разбора дня
     for p in C.people_all():
         C.state_set(f"dbrf_msg_{p['id']}", "")
         C.state_set(f"dbrf_tasks_{p['id']}", "")
     await update.message.reply_text(
-        f"✅ Чистый старт: снято {n} задач. Постоянные задания пойдут заново "
-        "по расписанию.")
+        f"✅ Чистый старт: убрано {n} карточек (открытые + проваленные), "
+        "открытые задачи сняты. Постоянные задания пойдут заново по расписанию.")
 
 
 async def _startup_jobs(bot):

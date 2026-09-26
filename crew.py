@@ -487,6 +487,19 @@ def cancel_open_for_fix(fix_id, keep_id=None):
         cur.close()
 
 
+def tasks_with_live_cards():
+    """Задачи с карточкой в группе, которую надо убрать при чистке: открытые
+    и проваленные (у выполненных/снятых карточка уже удалена)."""
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(f"SELECT {TASK_COLS} FROM crew_tasks "
+                    "WHERE message_id IS NOT NULL AND status = ANY(%s)",
+                    (list(OPEN_STATUSES) + [STATUS_FAILED],))
+        rows = cur.fetchall()
+        cur.close()
+    return [dict(zip(TASK_KEYS, r)) for r in rows]
+
+
 def reset_open_tasks():
     """Чистый старт: снимает все открытые задачи (включая недоставленные
     отложенные). Постоянные задания в crew_fix не трогаются — они спавнятся
