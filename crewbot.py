@@ -102,6 +102,9 @@ async def send_task_card(bot, task, person):
         await bot.pin_chat_message(chat_id=person["chat_id"],
                                    message_id=msg.message_id,
                                    disable_notification=True)
+        # Telegram шлёт служебное «закрепил сообщение» следующим id — помечаем
+        # его на удаление вместе с карточкой, чтобы не оставался хвост.
+        _track_answer(task["id"], person["chat_id"], msg.message_id + 1)
     except Exception as e:
         logger.debug("Карточку #%s не закрепить: %s", task["id"], e)
     return msg
