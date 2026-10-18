@@ -107,6 +107,15 @@ USE_SITE_PRICE_M2_FILTER = False
 # 1000 под фильтр сайта; без него выборка шире, и упираться в потолок рано.
 SCAN_LIMIT = 3000
 
+# Штатный цикл берёт широкую страницу, а не 40, как раньше: между проверками
+# свежих объявлений может появиться куда больше, и короткая выдача их теряла.
+PER_CHECK_LIMIT = 200
+# Сколько максимум отправляем за один заход — защита от флуд-бана Telegram.
+# Остаток НЕ теряется: он не помечается просмотренным и уходит в следующий
+# заход. Раньше здесь стоял жёсткий срез picked[:10], и всё сверх десяти
+# молча помечалось просмотренным и пропадало навсегда.
+MAX_SEND_PER_CHECK = 40
+
 # Курсы для объявлений не в евро. Точность здесь не нужна: это отсечка по
 # потолку, а не оценка. Занижены в нашу пользу, чтобы не потерять пограничное.
 FX_TO_EUR = {"UNIT_EUR": 1.0, "UNIT_USD": 0.92, "UNIT_MDL": 1 / 19.5}
@@ -819,10 +828,15 @@ def object_key(ad):
     Без площади ключа нет — тогда объявление просто идёт как новое.
     """
     area = ad.get("area")
-    if not area:
+    street = re.sub(r"[^a-zа-яё0-9]+", "", (ad.get("street") or "").lower())
+    # Без площади или без улицы ключ слишком грубый: разные квартиры одного
+    # района с той же комнатностью и площадью схлопнулись бы в один объект,
+    # и вторую бот счёл бы дублем и не показал. У постов каналов улицы нет
+    # вовсе — там это било по каждому второму. Лучше показать как новую
+    # (в худшем случае повтор), чем молча проглотить подходящий вариант.
+    if not area or not street:
         return None
     sector = (ad.get("sector") or "").strip().lower()
-    street = re.sub(r"[^a-zа-яё0-9]+", "", (ad.get("street") or "").lower())
     rooms = (ad.get("rooms") or "").strip()
     return f"{sector}|{street}|{rooms}|{round(float(area))}"
 
@@ -927,34 +941,44 @@ def strip_markup(text):
     return text.replace("*", "").replace("_", "")
 
 
-async def send_ad(bot, sub, ad, below_pct, median):
+async def send_ad(bot, sub, ad, below_pct, median, force=False, as_drop=None):
     """Отправляет объявление. Возвращает False, если оно уже уходило в чат.
 
     Повторно объявление уходит только одним способом — если цена стала ниже
     той, с которой его присылали в прошлый раз. Тогда в карточке видно,
     сколько скинули.
+
+    force=True — показать несмотря на то, что объявление уже присылали
+    (для свода /radar_top: это сводка лучшего, а не живая лента).
+    as_drop — если задана прежняя цена, карточка идёт как «подешевело»
+    в соответствующую тему, даже в режиме force.
     """
     fingerprint = ad_fingerprint(ad)
     price = ad.get("price")
-    was = radar_sent_price(sub["id"], ad["id"], fingerprint)
 
-    price_drop = None
-    if was is not None:
-        if price and was and price < was:
-            price_drop = was          # подешевело — шлём ещё раз
-        else:
-            logger.info(f"Радар: {ad['id']} уже отправляли, пропускаю")
-            return False
+    if as_drop is not None:
+        price_drop = as_drop
+    elif force:
+        price_drop = None             # свод: шлём как есть, без дедупликации
+    else:
+        was = radar_sent_price(sub["id"], ad["id"], fingerprint)
+        price_drop = None
+        if was is not None:
+            if price and was and price < was:
+                price_drop = was          # подешевело — шлём ещё раз
+            else:
+                logger.info(f"Радар: {ad['id']} уже отправляли, пропускаю")
+                return False
 
-    # Тот же объект мог прийти из другого источника под другим номером.
-    if price_drop is None:
-        verdict, was_eur = object_check(sub["chat_id"], ad)
-        if verdict == "dup":
-            logger.info(f"Радар: {ad['id']} — этот объект уже показывали "
-                        f"из другого источника, пропускаю")
-            return False
-        if verdict == "drop" and ad.get("currency") == "UNIT_EUR":
-            price_drop = was_eur
+        # Тот же объект мог прийти из другого источника под другим номером.
+        if price_drop is None:
+            verdict, was_eur = object_check(sub["chat_id"], ad)
+            if verdict == "dup":
+                logger.info(f"Радар: {ad['id']} — этот объект уже показывали "
+                            f"из другого источника, пропускаю")
+                return False
+            if verdict == "drop" and ad.get("currency") == "UNIT_EUR":
+                price_drop = was_eur
 
     key = DROPS_TOPIC if price_drop else topic_key(sub, ad)
     topic_id = await ensure_topic(bot, sub["chat_id"], key)
@@ -1018,20 +1042,22 @@ async def radar_check_all(bot, force=False):
             market = radar_get_market(category_id)
 
             try:
-                ads, _ = await fetch_ads(session, category_id, sub["filters"], limit=40)
+                ads, _ = await fetch_ads(session, category_id, sub["filters"],
+                                         limit=PER_CHECK_LIMIT)
             except Exception as e:
                 logger.error(f"Радар #{sub['id']}: {e}")
                 continue
 
-            fresh = radar_new_ids(sub["id"], [a["id"] for a in ads])
-            if not fresh:
+            fresh_set = set(radar_new_ids(sub["id"], [a["id"] for a in ads]))
+            if not fresh_set:
                 continue
-            fresh_set = set(fresh)
 
             picked = []
+            examined = []          # свежие, которые полностью разобрали
             for ad in ads:
                 if ad["id"] not in fresh_set:
                     continue
+                examined.append(ad["id"])
                 if not is_real_sale(ad):
                     continue
                 if not m2_ok(ad, sub.get("max_price_m2")):
@@ -1042,8 +1068,14 @@ async def radar_check_all(bot, force=False):
                 below, median = evaluate(ad, market)
                 picked.append((ad, below, median))
 
+            # За один заход отправляем не больше лимита — иначе флуд-бан.
+            # Остаток откладываем: не помечаем просмотренным, и он уйдёт
+            # в следующий заход, а не пропадёт.
+            to_send = picked[:MAX_SEND_PER_CHECK]
+            deferred = {ad["id"] for ad, _, _ in picked[MAX_SEND_PER_CHECK:]}
+
             # свежие идут первыми — отправляем в хронологическом порядке
-            for ad, below, median in reversed(picked[:10]):
+            for ad, below, median in reversed(to_send):
                 try:
                     if await send_ad(bot, sub, ad, below, median):
                         sent_total += 1
@@ -1051,9 +1083,11 @@ async def radar_check_all(bot, force=False):
                     logger.error(f"Радар #{sub['id']}: не отправилось {ad['id']}: {e}")
                 await asyncio.sleep(0.5)
 
-            radar_mark_seen(sub["id"], fresh)
-            logger.info(f"Радар #{sub['id']} «{sub['name']}»: новых {len(fresh)}, "
-                        f"из них подходящих {len(picked)}")
+            # Просмотренным помечаем всё разобранное, КРОМЕ отложенного остатка.
+            radar_mark_seen(sub["id"], [i for i in examined if i not in deferred])
+            logger.info(f"Радар #{sub['id']} «{sub['name']}»: новых {len(fresh_set)}, "
+                        f"подходящих {len(picked)}, отправка до {len(to_send)}, "
+                        f"отложено {len(deferred)}")
             await asyncio.sleep(1)
 
     return sent_total
@@ -1439,13 +1473,20 @@ async def radar_check_cmd(update, context):
     )
 
 
-async def radar_top_cmd(update, context):
-    """/radar_top [N] — лучшие находки среди того, что уже висит на 999.md.
+TOP_PAUSE_SECONDS = 2.0   # между карточками свода, чтобы не словить флуд-бан
 
-    Первый прогон помечает всю текущую выдачу просмотренной, чтобы не завалить
-    чат сотней сообщений. Эта команда позволяет разобрать тот запас руками:
-    проходит по всей базе подписки, считает отставание от медианы и показывает
-    самые выгодные. Просмотренность не трогает.
+
+async def radar_top_cmd(update, context):
+    """/radar_top [N] — свод лучшего ОТДЕЛЬНО по каждой теме.
+
+    Не общий топ по всей категории, а топ-N внутри каждой темы: лучшее по
+    €/м² в каждом районе, лучшее по Домам и, отдельно, самые подешевевшие.
+    У разных районов разный уровень цен, поэтому «лучшее» ищется внутри
+    своей темы, а не из общей кучи — иначе весь топ собирался бы из одного
+    самого дешёвого района.
+
+    Это сводка, а не живая лента: объявление показывается, даже если его уже
+    присылали раньше. Просмотренность при этом не трогается.
     """
     from core import is_allowed
     if not is_allowed(update.effective_user.id):
@@ -1463,22 +1504,23 @@ async def radar_top_cmd(update, context):
         return
 
     await update.message.reply_text(
-        f"Перебираю всё, что сейчас висит на 999.md, и отбираю по {top_n} лучших "
-        "в каждой категории. Минуту, сэр."
+        f"Собираю свод: по {top_n} лучших в каждом районе, по Домам и отдельно "
+        "подешевевшее. Минуту, сэр."
     )
+
+    # key темы -> [(per_m2, below, median, ad, sub), ...]; подешевевшие — отдельно
+    by_topic = {}
+    drops = []     # (скидка €, below, median, ad, was, sub)
 
     async with aiohttp.ClientSession() as session:
         for sub in subs:
             category_id = sub["category_id"]
-
             age = radar_market_age_hours(category_id)
             if age is None or age > MARKET_TTL_HOURS:
                 await rebuild_market(category_id)
             market = radar_get_market(category_id)
 
-            scored = []
-            skip = 0
-            total = None
+            skip, total = 0, None
             while total is None or (skip < total and skip < SCAN_LIMIT):
                 try:
                     ads, total = await fetch_ads(session, category_id, sub["filters"],
@@ -1496,38 +1538,54 @@ async def radar_top_cmd(update, context):
                     if category_id != CAT_HOUSES and not floor_ok(ad):
                         continue
                     below, median = evaluate(ad, market)
-                    # В /radar_top сортируем по цене за квадрат: самое дешёвое
-                    # по отношению к площади — сверху.
-                    scored.append((below, median, ad))
+
+                    # Подешевевшее против прошлой отправки — в свою тему.
+                    was = radar_sent_price(sub["id"], ad["id"], ad_fingerprint(ad))
+                    cur = price_eur(ad)
+                    if (was and was > 0 and cur and cur < was
+                            and ad.get("currency") == "UNIT_EUR"):
+                        drops.append((was - ad["price"], below, median, ad, was, sub))
+                        continue
+
+                    key = topic_key(sub, ad)
+                    per_m2 = price_per_m2_any(ad)
+                    by_topic.setdefault(key, []).append(
+                        (per_m2 if per_m2 is not None else 1e9, below, median, ad, sub))
                 skip += 200
                 await asyncio.sleep(0.5)
 
-            scored.sort(key=lambda x: price_per_m2_any(x[2]) or 1e9)
-            if not scored:
-                await update.message.reply_text(
-                    f"*{sub['name']}*: подходящих под порог сейчас нет.",
-                    parse_mode="Markdown")
-                continue
+    async def put(sub, ad, below, median, as_drop=None):
+        try:
+            await send_ad(context.bot, sub, ad, below, median,
+                          force=True, as_drop=as_drop)
+        except Exception as e:
+            wait = getattr(e, "retry_after", None)
+            if wait:
+                await asyncio.sleep(float(wait) + 1)
+            else:
+                logger.error(f"Радар top: не отправилось {ad['id']}: {e}")
+        await asyncio.sleep(TOP_PAUSE_SECONDS)
 
-            await update.message.reply_text(
-                f"*{sub['name']}* — подходящих {len(scored)}, показываю {min(top_n, len(scored))}",
-                parse_mode="Markdown")
+    summary = []
+    # Районы (и Дома) — по алфавиту, внутри каждой темы самое дешёвое по €/м².
+    for key in sorted(by_topic):
+        items = sorted(by_topic[key], key=lambda x: x[0])[:top_n]
+        for _, below, median, ad, sub in items:
+            await put(sub, ad, below, median)
+        summary.append(f"• {key}: {len(items)}")
 
-            shown = 0
-            for below, median, ad in scored:
-                if shown >= top_n:
-                    break
-                try:
-                    if await send_ad(context.bot, sub, ad, below, median):
-                        shown += 1
-                except Exception as e:
-                    logger.error(f"Радар top: не отправилось {ad['id']}: {e}")
-                await asyncio.sleep(0.5)
+    # Подешевевшее — самые крупные скидки сверху, в тему «Подешевело».
+    drops.sort(key=lambda x: x[0], reverse=True)
+    for _, below, median, ad, was, sub in drops[:top_n]:
+        await put(sub, ad, below, median, as_drop=was)
+    if drops[:top_n]:
+        summary.append(f"• {DROPS_TOPIC}: {len(drops[:top_n])}")
 
-            if shown == 0:
-                await update.message.reply_text(
-                    f"*{sub['name']}*: всё подходящее уже присылал раньше.",
-                    parse_mode="Markdown")
+    if not summary:
+        await update.message.reply_text("Подходящего под фильтры сейчас нет, сэр.")
+        return
+    await update.message.reply_text(
+        "Свод разложен по темам, сэр:\n" + "\n".join(summary), parse_mode="Markdown")
 
 
 async def radar_toggle_cmd(update, context):
