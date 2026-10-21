@@ -93,7 +93,7 @@ CATEGORY_TITLES = {CAT_APARTMENTS: "Квартиры", CAT_HOUSES: "Дома"}
 # Главный критерий отбора: цена за квадратный метр. Всё, что стоит не дороже
 # этой планки, попадает в радар — медиана района осталась только справкой
 # в карточке, порогом она больше не служит.
-MAX_PRICE_PER_M2 = 1700
+MAX_PRICE_PER_M2 = 1600
 FILTER_PRICE_M2, F_PRICE_M2 = 4251, 1385
 
 # Считаем €/м² сами, а фильтр сайта по цене за квадрат не используем.
@@ -230,16 +230,17 @@ def radar_sync_filters():
     names = {category_id: name for name, category_id in PRESETS}
     updated_ids = []
     for sub in radar_list_subs():
-        fresh = base_filters(sub["category_id"], max_price=DEFAULT_MAX_PRICE)
+        cap = max_price_for(sub["category_id"])
+        fresh = base_filters(sub["category_id"], max_price=cap)
         name = names.get(sub["category_id"], sub["name"])
         if fresh == sub["filters"] and name == sub["name"] \
-                and sub["max_price"] == DEFAULT_MAX_PRICE:
+                and sub["max_price"] == cap:
             continue
         with db_conn() as conn:
             cur = conn.cursor()
             cur.execute("UPDATE radar_subs SET filters=%s, name=%s, max_price=%s "
                         "WHERE id=%s",
-                        (json.dumps(fresh), name, DEFAULT_MAX_PRICE, sub["id"]))
+                        (json.dumps(fresh), name, cap, sub["id"]))
             cur.close()
         updated_ids.append(sub["id"])
     if updated_ids:
@@ -1107,7 +1108,15 @@ async def radar_seed(sub_id):
 
 # --- телеграм-хендлеры ----------------------------------------------------------
 
-DEFAULT_MAX_PRICE = 70000
+# Потолок общей цены — свой у каждой категории: дом с участком закономерно
+# дороже квартиры, и общий потолок либо душил дома, либо пропускал дорогие квартиры.
+MAX_PRICE_BY_CAT = {CAT_APARTMENTS: 40000, CAT_HOUSES: 200000}
+DEFAULT_MAX_PRICE = max(MAX_PRICE_BY_CAT.values())
+
+
+def max_price_for(category_id):
+    return MAX_PRICE_BY_CAT.get(category_id, DEFAULT_MAX_PRICE)
+
 DEFAULT_DISCOUNT = 0
 
 PRESETS = [
@@ -1137,9 +1146,10 @@ async def radar_here(update, context):
             continue
         # Тема выбирается по району в момент отправки, поэтому у самой
         # подписки её нет.
-        filters = base_filters(category_id, max_price=DEFAULT_MAX_PRICE)
+        cap = max_price_for(category_id)
+        filters = base_filters(category_id, max_price=cap)
         sub_id = radar_add_sub(name, chat.id, None, category_id,
-                               DEFAULT_MAX_PRICE, DEFAULT_DISCOUNT, filters)
+                               cap, DEFAULT_DISCOUNT, filters)
         try:
             total = await radar_seed(sub_id)
         except Exception as e:
@@ -1151,10 +1161,12 @@ async def radar_here(update, context):
         await update.message.reply_text("Радар здесь уже настроен, сэр.")
         return
 
-    price_txt = f"{DEFAULT_MAX_PRICE:,}".replace(",", " ")
+    price_txt = ", ".join(
+        f"{name.lower()} до {max_price_for(cat):,}".replace(",", " ") + " €"
+        for name, cat in PRESETS)
     await update.message.reply_text(
         "Радар настроен, сэр.\n\n" + "\n".join(created) +
-        f"\n\nПотолок цены {price_txt} €, не дороже {MAX_PRICE_PER_M2} €/м². "
+        f"\n\nПотолок цены: {price_txt}, не дороже {MAX_PRICE_PER_M2} €/м². "
         "Всё, что есть сейчас, помечено как просмотренное — буду присылать "
         "только новое и подешевевшее.\n\n"
         "Дальше: /radar_topics — завести темы по районам, "
@@ -1695,8 +1707,9 @@ def channel_wanted(ad):
     if not is_real_sale(ad):
         return False, "не продажа"
     eur = price_eur(ad)
-    if eur and eur > DEFAULT_MAX_PRICE:
-        return False, f"дороже {DEFAULT_MAX_PRICE} €"
+    cap = max_price_for(CAT_HOUSES if ad.get("is_house") else CAT_APARTMENTS)
+    if eur and eur > cap:
+        return False, f"дороже {cap} €"
     if not m2_ok(ad):
         return False, "дороже потолка за квадрат"
     if not ad.get("is_house") and not floor_ok(ad):
