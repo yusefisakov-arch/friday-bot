@@ -57,6 +57,7 @@ F_STREET, F_IMAGES, F_ROOMS, F_AREA, F_FLOOR = 10, 14, 241, 244, 248
 F_FLOORS_TOTAL = 249
 F_COND_APT, F_COND_HOUSE = 253, 254
 F_ROOMS_HOUSE = 588
+F_DESCRIPTION = 13
 
 FILTER_OFFER, FILTER_REGION, FILTER_PRICE = 16, 32, 9441
 FILTER_COND_APT, FILTER_COND_HOUSE = 1074, 1207
@@ -593,7 +594,8 @@ def base_filters(category_id, max_price=None, bad_condition=False, extra=None,
 async def fetch_ads(session, category_id, filters, limit=40, skip=0, sort="SORT_ADS_DATE_DESC"):
     rooms_feature = F_ROOMS_HOUSE if category_id == CAT_HOUSES else F_ROOMS
     wanted = (F_PRICE, F_SECTOR, F_LOCALITY, F_STREET, F_IMAGES,
-              rooms_feature, F_AREA, F_FLOOR, F_FLOORS_TOTAL, F_AUTHOR, F_OFFER)
+              rooms_feature, F_AREA, F_FLOOR, F_FLOORS_TOTAL, F_AUTHOR, F_OFFER,
+              F_DESCRIPTION)
     fields = " ".join(f"f{fid}: feature(id: {fid}) {{ value }}" for fid in wanted)
     payload = {
         "subCategoryId": category_id,
@@ -643,6 +645,7 @@ def _parse_ad(raw, rooms_feature):
         "sector": _text(raw, F_SECTOR),
         "locality": _text(raw, F_LOCALITY),
         "street": _text(raw, F_STREET),
+        "text": _text(raw, F_DESCRIPTION),
         "images": [str(i) for i in images] if isinstance(images, list) else [],
         "photo_url": None,
         "url": f"https://999.md/ru/{raw['id']}",
@@ -654,6 +657,30 @@ def _parse_ad(raw, rooms_feature):
 # Верхние этажи не берём: под крышей течёт и топит, а предпоследний страдает
 # следом. Цоколь, подвал и мансарда не годятся под сдачу.
 BAD_FLOOR_WORDS = ("цокол", "подвал", "мансард", "пентхаус", "subsol", "demisol", "mansard")
+
+
+# Нужны только однокомнатные. Отдельного варианта «1 комната + ливинг» на
+# 999.md нет: такие квартиры выставляют то однокомнатными, то двухкомнатными.
+# Поэтому двухкомнатную берём, только если в тексте прямо сказано, что это
+# одна комната плюс ливинг — просто «гостиная» есть почти в любой двушке.
+RE_ONE_PLUS_LIVING = re.compile(
+    r"евро.?двушк|euro.?2"
+    r"|\b1\s*(?:комнат\w*|спальн\w*|camer[aă]|dormitor)\s*(?:\+|и|cu|с|plus)\s*"
+    r"(?:living|ливинг|гостин\w*|salon)"
+    r"|\bодн[аоу]\w*\s+(?:спальн\w*|комнат\w*)\s*(?:\+|и|с)\s*(?:living|ливинг|гостин\w*)"
+    r"|\b1\s*\+\s*(?:living|ливинг)\b",
+    re.I)
+
+
+def rooms_ok(ad):
+    """True для однокомнатной или «1 комната + ливинг»."""
+    rooms = (ad.get("rooms") or "").strip()
+    if rooms.startswith("1"):
+        return True
+    if rooms and not rooms.startswith("2"):
+        return False
+    text = f"{ad.get('title') or ''} {ad.get('text') or ''}"
+    return bool(RE_ONE_PLUS_LIVING.search(text))
 
 
 def floor_ok(ad):
@@ -1063,7 +1090,7 @@ async def radar_check_all(bot, force=False):
                     continue
                 if not m2_ok(ad, sub.get("max_price_m2")):
                     continue
-                if category_id != CAT_HOUSES and not floor_ok(ad):
+                if category_id != CAT_HOUSES and not (floor_ok(ad) and rooms_ok(ad)):
                     continue
                 # Медиана теперь только справка в карточке, а не условие.
                 below, median = evaluate(ad, market)
@@ -1341,7 +1368,7 @@ async def dump_everything(bot, report=None):
                         continue
                     if not m2_ok(ad, sub.get("max_price_m2")):
                         continue
-                    if category_id != CAT_HOUSES and not floor_ok(ad):
+                    if category_id != CAT_HOUSES and not (floor_ok(ad) and rooms_ok(ad)):
                         continue
                     below, median = evaluate(ad, market)
                     try:
@@ -1547,7 +1574,7 @@ async def radar_top_cmd(update, context):
                         continue
                     if not m2_ok(ad, sub.get("max_price_m2")):
                         continue
-                    if category_id != CAT_HOUSES and not floor_ok(ad):
+                    if category_id != CAT_HOUSES and not (floor_ok(ad) and rooms_ok(ad)):
                         continue
                     below, median = evaluate(ad, market)
 
@@ -1714,6 +1741,8 @@ def channel_wanted(ad):
         return False, "дороже потолка за квадрат"
     if not ad.get("is_house") and not floor_ok(ad):
         return False, "неподходящий этаж"
+    if not ad.get("is_house") and not rooms_ok(ad):
+        return False, "не однокомнатная"
     return True, ""
 
 
